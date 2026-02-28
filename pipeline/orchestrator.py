@@ -6,12 +6,53 @@ import json
 import openai
 
 import config
-from pipeline.models import PipelineRequest, PipelineResponse
-from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, build_augmentation
+from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown
+from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_openai, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft
 from pipeline.arbiter import parse_gpt3, apply_edits
+
+
+def compute_confidence(claim_table: list) -> ConfidenceBreakdown:
+    """Compute a confidence breakdown from a list of ClaimEntry objects."""
+    total = len(claim_table)
+    if total == 0:
+        return ConfidenceBreakdown()
+
+    observed = inference = hypothesis = unsupported = user_provided = 0
+    for entry in claim_table:
+        cat = (entry.category if isinstance(entry.category, str) else str(entry.category)).lower().strip()
+        if cat in ("supported", "observed"):
+            observed += 1
+        elif cat == "inference":
+            inference += 1
+        elif cat == "hypothesis":
+            hypothesis += 1
+        elif cat == "unsupported":
+            unsupported += 1
+        elif cat == "user-provided":
+            user_provided += 1
+
+    observed_pct = round((observed / total) * 100, 1)
+    if observed_pct >= 70:
+        label = "High"
+    elif observed_pct >= 40:
+        label = "Medium"
+    elif observed_pct >= 20:
+        label = "Low"
+    else:
+        label = "Unknown"
+
+    return ConfidenceBreakdown(
+        observed_pct=observed_pct,
+        inference_pct=round((inference / total) * 100, 1),
+        hypothesis_pct=round((hypothesis / total) * 100, 1),
+        unsupported_pct=round((unsupported / total) * 100, 1),
+        user_provided_pct=round((user_provided / total) * 100, 1),
+        total_claims=total,
+        confidence_label=label,
+    )
 
 
 def run_pipeline(req: PipelineRequest) -> PipelineResponse:
@@ -60,10 +101,12 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     # ---- Activation bypass ----
     if is_activation_phrase(gpt1_output):
         return PipelineResponse(
+            prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=True,
             gpt2_raw="(bypassed)", claim_table=[], violations=[], gpt2_verdict="PASS",
             final_verdict="PASS", final_result=gpt1_output,
             prompt_flags=flags, sanitizer_applied=False,
+            confidence=compute_confidence([]),
             **empty_response,
         )
 
@@ -79,11 +122,13 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     # ---- If GPT-2 PASS: done ----
     if gpt2_verdict == "PASS":
         return PipelineResponse(
+            prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict="PASS",
             final_verdict="PASS", final_result=sanitized_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            confidence=compute_confidence(claim_table),
             **empty_response,
         )
 
@@ -97,6 +142,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
         if re_verdict == "PASS":
             return PipelineResponse(
+                prompt_version=PROMPT_VERSION,
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
                 gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
                 gpt2_verdict=gpt2_verdict,
@@ -107,6 +153,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
                 final_verdict="PASS", final_result=sanitized_output,
                 prompt_flags=flags, sanitizer_applied=True,
+                confidence=compute_confidence(re_ct),
             )
         # Auto-repair didn't clear it -- fall through to arbiter below
 
@@ -134,6 +181,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     # ---- Decision: BLOCK ----
     if arbiter_decision == "BLOCK":
         return PipelineResponse(
+            prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict,
@@ -144,6 +192,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
             final_verdict="FAIL", final_result="NO PASS",
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            confidence=compute_confidence(claim_table),
         )
 
     # ---- Decision: ALLOW_AS_UNKNOWN_ONLY ----
@@ -163,6 +212,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
 
         return PipelineResponse(
+            prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict,
@@ -175,6 +225,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             final_verdict=re_verdict,
             final_result=rewrite_output if re_verdict == "PASS" else "NO PASS",
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            confidence=compute_confidence(re_ct),
         )
 
     # ---- Decision: ALLOW_WITH_EDITS ----
@@ -204,6 +255,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
 
     return PipelineResponse(
+        prompt_version=PROMPT_VERSION,
         gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
         gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
         gpt2_verdict=gpt2_verdict,
@@ -216,4 +268,5 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         final_verdict=re_verdict,
         final_result=rewrite_output if re_verdict == "PASS" else "NO PASS",
         prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+        confidence=compute_confidence(re_ct),
     )

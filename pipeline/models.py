@@ -22,6 +22,16 @@ class EditEntry(BaseModel):
     replacement: str
 
 
+class ConfidenceBreakdown(BaseModel):
+    observed_pct: float = 0.0
+    inference_pct: float = 0.0
+    hypothesis_pct: float = 0.0
+    unsupported_pct: float = 0.0
+    user_provided_pct: float = 0.0
+    total_claims: int = 0
+    confidence_label: str = "Unknown"  # "High", "Medium", "Low", "Unknown"
+
+
 class PipelineRequest(BaseModel):
     prompt: str
     gpt1_system: str = ""
@@ -30,6 +40,7 @@ class PipelineRequest(BaseModel):
 
 
 class PipelineResponse(BaseModel):
+    prompt_version: str = ""
     gpt1_input: str
     gpt1_output: str
     bypassed: bool
@@ -58,6 +69,8 @@ class PipelineResponse(BaseModel):
     # Prompt routing / sanitizer metadata
     prompt_flags: Optional[dict] = None
     sanitizer_applied: bool = False
+    # Confidence scoring
+    confidence: ConfidenceBreakdown = ConfidenceBreakdown()
 
 
 class StressRequest(BaseModel):

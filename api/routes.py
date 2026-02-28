@@ -5,8 +5,10 @@ import json
 import os
 from collections import defaultdict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
+
+from api.rate_limit import rate_limit_dependency
 
 import config
 from pipeline.models import OpenAIConfig, PipelineRequest, PipelineResponse, StressRequest
@@ -58,7 +60,7 @@ def get_openai_config():
 
 # ---- Pipeline ----
 
-@router.post("/api/pipeline", response_model=PipelineResponse)
+@router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 def pipeline_endpoint(req: PipelineRequest):
     if len(req.prompt) > config.MAX_PROMPT_LENGTH:
         raise HTTPException(
@@ -73,7 +75,7 @@ def pipeline_endpoint(req: PipelineRequest):
 
 # ---- Stress test ----
 
-@router.post("/api/stress")
+@router.post("/api/stress", dependencies=[Depends(rate_limit_dependency)])
 def stress_endpoint(req: StressRequest):
     """Run stress harness inline -- returns streaming NDJSON progress + final score."""
     if not config.has_api_key():

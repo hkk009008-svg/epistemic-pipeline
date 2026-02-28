@@ -11,6 +11,8 @@ build_augmentation() function that adapts all three prompts based on
 prompt-routing flags.
 """
 
+PROMPT_VERSION = "7.1.0"  # Audit v7, first minor release with this codebase
+
 ACTIVATION_PATTERNS = [
     r"active\.$",
     r"Production active\.",

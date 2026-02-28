@@ -78,6 +78,25 @@ UI_HTML = """
   .cat-uns { color: #ef5350; }
   .cat-usr { color: #4fc3f7; }
 
+  /* Confidence bar */
+  .conf-bar-wrap { margin-top: 10px; }
+  .conf-bar-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: 4px; }
+  .conf-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: #1a1a1a; }
+  .conf-bar .seg { height: 100%; transition: width 0.3s ease; }
+  .conf-bar .seg-obs { background: #66bb6a; }
+  .conf-bar .seg-inf { background: #ffb74d; }
+  .conf-bar .seg-hyp { background: #ce93d8; }
+  .conf-bar .seg-uns { background: #ef5350; }
+  .conf-bar .seg-usr { background: #4fc3f7; }
+  .conf-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 11px; color: #888; }
+  .conf-legend .lg { display: flex; align-items: center; gap: 4px; }
+  .conf-legend .lg .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .conf-badge { display: inline-block; margin-top: 6px; padding: 2px 10px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  .conf-badge.high { background: #1b3a1b; color: #66bb6a; border: 1px solid #2e5e2e; }
+  .conf-badge.medium { background: #3a2e15; color: #ffb74d; border: 1px solid #5e4a22; }
+  .conf-badge.low { background: #3a1a1a; color: #ef5350; border: 1px solid #5e2e2e; }
+  .conf-badge.unknown { background: #1a1a1a; color: #888; border: 1px solid #333; }
+
   /* Violations */
   .viol { margin-top: 8px; }
   .viol-item { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #ef5350; margin-bottom: 4px; }
@@ -435,6 +454,30 @@ function renderClaimTable(claims) {
   return h + '</table>';
 }
 
+function renderConfidence(conf) {
+  if (!conf || conf.total_claims === 0) return '';
+  let h = '<div class="conf-bar-wrap">';
+  h += '<div class="conf-bar-label">Confidence Breakdown (' + conf.total_claims + ' claims)</div>';
+  h += '<div class="conf-bar">';
+  if (conf.observed_pct > 0) h += '<div class="seg seg-obs" style="width:' + conf.observed_pct + '%" title="Observed: ' + conf.observed_pct + '%"></div>';
+  if (conf.inference_pct > 0) h += '<div class="seg seg-inf" style="width:' + conf.inference_pct + '%" title="Inference: ' + conf.inference_pct + '%"></div>';
+  if (conf.hypothesis_pct > 0) h += '<div class="seg seg-hyp" style="width:' + conf.hypothesis_pct + '%" title="Hypothesis: ' + conf.hypothesis_pct + '%"></div>';
+  if (conf.unsupported_pct > 0) h += '<div class="seg seg-uns" style="width:' + conf.unsupported_pct + '%" title="Unsupported: ' + conf.unsupported_pct + '%"></div>';
+  if (conf.user_provided_pct > 0) h += '<div class="seg seg-usr" style="width:' + conf.user_provided_pct + '%" title="User-provided: ' + conf.user_provided_pct + '%"></div>';
+  h += '</div>';
+  h += '<div class="conf-legend">';
+  if (conf.observed_pct > 0) h += '<span class="lg"><span class="dot" style="background:#66bb6a"></span>Observed ' + conf.observed_pct + '%</span>';
+  if (conf.inference_pct > 0) h += '<span class="lg"><span class="dot" style="background:#ffb74d"></span>Inference ' + conf.inference_pct + '%</span>';
+  if (conf.hypothesis_pct > 0) h += '<span class="lg"><span class="dot" style="background:#ce93d8"></span>Hypothesis ' + conf.hypothesis_pct + '%</span>';
+  if (conf.unsupported_pct > 0) h += '<span class="lg"><span class="dot" style="background:#ef5350"></span>Unsupported ' + conf.unsupported_pct + '%</span>';
+  if (conf.user_provided_pct > 0) h += '<span class="lg"><span class="dot" style="background:#4fc3f7"></span>User-provided ' + conf.user_provided_pct + '%</span>';
+  h += '</div>';
+  const lblCls = (conf.confidence_label || 'unknown').toLowerCase();
+  h += '<div class="conf-badge ' + lblCls + '">Confidence: ' + esc(conf.confidence_label) + '</div>';
+  h += '</div>';
+  return h;
+}
+
 function renderViolations(viols) {
   if (!viols || viols.length === 0) return '<div class="no-viol">No violations detected</div>';
   let h = '<div class="viol">';
@@ -514,7 +557,7 @@ async function go(e) {
     }
 
     // ---- GPT-2 results ----
-    let g2body = renderClaimTable(d.claim_table) + renderViolations(d.violations);
+    let g2body = renderClaimTable(d.claim_table) + renderConfidence(d.confidence) + renderViolations(d.violations);
     ab('g2', 'GPT-2 (Verifier) &mdash; ' + d.gpt2_verdict, g2body);
 
     if (d.gpt2_verdict === 'PASS') {
@@ -578,7 +621,7 @@ async function go(e) {
       ab('rw', 'GPT-1 (Rewrite)', esc(d.rewrite_output));
 
       // Re-verification
-      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderViolations(d.rewrite_violations);
+      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderConfidence(d.confidence) + renderViolations(d.rewrite_violations);
       ab('rv', 'GPT-2 (Re-verify) &mdash; ' + d.rewrite_verdict, rvBody);
     }
 

@@ -15,6 +15,7 @@ PIPELINE_URL = os.getenv("PIPELINE_URL", "http://localhost:8000")
 PORT = int(os.getenv("PORT", "8000"))
 MAX_REWRITE_LOOPS = 1
 MAX_PROMPT_LENGTH = 10000
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
 
 # ---- Runtime overrides (set via /api/openai/config) ----
 _runtime: dict = {}
