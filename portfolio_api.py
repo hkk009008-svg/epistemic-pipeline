@@ -8,8 +8,13 @@ import os
 import re
 import statistics
 import time
+import traceback
 from collections import Counter, defaultdict
+from pathlib import Path
 import openai
+
+_BASE_DIR = Path(__file__).resolve().parent
+_TESTS_PATH = _BASE_DIR / "tests.json"
 
 app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline")
 
@@ -914,16 +919,21 @@ def _compute_pss_metrics(results: list) -> dict:
 
 @app.post("/api/stress")
 def run_stress_test(req: StressRequest):
-    """Run stress harness inline — returns streaming JSONL progress + final score."""
+    """Run stress harness inline — returns streaming NDJSON progress + final score."""
+
+    # Pre-flight checks — return errors as NDJSON so callers never see plain-text 500
+    def _error_stream(msg: str):
+        def _gen():
+            yield json.dumps({"type": "error", "error": msg}) + "\n"
+        return StreamingResponse(_gen(), media_type="application/x-ndjson")
+
     if "api_key" not in _openai_config:
-        raise HTTPException(status_code=400, detail="Set your OpenAI API key first.")
+        return _error_stream("Set your OpenAI API key first.")
 
-    # Load tests
-    tests_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests.json")
-    if not os.path.exists(tests_path):
-        raise HTTPException(status_code=404, detail="tests.json not found next to portfolio_api.py")
+    if not _TESTS_PATH.exists():
+        return _error_stream(f"tests.json not found at {_TESTS_PATH}")
 
-    with open(tests_path, "r", encoding="utf-8") as f:
+    with open(_TESTS_PATH, "r", encoding="utf-8") as f:
         tests = json.load(f)
 
     if req.category:
@@ -938,7 +948,7 @@ def run_stress_test(req: StressRequest):
             tests.extend(by_cat[cat][:req.count])
 
     if not tests:
-        raise HTTPException(status_code=400, detail="No matching test cases.")
+        return _error_stream("No matching test cases.")
 
     def generate():
         results = []
@@ -1696,8 +1706,10 @@ async function runStress() {
     });
 
     if (!resp.ok) {
-      const err = await resp.json();
-      log.innerHTML += '<span class="fail">ERROR: ' + esc(err.detail || 'Request failed') + '</span>';
+      const txt = await resp.text();
+      let msg = 'HTTP ' + resp.status;
+      try { msg += ': ' + JSON.parse(txt).detail; } catch(_) { msg += ': ' + txt.slice(0, 200); }
+      log.innerHTML += '<span class="fail">ERROR: ' + esc(msg) + '</span>';
       btn.disabled = false;
       return;
     }
@@ -1725,6 +1737,8 @@ async function runStress() {
           log.scrollTop = log.scrollHeight;
         } else if (d.type === 'summary') {
           renderStressSummary(d, scoreDiv);
+        } else if (d.type === 'error') {
+          log.innerHTML += '<span class="fail">ERROR: ' + esc(d.error || 'Unknown error') + '</span>\\n';
         }
       }
     }
