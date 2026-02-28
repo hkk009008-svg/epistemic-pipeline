@@ -1,1 +1,1 @@
-web: /opt/venv/bin/uvicorn app:app --host 0.0.0.0 --port $PORT
+web: uvicorn portfolio_api:app --host 0.0.0.0 --port ${PORT:-8000}
