@@ -19,9 +19,12 @@ _TESTS_PATH = _BASE_DIR / "tests.json"
 app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline")
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 def ui():
-    return UI_HTML
+    return HTMLResponse(
+        content=UI_HTML,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 # =====================================================
