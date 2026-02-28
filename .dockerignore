@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+n8n-workflows
+start.sh
+stress_harness.py
+APP_RATING.svg
+*.md
+.gitignore
+.dockerignore
