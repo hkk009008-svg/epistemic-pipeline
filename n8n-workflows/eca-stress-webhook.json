@@ -20,7 +20,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.PIPELINE_BASE_URL || 'http://localhost:8000') + '/api/stress' }}",
+        "url": "http://localhost:8000/api/stress",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ category: ($json.body && $json.body.category) || null, count: ($json.body && $json.body.count) || null }) }}",
