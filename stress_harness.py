@@ -293,7 +293,11 @@ def print_report(results: List[RunResult], metrics: Dict[str, float], score: flo
 def main():
     parser = argparse.ArgumentParser(description="Pipeline Stress Harness")
     parser.add_argument("--tests", default="tests.json", help="Path to test cases JSON")
-    parser.add_argument("--api", default="http://localhost:8000/api/pipeline", help="Pipeline API URL")
+    parser.add_argument(
+        "--api",
+        default=os.getenv("PIPELINE_URL", "http://localhost:8000") + "/api/pipeline",
+        help="Pipeline API URL (or set PIPELINE_URL env var)",
+    )
     parser.add_argument("--category", default=None, help="Run only this category")
     parser.add_argument("--count", type=int, default=None, help="Max tests per category")
     parser.add_argument("--timeout", type=int, default=180, help="Timeout per test (seconds)")

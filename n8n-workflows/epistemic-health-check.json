@@ -30,7 +30,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://localhost:8000/api/pipeline",
+        "url": "={{ $env.PIPELINE_URL || 'http://localhost:8000' }}/api/pipeline",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "{\"prompt\": \"What is a 401(k) retirement plan?\"}",

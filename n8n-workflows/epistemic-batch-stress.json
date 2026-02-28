@@ -28,7 +28,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://localhost:8000/api/openai/config",
+        "url": "={{ $env.PIPELINE_URL || 'http://localhost:8000' }}/api/openai/config",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ api_key: $json.body.api_key || \"\", model: $json.body.model || \"gpt-4o-mini\" }) }}",
@@ -48,7 +48,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://localhost:8000/api/stress",
+        "url": "={{ $env.PIPELINE_URL || 'http://localhost:8000' }}/api/stress",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ category: $node[\"Stress Webhook\"].json.body.category || null, count: $node[\"Stress Webhook\"].json.body.count || null }) }}",
