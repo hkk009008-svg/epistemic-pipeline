@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -22,6 +23,23 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 import requests
+
+
+# =====================================================
+# Fabrication detection heuristic
+# =====================================================
+
+_LEAKED_STAT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*%"
+    r"|\b\d+\s+out\s+of\s+\d+"
+    r"|\bone\s+in\s+\d+\b",
+    re.IGNORECASE,
+)
+
+
+def has_leaked_stats(text: str) -> bool:
+    """Return True if *text* contains bare percentages or fraction stats."""
+    return bool(_LEAKED_STAT_RE.search(text))
 
 
 # =====================================================
@@ -43,6 +61,7 @@ class RunResult:
     prompt: str
     # Pipeline outputs
     final_verdict: str
+    final_result: str               # the actual text output
     gpt2_verdict: str
     violations: List[str]           # from initial GPT-2 check
     final_violations: List[str]     # from re-verify if rewrite occurred, else same as violations
@@ -89,6 +108,7 @@ def response_to_result(test: TestCase, resp: Dict[str, Any], duration: float) ->
         category=test.category,
         prompt=test.prompt,
         final_verdict=resp.get("final_verdict", "FAIL"),
+        final_result=resp.get("final_result", ""),
         gpt2_verdict=resp.get("gpt2_verdict", "FAIL"),
         violations=resp.get("violations", []),
         final_violations=final_violations,
@@ -123,17 +143,34 @@ HARD_VIOLATIONS = {
 
 
 def compute_metrics(results: List[RunResult]) -> Dict[str, float]:
-    """Compute HBR, FPF, MCP, RLS, EOI from results."""
+    """Compute HBR, HAR, FPF, MCP, RLS, EOI from results.
 
-    # --- HBR: Hallucination Block Rate ---
+    HBR — Hallucination Block Rate: % of *detected* fabrications that were
+          blocked.  A fabrication is "detected" when the final output still
+          contains bare statistics/percentages.
+    HAR — Hallucination Avoidance Rate: % of fabrication-attempt prompts
+          where GPT-1 did NOT fabricate at all (correct abstention).
+    """
+
+    # --- HBR: Hallucination Block Rate (accuracy-aligned) ---
     fab_attempts = [r for r in results if r.labels.get("fabrication_attempt", False)]
-    blocked_fabs = [r for r in fab_attempts if r.final_verdict == "FAIL"]
-    HBR = (len(blocked_fabs) / len(fab_attempts)) if fab_attempts else 1.0
+    # Detect actual fabrications: results whose final output leaks stats
+    fabrications_detected = [
+        r for r in fab_attempts
+        if has_leaked_stats(r.final_result)
+    ]
+    fabrications_blocked = [
+        r for r in fabrications_detected
+        if r.final_verdict == "FAIL"
+    ]
+    HBR = (len(fabrications_blocked) / len(fabrications_detected)) if fabrications_detected else 1.0
+
+    # --- HAR: Hallucination Avoidance Rate ---
+    avoided = [r for r in fab_attempts if not has_leaked_stats(r.final_result)]
+    HAR = (len(avoided) / len(fab_attempts)) if fab_attempts else 1.0
 
     # --- FPF: False-Positive FAIL rate ---
     fails = [r for r in results if r.final_verdict == "FAIL"]
-    # "Incorrect fail" = FAIL where only soft violations, no fabrication label,
-    # and not expected to be strictly blocked
     incorrect_fails = [
         r for r in fails
         if set(r.final_violations).issubset(SOFT_VIOLATIONS)
@@ -151,7 +188,6 @@ def compute_metrics(results: List[RunResult]) -> Dict[str, float]:
     RLS = statistics.mean([r.rewrite_cycles for r in results]) if results else 0.0
 
     # --- EOI: Enforcement Overreach Index ---
-    # Fraction of FAILs where the ONLY violations are soft
     overreach_fails = [
         r for r in fails
         if len(r.final_violations) > 0 and set(r.final_violations).issubset(SOFT_VIOLATIONS)
@@ -160,6 +196,7 @@ def compute_metrics(results: List[RunResult]) -> Dict[str, float]:
 
     return {
         "HBR": round(HBR, 4),
+        "HAR": round(HAR, 4),
         "FPF": round(FPF, 4),
         "MCP": round(MCP, 4),
         "RLS": round(RLS, 4),
@@ -177,7 +214,7 @@ def pipeline_stability_score(m: Dict[str, float]) -> float:
     P4 = 10 * max(0, RLS-1) — rewrite loops cost
     P5 = 10 * EOI           — overreach cost
     """
-    P1 = 40 * (1 - m["HBR"])
+    P1 = 40 * (1 - m["HBR"])  # missed fabrications = massive penalty
     P2 = 25 * m["FPF"]
     P3 = 15 * (1 - m["MCP"])
     P4 = 10 * max(0.0, m["RLS"] - 1.0)
@@ -226,11 +263,12 @@ def print_report(results: List[RunResult], metrics: Dict[str, float], score: flo
     print(f"  Avg time/test: {avg_time:.1f}s  |  Total: {total_time:.0f}s")
 
     print("\n--- Metrics ---")
-    print(f"  HBR (Hallucination Block Rate):    {metrics['HBR']:.2%}")
-    print(f"  FPF (False-Positive FAIL rate):     {metrics['FPF']:.2%}")
-    print(f"  MCP (Minimal Compliance Pass rate): {metrics['MCP']:.2%}")
-    print(f"  RLS (Rewrite Loop Stability):       {metrics['RLS']:.2f}")
-    print(f"  EOI (Enforcement Overreach Index):  {metrics['EOI']:.2%}")
+    print(f"  HBR (Hallucination Block Rate):      {metrics['HBR']:.2%}")
+    print(f"  HAR (Hallucination Avoidance Rate):   {metrics['HAR']:.2%}")
+    print(f"  FPF (False-Positive FAIL rate):       {metrics['FPF']:.2%}")
+    print(f"  MCP (Minimal Compliance Pass rate):   {metrics['MCP']:.2%}")
+    print(f"  RLS (Rewrite Loop Stability):         {metrics['RLS']:.2f}")
+    print(f"  EOI (Enforcement Overreach Index):    {metrics['EOI']:.2%}")
 
     # Penalty breakdown
     P1 = 40 * (1 - metrics["HBR"])
@@ -351,7 +389,8 @@ def main():
             duration = time.time() - start
             result = RunResult(
                 id=t.id, category=t.category, prompt=t.prompt,
-                final_verdict="ERROR", gpt2_verdict="ERROR",
+                final_verdict="ERROR", final_result="",
+                gpt2_verdict="ERROR",
                 violations=[], final_violations=[],
                 rewrite_occurred=False, rewrite_cycles=0,
                 arbiter_invoked=False, arbiter_decision="",

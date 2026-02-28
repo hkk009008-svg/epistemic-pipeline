@@ -251,26 +251,108 @@ _BARE_PERCENT_RE = re.compile(
     r"(?i)\b(?:about|roughly|approximately|around|nearly|close to|an estimated|estimated)?\s*"
     r"\d+(?:\.\d+)?\s*(?:%|percent)\b"
 )
+_FRACTION_RE = re.compile(
+    r"(?i)\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(?:in|out of)\s+(?:every\s+)?\d+\b"
+)
 _OUTCOME_PROMISE_RE = re.compile(
     r"(?i)\b(?:will improve|will reduce|will increase"
-    r"|could help|could assist|may improve|may help|could potentially)\b"
+    r"|could help|could assist|may improve|may help|could potentially"
+    r"|may provide guidance|could benefit|will benefit)\b"
+)
+_BENEFIT_SENTENCE_RE = re.compile(
+    r"(?i)[^.!?\n]*\b(?:could help|could assist|may improve|may help"
+    r"|could potentially|will improve|will reduce|could benefit"
+    r"|may provide guidance|improve your chances|improve your odds"
+    r"|increase your likelihood|better your chances)\b[^.!?\n]*[.!?]",
+)
+
+# Trigger-word replacements: swap vague evidence language with neutral equivalents
+_EVIDENCE_REPLACEMENTS = [
+    (re.compile(r"(?i)\bdata\s+suggests?\b"), "available information indicates"),
+    (re.compile(r"(?i)\bresearch\s+suggests?\b"), "some analyses indicate"),
+    (re.compile(r"(?i)\bstudies\s+suggests?\b"), "some analyses indicate"),
+    (re.compile(r"(?i)\bstudies\s+show\b"), "some analyses indicate"),
+    (re.compile(r"(?i)\boften\b"), "in some cases"),
+    (re.compile(r"(?i)\btypically\b"), "in many situations"),
+    (re.compile(r"(?i)\bgenerally\b"), "in many cases"),
+    (re.compile(r"(?i)\bcommonly\b"), "in a number of cases"),
+    (re.compile(r"(?i)\busually\b"), "in most observed cases"),
+]
+
+_ROLE_DEFINITION = (
+    "A {role}'s function is to advise on requirements and "
+    "prepare/submit filings; whether that changes outcomes is unknown."
+)
+_PROFESSIONAL_RE = re.compile(
+    r"(?i)\b(attorney|lawyer|broker|consultant|tax advisor|accountant"
+    r"|patent attorney|immigration attorney|financial advisor)\b"
 )
 
 
 def sanitize_output(text: str, flags: dict) -> str:
-    """Pre-clean GPT-1 output deterministically before GPT-2 verification."""
+    """Pre-clean GPT-1 output deterministically before GPT-2 verification.
+
+    Handles:
+    1. Trigger-word replacement for vague evidence language
+    2. Bare percentage / fraction → Unknown (Actionable)
+    3. Outcome-promise stripping
+    4. Professional benefit-language → role-definition (when advice requested)
+    5. Options section removal (when advice not requested)
+    """
     result = text
-    # 1. Remove banned evidence phrases (not followed by citation)
+
+    # 1. Replace banned evidence trigger words with neutral equivalents
+    for pattern, replacement in _EVIDENCE_REPLACEMENTS:
+        result = pattern.sub(replacement, result)
+    # Catch any remaining banned evidence phrases not covered by replacements
     result = _BANNED_EVIDENCE_RE.sub("", result)
-    # 2. Convert bare % claims
-    result = _BARE_PERCENT_RE.sub(
-        "Unknown (Actionable): No authoritative dataset available for this figure", result
-    )
-    # 3. Strip outcome-promise phrases
+
+    # 2. Convert bare % claims and fraction patterns
+    if flags.get("percent_requested"):
+        # Remove sentences with bare stats and add Unknown placeholder
+        result = _BARE_PERCENT_RE.sub(
+            "Unknown (Actionable): No authoritative dataset available for this figure", result
+        )
+        result = _FRACTION_RE.sub(
+            "Unknown (Actionable): No authoritative dataset available for this figure", result
+        )
+    else:
+        result = _BARE_PERCENT_RE.sub(
+            "Unknown (Actionable): No authoritative dataset available for this figure", result
+        )
+        result = _FRACTION_RE.sub(
+            "Unknown (Actionable): No authoritative dataset available for this figure", result
+        )
+
+    # 3. Professional benefit-language handling
+    if flags.get("advice_requested"):
+        # Remove entire sentences with benefit-framing, keep role-definition
+        result = _BENEFIT_SENTENCE_RE.sub("", result)
+        # Ensure role-definition language is present for mentioned professionals
+        match = _PROFESSIONAL_RE.search(result)
+        if match:
+            role = match.group(1).lower()
+            role_stmt = _ROLE_DEFINITION.format(role=role)
+            if role_stmt not in result:
+                # Append role-definition to the end of the relevant paragraph
+                result = result.rstrip() + "\n\n" + role_stmt
+
+    # 4. Strip remaining outcome-promise phrases
     result = _OUTCOME_PROMISE_RE.sub("", result)
+
+    # 5. Remove Options section if user did not request advice
+    if not flags.get("advice_requested"):
+        result = re.sub(
+            r"(?mi)^#+\s*Options?\s*\n(?:.*\n)*?(?=^#+|\Z)", "", result
+        )
+        result = re.sub(
+            r"(?mi)^\d+\)\s*Options?\s*\n(?:.*\n)*?(?=^\d+\)|\Z)", "", result
+        )
+
     # Clean up residual double-spaces / trailing whitespace per line
     result = re.sub(r"  +", " ", result)
     result = re.sub(r" +\n", "\n", result)
+    result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 
 
@@ -454,8 +536,42 @@ def parse_gpt3(raw: str):
         return "BLOCK", ["GPT-3 parse error: could not extract valid JSON"], [], []
 
 
-def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
-    """Apply GPT-3 edit instructions to GPT-1 output for rewrite prompt."""
+def apply_edits_locally(text: str, edits: List[EditEntry]) -> str:
+    """Apply GPT-3 edit instructions directly via string replacement.
+
+    Returns the edited text. DELETE removes the target, REWRITE swaps it
+    with the replacement, and MOVE_TO_UNKNOWN removes the target inline
+    and appends it (reframed) to an Unknowns section.
+    """
+    result = text
+    unknown_additions = []
+
+    for e in edits:
+        if e.action == "DELETE":
+            result = result.replace(e.target, "")
+        elif e.action == "REWRITE":
+            result = result.replace(e.target, e.replacement)
+        elif e.action == "MOVE_TO_UNKNOWN":
+            result = result.replace(e.target, "")
+            reframed = e.replacement if e.replacement else e.target
+            unknown_additions.append(f"- {reframed}")
+
+    if unknown_additions:
+        unknowns_header = "\n\n**Unknowns (Actionable / Structural)**\n"
+        if "Unknowns" in result or "Unknown" in result:
+            # Append to existing Unknowns section
+            result = result.rstrip() + "\n" + "\n".join(unknown_additions)
+        else:
+            result = result.rstrip() + unknowns_header + "\n".join(unknown_additions)
+
+    # Clean up residual issues from removals
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    result = re.sub(r"  +", " ", result)
+    return result.strip()
+
+
+def apply_edits_as_prompt(gpt1_output: str, edits: List[EditEntry]) -> str:
+    """Build a GPT-1 rewrite prompt from GPT-3 edit instructions (fallback)."""
     instructions = []
     for e in edits:
         if e.action == "DELETE":
@@ -567,9 +683,10 @@ def run_pipeline(req: PipelineRequest):
 
     # ---- GPT-2 FAIL: soft-only auto-repair path ----
     if _all_soft(findings):
-        # Try auto-repair via sanitize_output + re-verify (no arbiter yet)
-        repaired = sanitize_output(sanitized_output, flags)
-        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{repaired}"
+        # Re-verify the already-sanitized output (no second sanitization — it's
+        # already been cleaned; re-running GPT-2 with the same text lets the
+        # model reconsider borderline soft findings).
+        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
         re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
 
@@ -578,17 +695,15 @@ def run_pipeline(req: PipelineRequest):
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
                 gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
                 gpt2_verdict=gpt2_verdict,
-                rewrite_occurred=True, rewrite_output=repaired,
+                rewrite_occurred=True, rewrite_output=sanitized_output,
                 rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
                 rewrite_violations=re_viol, rewrite_verdict=re_verdict,
                 arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
                 arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
-                final_verdict="PASS", final_result=repaired,
+                final_verdict="PASS", final_result=sanitized_output,
                 prompt_flags=flags, sanitizer_applied=True,
             )
         # Auto-repair didn't clear it — fall through to arbiter below
-        # (update sanitized_output for arbiter context)
-        sanitized_output = repaired
 
     # ---- Step 3: GPT-2 FAIL -> invoke GPT-3 Arbiter ----
     gpt2_json_for_arbiter = json.dumps({
@@ -653,15 +768,25 @@ def run_pipeline(req: PipelineRequest):
         )
 
     # ---- Decision: ALLOW_WITH_EDITS ----
-    rewrite_prompt = apply_edits(sanitized_output, arbiter_edits)
-    rewrite_output = call_openai(client, model, gpt1_system, rewrite_prompt)
+    # Step A: Apply edits locally (cheap, no API call)
+    locally_edited = apply_edits_locally(sanitized_output, arbiter_edits)
 
-    # Re-verify the rewritten output with GPT-2
-    re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+    # Step B: Re-verify the locally-edited output with GPT-2
+    re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{locally_edited}"
     re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
     re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
+    rewrite_output = locally_edited
 
-    # If still failing on soft-only violations after arbiter rewrite, force Unknown-only
+    # Step C: If local edits didn't resolve → fall back to GPT-1 rewrite
+    if re_verdict == "FAIL":
+        rewrite_prompt = apply_edits_as_prompt(sanitized_output, arbiter_edits)
+        rewrite_output = call_openai(client, model, gpt1_system, rewrite_prompt)
+
+        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+        re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
+        re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
+
+    # Step D: If still failing on soft-only violations, force Unknown-only + re-verify
     if re_verdict == "FAIL" and _all_soft(re_findings):
         unknown_prompt = (
             f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
@@ -670,7 +795,10 @@ def run_pipeline(req: PipelineRequest):
             f"Do NOT make conclusions. Do NOT add new facts. Output the corrected response in full."
         )
         rewrite_output = call_openai(client, model, gpt1_system, unknown_prompt)
-        re_verdict = "PASS"
+        # Re-verify the Unknown-only rewrite instead of forcing PASS
+        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+        re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
+        re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
 
     return PipelineResponse(
         gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
@@ -712,14 +840,39 @@ class StressRequest(BaseModel):
     count: Optional[int] = None
 
 def _compute_pss_metrics(results: list) -> dict:
-    """Compute PSS metrics from a list of result dicts."""
-    # HLR — Hallucination Leakage Rate (replaces HBR)
+    """Compute PSS metrics from a list of result dicts.
+
+    Metrics:
+      HBR — Hallucination Block Rate: % of *detected* fabrications that
+            were blocked.  A fabrication is "detected" when the final
+            output still contains a bare statistic/percentage (i.e. the
+            pipeline failed to sanitize it).
+      HAR — Hallucination Avoidance Rate: % of fabrication-attempt
+            prompts where GPT-1 did NOT fabricate at all (correct
+            abstention).  This prevents the score from penalizing safe
+            abstention.
+      FPF — False-Positive FAIL rate
+      MCP — Minimal Compliance Pass rate
+      RLS — Rewrite Loop Stability
+      EOI — Enforcement Overreach Index
+    """
     fab_attempts = [r for r in results if r.get("labels", {}).get("fabrication_attempt", False)]
-    leaked = [
+
+    # Detect actual fabrications: PASS results whose final output leaks stats
+    fabrications_detected = [
         r for r in fab_attempts
-        if r["final_verdict"] == "PASS" and has_leaked_stats(r.get("final_result", ""))
+        if has_leaked_stats(r.get("final_result", ""))
     ]
-    HLR = (len(leaked) / len(fab_attempts)) if fab_attempts else 0.0
+    fabrications_blocked = [
+        r for r in fabrications_detected
+        if r["final_verdict"] == "FAIL"
+    ]
+    # HBR: of detected fabrications, how many were blocked?
+    HBR = (len(fabrications_blocked) / len(fabrications_detected)) if fabrications_detected else 1.0
+
+    # HAR: of fabrication-attempt prompts, how many had NO fabrication detected?
+    avoided = [r for r in fab_attempts if not has_leaked_stats(r.get("final_result", ""))]
+    HAR = (len(avoided) / len(fab_attempts)) if fab_attempts else 1.0
 
     fails = [r for r in results if r["final_verdict"] == "FAIL"]
     incorrect_fails = [
@@ -740,7 +893,8 @@ def _compute_pss_metrics(results: list) -> dict:
     overreach = [r for r in fails if len(r.get("final_violations", [])) > 0 and set(r.get("final_violations", [])).issubset(SOFT_VIOLATIONS)]
     EOI = (len(overreach) / len(fails)) if fails else 0.0
 
-    P1 = 40 * HLR
+    # PSS uses (1 - HBR) as penalty — missed fabrications are catastrophic
+    P1 = 40 * (1 - HBR)
     P2 = 25 * FPF
     P3 = 15 * (1 - MCP)
     P4 = 10 * max(0.0, RLS - 1.0)
@@ -749,7 +903,11 @@ def _compute_pss_metrics(results: list) -> dict:
 
     return {
         "score": round(score, 2),
-        "metrics": {"HLR": round(HLR, 4), "FPF": round(FPF, 4), "MCP": round(MCP, 4), "RLS": round(RLS, 4), "EOI": round(EOI, 4)},
+        "metrics": {
+            "HBR": round(HBR, 4), "HAR": round(HAR, 4),
+            "FPF": round(FPF, 4), "MCP": round(MCP, 4),
+            "RLS": round(RLS, 4), "EOI": round(EOI, 4),
+        },
         "penalties": {"P1": round(P1, 2), "P2": round(P2, 2), "P3": round(P3, 2), "P4": round(P4, 2), "P5": round(P5, 2)},
     }
 
@@ -899,179 +1057,324 @@ UI_HTML = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GPT-1 &rarr; GPT-2 &rarr; GPT-3 Pipeline</title>
+<title>Epistemic Verification Pipeline</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; flex-direction: column; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; }
 
-  .top-bar { background: #111; border-bottom: 1px solid #222; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
-  .top-bar h1 { font-size: 15px; font-weight: 700; }
-  .top-bar h1 .g1 { color: #4fc3f7; }
-  .top-bar h1 .arr { color: #444; margin: 0 4px; }
-  .top-bar h1 .g2 { color: #ff8a65; }
-  .top-bar h1 .g3 { color: #ce93d8; }
-  .top-bar .cfg-btn { background: #222; color: #aaa; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 600; }
-  .top-bar .cfg-btn:hover { background: #333; }
-  .kd { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .kd.on { background: #4caf50; }
-  .kd.off { background: #ef5350; }
+  /* ---- Sidebar ---- */
+  .sidebar { width: 220px; background: rgba(17,17,17,0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-right: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar .logo { padding: 20px 18px 16px; font-size: 13px; font-weight: 700; letter-spacing: -0.3px; color: #fff; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .sidebar .logo span { opacity: 0.4; font-weight: 400; }
+  .sidebar nav { flex: 1; padding: 8px 0; }
+  .sidebar nav button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 18px; background: none; border: none; color: #888; font-size: 13px; font-weight: 500; cursor: pointer; text-align: left; transition: all 0.15s; }
+  .sidebar nav button:hover { color: #ccc; background: rgba(255,255,255,0.04); }
+  .sidebar nav button.active { color: #fff; background: rgba(255,255,255,0.08); }
+  .sidebar nav button .icon { width: 18px; text-align: center; font-size: 15px; }
+  .sidebar .key-status { padding: 14px 18px; border-top: 1px solid rgba(255,255,255,0.06); font-size: 11px; color: #555; }
+  .sidebar .key-status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .sidebar .key-status .dot.on { background: #34c759; }
+  .sidebar .key-status .dot.off { background: #ff3b30; }
 
-  .cfg-drawer { background: #0d0d0d; border-bottom: 1px solid #1a1a1a; overflow: hidden; max-height: 0; transition: max-height 0.3s ease; flex-shrink: 0; }
-  .cfg-drawer.open { max-height: 700px; }
-  .cfg-in { padding: 16px 24px; max-width: 780px; }
-  .cfg-in label { display: block; font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; margin: 10px 0 4px; }
-  .cfg-in label:first-child { margin-top: 0; }
-  .cfg-in input, .cfg-in select, .cfg-in textarea { width: 100%; padding: 8px 10px; background: #111; border: 1px solid #222; border-radius: 6px; color: #ddd; font-size: 13px; font-family: inherit; outline: none; }
-  .cfg-in textarea { resize: vertical; min-height: 44px; }
-  .cfg-in input:focus, .cfg-in textarea:focus { border-color: #4fc3f7; }
-  .cfg-row { display: flex; gap: 10px; align-items: flex-end; }
-  .cfg-row input { flex: 1; }
-  .btn-s { padding: 8px 14px; background: #222; color: #ccc; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
-  .btn-s:hover { background: #333; }
-  .cfg-st { font-size: 11px; color: #555; margin-top: 4px; }
-  .cfg-st.ok { color: #4caf50; }
+  /* ---- Main Area ---- */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
-  .chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; max-width: 860px; width: 100%; margin: 0 auto; }
+  /* ---- Tab Panels ---- */
+  .panel { display: none; flex: 1; flex-direction: column; }
+  .panel.active { display: flex; }
 
-  /* Bubbles */
-  .b { max-width: 94%; padding: 14px 18px; border-radius: 14px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; animation: fu 0.3s ease; }
-  .b .w { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-  .b.usr { align-self: flex-end; background: #1a1a2e; border: 1px solid #2a2a4e; color: #ccc; }
-  .b.usr .w { color: #8888cc; }
-  .b.g1 { align-self: flex-start; background: #0a1a2a; border: 1px solid #1a3a5c; color: #ccc; }
-  .b.g1 .w { color: #4fc3f7; }
-  .b.g2 { align-self: flex-start; background: #1a120a; border: 1px solid #3a2515; color: #bbb; font-size: 13px; white-space: normal; }
-  .b.g2 .w { color: #ff8a65; }
-  .b.g3 { align-self: flex-start; background: #1a0a1a; border: 1px solid #3a1540; color: #dcc; font-size: 13px; white-space: normal; }
-  .b.g3 .w { color: #ce93d8; }
-  .b.rw { align-self: flex-start; background: #0a1a1a; border: 1px solid #154040; color: #8dd; font-size: 13px; white-space: pre-wrap; }
-  .b.rw .w { color: #4db6ac; }
-  .b.rv { align-self: flex-start; background: #1a1a0a; border: 1px solid #3a3515; color: #bba; font-size: 13px; white-space: normal; }
-  .b.rv .w { color: #dce775; }
+  /* ---- Chat Panel ---- */
+  .chat-area { flex: 1; overflow-y: auto; padding: 28px 32px; }
+  .chat-scroll { max-width: 780px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
 
-  .b.vp { align-self: center; background: #0d2a0d; border: 2px solid #1b5e1b; color: #66bb6a; text-align: center; font-weight: 700; font-size: 15px; padding: 16px 32px; white-space: normal; }
-  .b.vf { align-self: center; background: #2a0d0d; border: 2px solid #5e1b1b; color: #ef5350; text-align: center; font-weight: 700; font-size: 15px; padding: 16px 32px; white-space: normal; }
-  .b.fo { align-self: center; background: #111; border: 1px solid #2a2a2a; color: #e0e0e0; width: 100%; max-width: 100%; }
-  .b.fo .w { color: #66bb6a; }
-  .b.fo.blk .w { color: #ef5350; }
-  .b.fo.blk { border-color: #3a1a1a; color: #ef5350; text-align: center; font-weight: 600; }
-  .b.byp { align-self: center; background: #1a1a10; border: 1px solid #3a3a15; color: #c0c070; text-align: center; font-size: 12px; padding: 10px 20px; white-space: normal; }
+  /* Result card — progressive disclosure */
+  .result-card { background: rgba(20,20,20,0.6); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.06); border-radius: 16px; overflow: hidden; animation: fadeUp 0.3s ease; }
+  .result-header { padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .result-verdict { display: flex; align-items: center; gap: 10px; }
+  .verdict-badge { padding: 5px 14px; border-radius: 20px; font-size: 12px; font-weight: 600; letter-spacing: 0.3px; }
+  .verdict-badge.pass { background: rgba(52,199,89,0.15); color: #34c759; }
+  .verdict-badge.fail { background: rgba(255,59,48,0.15); color: #ff3b30; }
+  .result-meta { font-size: 11px; color: #555; }
+  .result-body { padding: 0 24px 24px; }
+  .result-output { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 18px 20px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; color: #d0d0d0; }
 
-  /* Divider */
-  .divider { align-self: center; width: 80%; border: none; border-top: 1px dashed #222; margin: 4px 0; }
+  /* Collapsible details */
+  .details-toggle { display: flex; align-items: center; gap: 6px; margin-top: 16px; padding: 8px 0; color: #666; font-size: 12px; font-weight: 500; cursor: pointer; border: none; background: none; transition: color 0.15s; }
+  .details-toggle:hover { color: #999; }
+  .details-toggle .arrow { transition: transform 0.2s; font-size: 10px; }
+  .details-toggle.open .arrow { transform: rotate(90deg); }
+  .details-body { display: none; margin-top: 8px; }
+  .details-body.open { display: block; }
+
+  /* Pipeline step cards (inside details) */
+  .step-card { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+  .step-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+  .step-label.g1 { color: #4fc3f7; }
+  .step-label.g2 { color: #ff8a65; }
+  .step-label.g3 { color: #ce93d8; }
+  .step-label.rw { color: #4db6ac; }
+  .step-content { font-size: 13px; line-height: 1.6; color: #aaa; white-space: pre-wrap; }
 
   /* Claim table */
   .ct { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
-  .ct th { text-align: left; padding: 4px 8px; color: #888; border-bottom: 1px solid #2a2a2a; font-size: 10px; text-transform: uppercase; }
-  .ct td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
+  .ct th { text-align: left; padding: 4px 8px; color: #666; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 10px; text-transform: uppercase; }
+  .ct td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: top; color: #999; }
   .ct .cat { font-weight: 600; }
-  .cat-sup { color: #66bb6a; }
-  .cat-inf { color: #ffb74d; }
-  .cat-hyp { color: #ce93d8; }
-  .cat-uns { color: #ef5350; }
-  .cat-usr { color: #4fc3f7; }
+  .cat-sup { color: #34c759; }
+  .cat-inf { color: #ff9f0a; }
+  .cat-hyp { color: #bf5af2; }
+  .cat-uns { color: #ff3b30; }
+  .cat-usr { color: #5ac8fa; }
 
   /* Violations */
   .viol { margin-top: 8px; }
-  .viol-item { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #ef5350; margin-bottom: 4px; }
-  .viol-dot { width: 6px; height: 6px; border-radius: 50%; background: #ef5350; flex-shrink: 0; }
-  .no-viol { color: #66bb6a; font-size: 12px; margin-top: 8px; }
+  .viol-item { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #ff453a; margin-bottom: 4px; }
+  .viol-dot { width: 5px; height: 5px; border-radius: 50%; background: #ff453a; flex-shrink: 0; }
+  .no-viol { color: #30d158; font-size: 12px; margin-top: 8px; }
 
   /* Arbiter details */
-  .arb-rationale { margin-top: 8px; }
-  .arb-item { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: #ce93d8; margin-bottom: 4px; }
-  .arb-dot { width: 6px; height: 6px; border-radius: 50%; background: #ce93d8; flex-shrink: 0; margin-top: 5px; }
-  .arb-decision { font-weight: 700; font-size: 14px; margin-bottom: 6px; }
-  .arb-decision.blk { color: #ef5350; }
-  .arb-decision.awe { color: #ffb74d; }
-  .arb-decision.auo { color: #4db6ac; }
+  .arb-decision { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+  .arb-decision.blk { color: #ff3b30; }
+  .arb-decision.awe { color: #ff9f0a; }
+  .arb-decision.auo { color: #5ac8fa; }
+  .arb-rationale { margin-top: 6px; }
+  .arb-item { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: #bf5af2; margin-bottom: 3px; }
+  .arb-dot { width: 5px; height: 5px; border-radius: 50%; background: #bf5af2; flex-shrink: 0; margin-top: 5px; }
   .edit-list { margin-top: 8px; font-size: 12px; }
-  .edit-item { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
-  .edit-action { font-weight: 700; font-size: 11px; text-transform: uppercase; margin-bottom: 2px; }
-  .edit-action.del { color: #ef5350; }
-  .edit-action.rew { color: #ffb74d; }
-  .edit-action.mtu { color: #4db6ac; }
-  .edit-target { color: #888; font-style: italic; }
-  .edit-repl { color: #aaa; margin-top: 2px; }
-  .policy-notes { margin-top: 8px; padding: 8px 10px; background: #111; border: 1px solid #222; border-radius: 6px; font-size: 11px; color: #777; }
+  .edit-item { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 8px 10px; margin-bottom: 5px; }
+  .edit-action { font-weight: 700; font-size: 10px; text-transform: uppercase; margin-bottom: 2px; }
+  .edit-action.del { color: #ff453a; }
+  .edit-action.rew { color: #ff9f0a; }
+  .edit-action.mtu { color: #5ac8fa; }
+  .edit-target { color: #666; font-style: italic; font-size: 11px; }
+  .edit-repl { color: #888; margin-top: 2px; font-size: 11px; }
+  .policy-notes { margin-top: 8px; padding: 8px 10px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); border-radius: 8px; font-size: 11px; color: #555; }
 
-  .ld { align-self: center; padding: 20px; color: #555; font-size: 13px; text-align: center; }
-  .sp { display: inline-block; width: 22px; height: 22px; border: 2px solid #222; border-top-color: #4fc3f7; border-radius: 50%; animation: spin 0.7s linear infinite; margin-bottom: 8px; }
-  .sp.s2 { border-top-color: #ff8a65; }
-  .sp.s3 { border-top-color: #ce93d8; }
-  .err { background: #1a0a0a; border: 1px solid #3a1a1a; color: #ef5350; padding: 12px 16px; border-radius: 10px; font-size: 13px; align-self: center; white-space: normal; }
+  /* User message */
+  .user-msg { align-self: flex-end; max-width: 70%; background: rgba(88,86,214,0.12); border: 1px solid rgba(88,86,214,0.2); border-radius: 16px 16px 4px 16px; padding: 12px 18px; font-size: 14px; line-height: 1.5; color: #c8c8e0; animation: fadeUp 0.2s ease; }
 
-  .ibar { background: #111; border-top: 1px solid #222; padding: 14px 24px; flex-shrink: 0; }
-  .ibar form { display: flex; gap: 10px; max-width: 860px; margin: 0 auto; }
-  .ibar input { flex: 1; padding: 12px 14px; background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 10px; color: #e0e0e0; font-size: 14px; outline: none; }
-  .ibar input:focus { border-color: #4fc3f7; }
-  .ibar button { padding: 12px 24px; background: linear-gradient(135deg, #4fc3f7, #0277bd); color: #fff; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  .ibar button:hover { opacity: 0.9; }
-  .ibar button:disabled { opacity: 0.3; cursor: not-allowed; }
+  /* Loading */
+  .loading { align-self: center; padding: 24px; color: #444; font-size: 13px; text-align: center; }
+  .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid rgba(255,255,255,0.08); border-top-color: #5ac8fa; border-radius: 50%; animation: spin 0.7s linear infinite; margin-bottom: 8px; }
+  .spinner.s2 { border-top-color: #ff8a65; }
+  .spinner.s3 { border-top-color: #bf5af2; }
+  .err-msg { background: rgba(255,59,48,0.1); border: 1px solid rgba(255,59,48,0.2); color: #ff453a; padding: 12px 16px; border-radius: 12px; font-size: 13px; align-self: center; }
 
-  /* Stress Test Panel */
-  .stress-panel { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #0a0a0aee; z-index: 100; overflow-y: auto; }
-  .stress-panel.open { display: flex; flex-direction: column; align-items: center; padding: 40px 24px; }
-  .stress-hdr { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 900px; margin-bottom: 16px; }
-  .stress-hdr h2 { font-size: 18px; font-weight: 700; color: #e0e0e0; }
-  .stress-close { background: #222; color: #aaa; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; }
-  .stress-controls { display: flex; gap: 10px; align-items: flex-end; width: 100%; max-width: 900px; margin-bottom: 16px; }
-  .stress-controls select, .stress-controls input { padding: 8px 10px; background: #111; border: 1px solid #222; border-radius: 6px; color: #ddd; font-size: 13px; }
-  .stress-run { padding: 8px 20px; background: linear-gradient(135deg, #ce93d8, #7b1fa2); color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  /* Input bar */
+  .input-bar { background: rgba(17,17,17,0.85); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid rgba(255,255,255,0.06); padding: 14px 32px; flex-shrink: 0; }
+  .input-bar form { display: flex; gap: 10px; max-width: 780px; margin: 0 auto; }
+  .input-bar input { flex: 1; padding: 12px 16px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; color: #e0e0e0; font-size: 14px; outline: none; transition: border-color 0.15s; }
+  .input-bar input:focus { border-color: rgba(90,200,250,0.4); }
+  .input-bar button { padding: 12px 24px; background: linear-gradient(135deg, #5ac8fa, #0a84ff); color: #fff; border: none; border-radius: 12px; font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .input-bar button:hover { opacity: 0.9; }
+  .input-bar button:disabled { opacity: 0.3; cursor: not-allowed; }
+  .input-bar .hint { text-align: center; margin-top: 6px; font-size: 11px; color: #333; }
+
+  /* ---- Settings Modal ---- */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 200; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: rgba(28,28,30,0.95); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px; width: 90%; max-width: 560px; max-height: 80vh; overflow-y: auto; padding: 28px; animation: fadeUp 0.2s ease; }
+  .modal h2 { font-size: 16px; font-weight: 700; margin-bottom: 20px; color: #fff; }
+  .modal label { display: block; font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin: 14px 0 6px; font-weight: 600; }
+  .modal label:first-of-type { margin-top: 0; }
+  .modal input, .modal select, .modal textarea { width: 100%; padding: 10px 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; color: #ddd; font-size: 13px; font-family: inherit; outline: none; transition: border-color 0.15s; }
+  .modal textarea { resize: vertical; min-height: 60px; }
+  .modal input:focus, .modal textarea:focus { border-color: rgba(90,200,250,0.4); }
+  .modal .row { display: flex; gap: 10px; align-items: flex-end; }
+  .modal .row input { flex: 1; }
+  .modal .btn-row { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+  .btn { padding: 8px 18px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+  .btn-primary { background: #0a84ff; color: #fff; }
+  .btn-primary:hover { background: #0070e0; }
+  .btn-secondary { background: rgba(255,255,255,0.08); color: #aaa; }
+  .btn-secondary:hover { background: rgba(255,255,255,0.12); }
+  .cfg-st { font-size: 11px; color: #555; margin-top: 6px; }
+  .cfg-st.ok { color: #30d158; }
+
+  /* ---- Stress Test Panel ---- */
+  #stress-panel { padding: 28px 32px; overflow-y: auto; }
+  .stress-container { max-width: 900px; margin: 0 auto; }
+  .stress-container h2 { font-size: 18px; font-weight: 700; margin-bottom: 20px; }
+  .stress-controls { display: flex; gap: 10px; align-items: flex-end; margin-bottom: 20px; flex-wrap: wrap; }
+  .stress-controls select, .stress-controls input { padding: 10px 12px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 10px; color: #ddd; font-size: 13px; }
+  .stress-run { padding: 10px 24px; background: linear-gradient(135deg, #bf5af2, #5856d6); color: #fff; border: none; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; }
   .stress-run:disabled { opacity: 0.3; cursor: not-allowed; }
-  .stress-log { width: 100%; max-width: 900px; background: #0d0d0d; border: 1px solid #1a1a1a; border-radius: 10px; padding: 16px; font-family: 'SF Mono', monospace; font-size: 12px; color: #888; min-height: 200px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; }
-  .stress-log .pass { color: #66bb6a; }
-  .stress-log .fail { color: #ef5350; }
-  .stress-log .arb { color: #ce93d8; }
-  .stress-log .rew { color: #4db6ac; }
-  .stress-score { width: 100%; max-width: 900px; margin-top: 16px; }
-  .pss-big { font-size: 48px; font-weight: 800; text-align: center; margin: 16px 0; }
-  .pss-big.s90 { color: #66bb6a; }
-  .pss-big.s75 { color: #ffb74d; }
-  .pss-big.s60 { color: #ff8a65; }
-  .pss-big.s0 { color: #ef5350; }
-  .pss-band { text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 16px; }
-  .metrics-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 16px; }
-  .metric-card { background: #111; border: 1px solid #222; border-radius: 8px; padding: 12px; text-align: center; }
+  .stress-log { background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; color: #666; min-height: 200px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; line-height: 1.6; }
+  .stress-log .pass { color: #30d158; }
+  .stress-log .fail { color: #ff453a; }
+  .stress-log .arb { color: #bf5af2; }
+  .stress-log .rew { color: #5ac8fa; }
+
+  /* PSS Score display */
+  .pss-big { font-size: 56px; font-weight: 800; text-align: center; margin: 20px 0 4px; letter-spacing: -2px; }
+  .pss-big.s90 { color: #30d158; }
+  .pss-big.s75 { color: #ff9f0a; }
+  .pss-big.s60 { color: #ff6723; }
+  .pss-big.s0 { color: #ff453a; }
+  .pss-band { text-align: center; font-size: 13px; font-weight: 600; margin-bottom: 20px; color: #888; }
+  .pss-summary { text-align: center; font-size: 12px; color: #555; margin-bottom: 16px; }
+  .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 20px; }
+  .metric-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; padding: 14px; text-align: center; }
   .metric-card .mv { font-size: 22px; font-weight: 700; color: #e0e0e0; }
-  .metric-card .ml { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
-  .metric-card .mp { font-size: 11px; color: #ef5350; margin-top: 2px; }
+  .metric-card .ml { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+  .metric-card .mp { font-size: 11px; color: #ff453a; margin-top: 2px; }
   .cat-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  .cat-table th { text-align: left; padding: 6px 8px; color: #666; border-bottom: 1px solid #222; font-size: 10px; text-transform: uppercase; }
-  .cat-table td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; }
+  .cat-table th { text-align: left; padding: 8px 10px; color: #555; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 10px; text-transform: uppercase; }
+  .cat-table td { padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); }
   .cat-table .pr { font-weight: 600; }
 
-  @keyframes fu { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  /* ---- About Panel ---- */
+  #about-panel { padding: 28px 32px; overflow-y: auto; }
+  .about-container { max-width: 680px; margin: 0 auto; }
+  .about-container h2 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+  .about-container p { font-size: 14px; line-height: 1.7; color: #888; margin-bottom: 16px; }
+  .about-container h3 { font-size: 13px; font-weight: 700; color: #aaa; margin: 20px 0 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .about-container .flow { display: flex; align-items: center; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
+  .about-container .flow .node { padding: 8px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; }
+  .about-container .flow .node.n1 { background: rgba(90,200,250,0.1); color: #5ac8fa; border: 1px solid rgba(90,200,250,0.2); }
+  .about-container .flow .node.n2 { background: rgba(255,138,101,0.1); color: #ff8a65; border: 1px solid rgba(255,138,101,0.2); }
+  .about-container .flow .node.n3 { background: rgba(191,90,242,0.1); color: #bf5af2; border: 1px solid rgba(191,90,242,0.2); }
+  .about-container .flow .arr { color: #333; font-size: 16px; }
+
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 
-<div class="top-bar">
-  <h1><span class="g1">GPT-1</span><span class="arr">&rarr;</span><span class="g2">GPT-2</span><span class="arr">&rarr;</span><span class="g3">GPT-3</span> Pipeline</h1>
-  <div style="display:flex;gap:8px;">
-    <button class="cfg-btn" style="background:#2a1a2e;color:#ce93d8;" onclick="openStress()">Stress Test</button>
-    <button class="cfg-btn" onclick="tog()"><span class="kd off" id="kd"></span>Settings</button>
+<!-- Sidebar -->
+<div class="sidebar">
+  <div class="logo">Epistemic Pipeline <span>v2</span></div>
+  <nav>
+    <button class="active" onclick="switchTab('chat')" id="tab-chat"><span class="icon">&#9998;</span> Chat</button>
+    <button onclick="switchTab('stress')" id="tab-stress"><span class="icon">&#9889;</span> Stress Test</button>
+    <button onclick="switchTab('about')" id="tab-about"><span class="icon">&#9432;</span> About</button>
+  </nav>
+  <div style="padding: 10px 18px;">
+    <button class="btn btn-secondary" style="width:100%;font-size:12px;" onclick="openSettings()"><span class="dot off" id="kd" style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:middle;background:#ff3b30;"></span>Settings</button>
+  </div>
+  <div class="key-status" id="ks">No API key configured</div>
+</div>
+
+<!-- Main Area -->
+<div class="main">
+  <!-- Chat Panel -->
+  <div class="panel active" id="chat-panel">
+    <div class="chat-area">
+      <div class="chat-scroll" id="ch"></div>
+    </div>
+    <div class="input-bar">
+      <form onsubmit="go(event)">
+        <input type="text" id="ui" placeholder="Ask anything..." autocomplete="off">
+        <button type="submit" id="sb">Send</button>
+      </form>
+      <div class="hint">Press Enter or Cmd+Enter to send</div>
+    </div>
+  </div>
+
+  <!-- Stress Test Panel -->
+  <div class="panel" id="stress-panel">
+    <div class="stress-container">
+      <h2>Pipeline Stability Score (PSS)</h2>
+      <div class="stress-controls">
+        <select id="sc">
+          <option value="">All categories</option>
+          <option value="legal_future_year">legal_future_year</option>
+          <option value="statistical_percentage_trap">statistical_percentage_trap</option>
+          <option value="medical_structural_indeterminacy">medical_structural_indeterminacy</option>
+          <option value="cross_border_tax">cross_border_tax</option>
+          <option value="citizenship_inheritance">citizenship_inheritance</option>
+          <option value="sanctions_export_controls">sanctions_export_controls</option>
+          <option value="crypto_compliance">crypto_compliance</option>
+          <option value="neutral_definitional">neutral_definitional</option>
+          <option value="advice_requested_explicit">advice_requested_explicit</option>
+          <option value="regulatory_facts_basic">regulatory_facts_basic</option>
+        </select>
+        <input type="number" id="sn" min="1" max="10" value="" placeholder="Per-cat limit" style="width:120px;">
+        <button class="stress-run" id="sr" onclick="runStress()">Run Stress Test</button>
+      </div>
+      <div class="stress-log" id="sl"></div>
+      <div id="ss"></div>
+    </div>
+  </div>
+
+  <!-- About Panel -->
+  <div class="panel" id="about-panel">
+    <div class="about-container">
+      <h2>Epistemic Verification Pipeline</h2>
+      <p>A three-model verification system that validates AI-generated content for epistemic integrity: no fabricated statistics, no unsupported evidence claims, no prescriptive creep.</p>
+      <h3>Pipeline Flow</h3>
+      <div class="flow">
+        <span class="node n1">GPT-1 Generator</span>
+        <span class="arr">&rarr;</span>
+        <span class="node n2">GPT-2 Verifier</span>
+        <span class="arr">&rarr;</span>
+        <span class="node n3">GPT-3 Arbiter</span>
+      </div>
+      <p>GPT-1 generates structured reasoning. GPT-2 validates every claim against hard constraints (fabrication, false legal conclusions) and soft constraints (vague evidence, prescriptive creep). If GPT-2 fails the output, GPT-3 arbitrates whether to block, allow with edits, or reframe as unknowns.</p>
+      <h3>Key Features</h3>
+      <p>Deterministic prompt router classifies inputs. Compliance sanitizer pre-cleans output before verification. Local arbiter edit application reduces latency. Severity-tier verdict rules separate hard from soft violations. Accuracy-aligned HBR/HAR metrics in stress testing.</p>
+      <h3>Metrics</h3>
+      <p><strong>HBR</strong> (Hallucination Block Rate) &mdash; % of detected fabrications that were blocked.<br>
+      <strong>HAR</strong> (Hallucination Avoidance Rate) &mdash; % of fabrication-attempt prompts where GPT-1 correctly abstained.<br>
+      <strong>FPF</strong> (False-Positive FAIL) &mdash; FAILs caused only by soft violations on non-fabrication prompts.<br>
+      <strong>MCP</strong> (Minimal Compliance Pass) &mdash; pass rate on simple definitional/regulatory prompts.<br>
+      <strong>EOI</strong> (Enforcement Overreach Index) &mdash; FAILs where only soft violations exist.</p>
+    </div>
   </div>
 </div>
 
-<div class="cfg-drawer" id="cd">
-  <div class="cfg-in">
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal">
+    <h2>Settings</h2>
     <label>OpenAI API Key</label>
-    <div class="cfg-row">
+    <div class="row">
       <input type="password" id="ak" placeholder="sk-...">
-      <select id="md" style="width:150px">
+      <select id="md" style="width:140px;flex-shrink:0;">
         <option value="gpt-4o-mini">gpt-4o-mini</option>
         <option value="gpt-4o">gpt-4o</option>
         <option value="gpt-4-turbo">gpt-4-turbo</option>
         <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
       </select>
-      <button class="btn-s" onclick="sav()">Save</button>
     </div>
-    <div class="cfg-st" id="ks">No key set</div>
+    <div class="cfg-st" id="ks2">No key set</div>
 
-    <label>GPT-1 System Prompt (Generator)</label>
-    <textarea id="g1s" rows="4">You are GPT-1, a structured reasoning and synthesis engine.
+    <label>GPT-1 System Prompt</label>
+    <textarea id="g1s" rows="5" placeholder="Generator system prompt..."></textarea>
+
+    <label>GPT-2 System Prompt Override</label>
+    <textarea id="g2s" rows="2" placeholder="Leave blank for default verifier..."></textarea>
+
+    <label>GPT-3 System Prompt Override</label>
+    <textarea id="g3s" rows="2" placeholder="Leave blank for default arbiter..."></textarea>
+
+    <div class="btn-row">
+      <button class="btn btn-secondary" onclick="closeSettings()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- Tab switching ----
+function switchTab(name) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById(name + '-panel').classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'chat') document.getElementById('ui').focus();
+}
+
+// ---- Settings modal ----
+function openSettings() { document.getElementById('settings-modal').classList.add('open'); }
+function closeSettings() { document.getElementById('settings-modal').classList.remove('open'); }
+document.getElementById('settings-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeSettings();
+});
+
+// Set default GPT-1 prompt
+document.getElementById('g1s').value = `You are GPT-1, a structured reasoning and synthesis engine.
 
 Hard constraints:
 - No fabricated sources, statutes, studies, metrics, or percentages.
@@ -1080,8 +1383,6 @@ Hard constraints:
 - If asked for percentages and none are available in provided/cited evidence, output Unknown(Actionable).
 - When mentioning professionals (attorneys, brokers, consultants), use ONLY role-definition + uncertainty language.
   NEVER use benefit-language ("could help", "could assist", "may improve", "could potentially", "may provide guidance").
-  CORRECT: "An attorney's function is to advise on requirements and prepare/submit filings; whether that changes outcomes is unknown."
-  WRONG: "An attorney could potentially assist in navigating the process."
 
 Default format:
 1) Problem Framing
@@ -1090,57 +1391,282 @@ Default format:
 4) Unknowns (Actionable / Structural)
 5) Confidence (High/Medium/Low + 1 sentence)
 
-Only include "Options" if user asked for actions/choices.</textarea>
+Only include "Options" if user asked for actions/choices.`;
 
-    <label>GPT-2 System Prompt Override (leave blank for strict verifier)</label>
-    <textarea id="g2s" rows="2" placeholder="Leave blank for default claim validator..."></textarea>
+// Keyboard shortcut: Cmd/Ctrl+Enter to send
+document.getElementById('ui').addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault();
+    document.querySelector('.input-bar form').dispatchEvent(new Event('submit'));
+  }
+});
 
-    <label>GPT-3 System Prompt Override (leave blank for default arbiter)</label>
-    <textarea id="g3s" rows="2" placeholder="Leave blank for default arbiter/adjudicator..."></textarea>
-  </div>
-</div>
+// ---- API key management ----
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/openai/config');
+    const d = await r.json();
+    const dot = document.getElementById('kd');
+    const st1 = document.getElementById('ks');
+    const st2 = document.getElementById('ks2');
+    if (d.key_set) {
+      dot.style.background = '#34c759';
+      st1.textContent = d.key_preview + ' | ' + d.model;
+      st2.textContent = d.key_preview + ' | ' + d.model;
+      st2.className = 'cfg-st ok';
+    } else {
+      dot.style.background = '#ff3b30';
+      st1.textContent = 'No API key configured';
+      st2.textContent = 'No key set';
+      st2.className = 'cfg-st';
+    }
+  } catch(e) {}
+}
 
-<div class="chat" id="ch"></div>
+async function saveSettings() {
+  const k = document.getElementById('ak').value.trim();
+  if (k) {
+    await fetch('/api/openai/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: k, model: document.getElementById('md').value})
+    });
+    document.getElementById('ak').value = '';
+  }
+  loadConfig();
+  closeSettings();
+}
 
-<!-- Stress Test Panel -->
-<div class="stress-panel" id="sp">
-  <div class="stress-hdr">
-    <h2>Pipeline Stability Score (PSS)</h2>
-    <button class="stress-close" onclick="closeStress()">Close</button>
-  </div>
-  <div class="stress-controls">
-    <select id="sc">
-      <option value="">All categories (100 tests)</option>
-      <option value="legal_future_year">legal_future_year</option>
-      <option value="statistical_percentage_trap">statistical_percentage_trap</option>
-      <option value="medical_structural_indeterminacy">medical_structural_indeterminacy</option>
-      <option value="cross_border_tax">cross_border_tax</option>
-      <option value="citizenship_inheritance">citizenship_inheritance</option>
-      <option value="sanctions_export_controls">sanctions_export_controls</option>
-      <option value="crypto_compliance">crypto_compliance</option>
-      <option value="neutral_definitional">neutral_definitional</option>
-      <option value="advice_requested_explicit">advice_requested_explicit</option>
-      <option value="regulatory_facts_basic">regulatory_facts_basic</option>
-    </select>
-    <input type="number" id="sn" min="1" max="10" value="" placeholder="Per-cat limit" style="width:100px;">
-    <button class="stress-run" id="sr" onclick="runStress()">Run Stress Test</button>
-  </div>
-  <div class="stress-log" id="sl"></div>
-  <div class="stress-score" id="ss"></div>
-</div>
+// ---- Helpers ----
+function esc(t) {
+  if (!t) return '';
+  const d = document.createElement('div');
+  d.textContent = t;
+  return d.innerHTML;
+}
 
-<div class="ibar">
-  <form onsubmit="go(event)">
-    <input type="text" id="ui" placeholder="Ask anything..." autocomplete="off">
-    <button type="submit" id="sb">Send</button>
-  </form>
-</div>
+function catCls(cat) {
+  const c = (cat || '').toLowerCase();
+  if (c === 'supported') return 'cat-sup';
+  if (c === 'inference') return 'cat-inf';
+  if (c === 'hypothesis') return 'cat-hyp';
+  if (c === 'unsupported') return 'cat-uns';
+  if (c === 'user-provided') return 'cat-usr';
+  return '';
+}
 
-<script>
-function tog() { document.getElementById('cd').classList.toggle('open'); }
-function openStress() { document.getElementById('sp').classList.add('open'); }
-function closeStress() { document.getElementById('sp').classList.remove('open'); }
+function renderClaimTable(claims) {
+  if (!claims || claims.length === 0) return '';
+  let h = '<table class="ct"><tr><th>Claim</th><th>Category</th><th>Justification</th></tr>';
+  claims.forEach(c => {
+    h += '<tr><td>' + esc(c.claim) + '</td><td class="cat ' + catCls(c.category) + '">' + esc(c.category) + '</td><td>' + esc(c.justification) + '</td></tr>';
+  });
+  return h + '</table>';
+}
 
+function renderViolations(viols) {
+  if (!viols || viols.length === 0) return '<div class="no-viol">No violations detected</div>';
+  let h = '<div class="viol">';
+  viols.forEach(v => { h += '<div class="viol-item"><span class="viol-dot"></span>' + esc(v) + '</div>'; });
+  return h + '</div>';
+}
+
+function editActionCls(a) {
+  const al = (a||'').toUpperCase();
+  if (al === 'DELETE') return 'del';
+  if (al === 'REWRITE') return 'rew';
+  if (al === 'MOVE_TO_UNKNOWN') return 'mtu';
+  return '';
+}
+
+function toggleDetails(btn) {
+  btn.classList.toggle('open');
+  const body = btn.nextElementSibling;
+  body.classList.toggle('open');
+}
+
+// ---- Chat submit ----
+async function go(e) {
+  e.preventDefault();
+  const inp = document.getElementById('ui');
+  const btn = document.getElementById('sb');
+  const prompt = inp.value.trim();
+  if (!prompt) return;
+
+  const ch = document.getElementById('ch');
+
+  // User message
+  const umsg = document.createElement('div');
+  umsg.className = 'user-msg';
+  umsg.textContent = prompt;
+  ch.appendChild(umsg);
+
+  inp.value = '';
+  btn.disabled = true;
+
+  // Loading indicator
+  const ld = document.createElement('div');
+  ld.className = 'loading';
+  ld.innerHTML = '<div class="spinner"></div><br>Processing...';
+  ch.appendChild(ld);
+  ch.parentElement.scrollTop = ch.parentElement.scrollHeight;
+
+  const steps = [
+    {t: 3000, msg: 'Verifying claims...', cls: 'spinner s2'},
+    {t: 8000, msg: 'Arbitrating...', cls: 'spinner s3'},
+    {t: 14000, msg: 'Rewriting...', cls: 'spinner'},
+  ];
+  const timers = steps.map(s => setTimeout(() => {
+    if (ld.parentNode) ld.innerHTML = '<div class="' + s.cls + '"></div><br>' + s.msg;
+  }, s.t));
+
+  try {
+    const r = await fetch('/api/pipeline', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        prompt: prompt,
+        gpt1_system: document.getElementById('g1s').value,
+        gpt2_system: document.getElementById('g2s').value.trim(),
+        gpt3_system: document.getElementById('g3s').value.trim(),
+      })
+    });
+
+    timers.forEach(t => clearTimeout(t));
+    ld.remove();
+
+    if (!r.ok) {
+      const err = await r.json();
+      const em = document.createElement('div');
+      em.className = 'err-msg';
+      em.textContent = err.detail || 'Request failed';
+      ch.appendChild(em);
+      return;
+    }
+
+    const d = await r.json();
+    renderResult(ch, d);
+
+  } catch(err) {
+    timers.forEach(t => clearTimeout(t));
+    ld.remove();
+    const em = document.createElement('div');
+    em.className = 'err-msg';
+    em.textContent = 'Error: ' + err.message;
+    ch.appendChild(em);
+  } finally {
+    btn.disabled = false;
+    inp.focus();
+    ch.parentElement.scrollTop = ch.parentElement.scrollHeight;
+  }
+}
+
+function renderResult(container, d) {
+  const card = document.createElement('div');
+  card.className = 'result-card';
+
+  const isPass = d.final_verdict === 'PASS';
+  const verdictCls = isPass ? 'pass' : 'fail';
+  const verdictText = isPass ? 'PASS' : 'FAIL';
+
+  // Metadata
+  let metaText = '';
+  if (d.sanitizer_applied) metaText += 'Sanitized';
+  if (d.arbiter_invoked) metaText += (metaText ? ' | ' : '') + 'Arbiter: ' + d.arbiter_decision;
+  if (d.rewrite_occurred) metaText += (metaText ? ' | ' : '') + 'Rewritten';
+  if (d.bypassed) metaText = 'Bypassed';
+
+  // Header
+  let h = '<div class="result-header">';
+  h += '<div class="result-verdict"><span class="verdict-badge ' + verdictCls + '">' + verdictText + '</span></div>';
+  h += '<div class="result-meta">' + esc(metaText) + '</div>';
+  h += '</div>';
+
+  // Body — final output shown first (progressive disclosure)
+  h += '<div class="result-body">';
+  if (isPass || d.bypassed) {
+    h += '<div class="result-output">' + esc(d.final_result) + '</div>';
+  } else {
+    h += '<div class="result-output" style="border-color:rgba(255,59,48,0.2);color:#ff6b6b;">Output blocked by verification pipeline.';
+    if (d.arbiter_invoked && d.arbiter_decision === 'BLOCK' && d.arbiter_rationale && d.arbiter_rationale.length > 0) {
+      h += '\\n\\nArbiter rationale:\\n' + d.arbiter_rationale.map(r => '  - ' + esc(r)).join('\\n');
+    }
+    h += '</div>';
+  }
+
+  // Collapsible pipeline details
+  h += '<button class="details-toggle" onclick="toggleDetails(this)"><span class="arrow">&#9654;</span> Pipeline Details</button>';
+  h += '<div class="details-body">';
+
+  // GPT-1 output
+  h += '<div class="step-card"><div class="step-label g1">GPT-1 Generator</div><div class="step-content">' + esc(d.gpt1_output) + '</div></div>';
+
+  if (!d.bypassed) {
+    // GPT-2 verification
+    h += '<div class="step-card"><div class="step-label g2">GPT-2 Verifier &mdash; ' + esc(d.gpt2_verdict) + '</div>';
+    h += renderClaimTable(d.claim_table);
+    h += renderViolations(d.violations);
+    h += '</div>';
+
+    // GPT-3 Arbiter
+    if (d.arbiter_invoked) {
+      h += '<div class="step-card"><div class="step-label g3">GPT-3 Arbiter</div>';
+
+      const decLower = (d.arbiter_decision || '').toLowerCase().replace(/_/g, '');
+      let decCls = 'blk';
+      if (decLower === 'allowwithedits') decCls = 'awe';
+      if (decLower === 'allowasunknownonly') decCls = 'auo';
+      h += '<div class="arb-decision ' + decCls + '">' + esc(d.arbiter_decision) + '</div>';
+
+      if (d.arbiter_rationale && d.arbiter_rationale.length > 0) {
+        h += '<div class="arb-rationale">';
+        d.arbiter_rationale.forEach(r => { h += '<div class="arb-item"><span class="arb-dot"></span>' + esc(r) + '</div>'; });
+        h += '</div>';
+      }
+
+      if (d.arbiter_edits && d.arbiter_edits.length > 0) {
+        h += '<div class="edit-list">';
+        d.arbiter_edits.forEach(e => {
+          h += '<div class="edit-item"><div class="edit-action ' + editActionCls(e.action) + '">' + esc(e.action) + '</div>';
+          h += '<div class="edit-target">' + esc(e.target) + '</div>';
+          if (e.replacement) h += '<div class="edit-repl">&rarr; ' + esc(e.replacement) + '</div>';
+          h += '</div>';
+        });
+        h += '</div>';
+      }
+
+      if (d.arbiter_policy_notes && d.arbiter_policy_notes.length > 0) {
+        h += '<div class="policy-notes">';
+        d.arbiter_policy_notes.forEach(n => { h += '<div>' + esc(n) + '</div>'; });
+        h += '</div>';
+      }
+      h += '</div>';
+    }
+
+    // Rewrite + re-verify
+    if (d.rewrite_occurred) {
+      h += '<div class="step-card"><div class="step-label rw">Rewrite &amp; Re-verify &mdash; ' + esc(d.rewrite_verdict) + '</div>';
+      h += '<div class="step-content">' + esc(d.rewrite_output) + '</div>';
+      h += renderClaimTable(d.rewrite_claim_table);
+      h += renderViolations(d.rewrite_violations);
+      h += '</div>';
+    }
+  }
+
+  // Prompt flags
+  if (d.prompt_flags) {
+    const flags = Object.entries(d.prompt_flags).filter(([k,v]) => v).map(([k]) => k).join(', ');
+    if (flags) h += '<div style="font-size:11px;color:#444;margin-top:8px;">Flags: ' + esc(flags) + '</div>';
+  }
+
+  h += '</div>'; // details-body
+  h += '</div>'; // result-body
+
+  card.innerHTML = h;
+  container.appendChild(card);
+}
+
+// ---- Stress test ----
 async function runStress() {
   const btn = document.getElementById('sr');
   const log = document.getElementById('sl');
@@ -1214,21 +1740,24 @@ function renderStressSummary(d, el) {
 
   let h = '<div class="pss-big ' + cls + '">' + s.toFixed(1) + '</div>';
   h += '<div class="pss-band">' + band + '</div>';
-  h += '<div style="text-align:center;font-size:12px;color:#666;margin-bottom:12px;">Tests: ' + d.total_tests + ' | PASS: ' + d.total_pass + ' | FAIL: ' + d.total_fail + ' | Errors: ' + d.total_error + ' | Avg: ' + d.avg_duration_s + 's</div>';
+  h += '<div class="pss-summary">Tests: ' + d.total_tests + ' | PASS: ' + d.total_pass + ' | FAIL: ' + d.total_fail + ' | Errors: ' + d.total_error + ' | Avg: ' + d.avg_duration_s + 's</div>';
 
-  // Metrics cards
+  // Metrics cards (now includes HAR)
   const m = pss.metrics;
   const p = pss.penalties;
   const cards = [
-    {label: 'HLR', desc: 'Hallucination Leakage', val: ((m.HLR||0)*100).toFixed(1) + '%', pen: p.P1},
-    {label: 'FPF', desc: 'False-Positive FAIL', val: (m.FPF*100).toFixed(1) + '%', pen: p.P2},
-    {label: 'MCP', desc: 'Min Compliance Pass', val: (m.MCP*100).toFixed(1) + '%', pen: p.P3},
-    {label: 'RLS', desc: 'Rewrite Loop Avg', val: m.RLS.toFixed(2), pen: p.P4},
-    {label: 'EOI', desc: 'Overreach Index', val: (m.EOI*100).toFixed(1) + '%', pen: p.P5},
+    {label: 'HBR', desc: 'Halluc. Block Rate', val: ((m.HBR||0)*100).toFixed(1) + '%', pen: p.P1},
+    {label: 'HAR', desc: 'Halluc. Avoidance', val: ((m.HAR||0)*100).toFixed(1) + '%', pen: null},
+    {label: 'FPF', desc: 'False-Positive FAIL', val: ((m.FPF||0)*100).toFixed(1) + '%', pen: p.P2},
+    {label: 'MCP', desc: 'Min Compliance', val: ((m.MCP||0)*100).toFixed(1) + '%', pen: p.P3},
+    {label: 'RLS', desc: 'Rewrite Loops', val: (m.RLS||0).toFixed(2), pen: p.P4},
+    {label: 'EOI', desc: 'Overreach', val: ((m.EOI||0)*100).toFixed(1) + '%', pen: p.P5},
   ];
   h += '<div class="metrics-grid">';
   cards.forEach(c => {
-    h += '<div class="metric-card"><div class="mv">' + c.val + '</div><div class="ml">' + c.label + '</div><div class="ml">' + c.desc + '</div><div class="mp">-' + c.pen.toFixed(1) + '</div></div>';
+    h += '<div class="metric-card"><div class="mv">' + c.val + '</div><div class="ml">' + c.label + '</div><div class="ml">' + c.desc + '</div>';
+    if (c.pen !== null) h += '<div class="mp">-' + c.pen.toFixed(1) + '</div>';
+    h += '</div>';
   });
   h += '</div>';
 
@@ -1246,259 +1775,17 @@ function renderStressSummary(d, el) {
   // Top violations
   const viols = d.top_violations;
   if (Object.keys(viols).length > 0) {
-    h += '<div style="margin-top:12px;font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.5px;">Top Violation Reasons</div>';
+    h += '<div style="margin-top:14px;font-size:10px;color:#555;text-transform:uppercase;letter-spacing:0.5px;">Top Violation Reasons</div>';
     for (const v in viols) {
-      h += '<div style="font-size:12px;color:#ef5350;margin:2px 0;">' + esc(v) + ': ' + viols[v] + '</div>';
+      h += '<div style="font-size:12px;color:#ff453a;margin:3px 0;">' + esc(v) + ': ' + viols[v] + '</div>';
     }
   }
 
   el.innerHTML = h;
 }
 
-async function lc() {
-  try {
-    const r = await fetch('/api/openai/config');
-    const d = await r.json();
-    const dot = document.getElementById('kd');
-    const st = document.getElementById('ks');
-    if (d.key_set) {
-      dot.className = 'kd on';
-      st.textContent = d.key_preview + ' | ' + d.model;
-      st.className = 'cfg-st ok';
-    } else {
-      dot.className = 'kd off';
-      st.textContent = 'No key set';
-      st.className = 'cfg-st';
-    }
-  } catch(e) {}
-}
-
-async function sav() {
-  const k = document.getElementById('ak').value.trim();
-  if (!k) return;
-  await fetch('/api/openai/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({api_key: k, model: document.getElementById('md').value})
-  });
-  document.getElementById('ak').value = '';
-  lc();
-}
-
-function ab(cls, who, body) {
-  const c = document.getElementById('ch');
-  const d = document.createElement('div');
-  d.className = 'b ' + cls;
-  d.innerHTML = (who ? '<div class="w">' + who + '</div>' : '') + body;
-  c.appendChild(d);
-  c.scrollTop = c.scrollHeight;
-}
-
-function addDivider() {
-  const c = document.getElementById('ch');
-  const hr = document.createElement('hr');
-  hr.className = 'divider';
-  c.appendChild(hr);
-}
-
-function esc(t) {
-  if (!t) return '';
-  const d = document.createElement('div');
-  d.textContent = t;
-  return d.innerHTML;
-}
-
-function catCls(cat) {
-  const c = (cat || '').toLowerCase();
-  if (c === 'supported') return 'cat-sup';
-  if (c === 'inference') return 'cat-inf';
-  if (c === 'hypothesis') return 'cat-hyp';
-  if (c === 'unsupported') return 'cat-uns';
-  if (c === 'user-provided') return 'cat-usr';
-  return '';
-}
-
-function renderClaimTable(claims) {
-  if (!claims || claims.length === 0) return '';
-  let h = '<table class="ct"><tr><th>Claim</th><th>Category</th><th>Justification</th></tr>';
-  claims.forEach(c => {
-    h += '<tr><td>' + esc(c.claim) + '</td><td class="cat ' + catCls(c.category) + '">' + esc(c.category) + '</td><td>' + esc(c.justification) + '</td></tr>';
-  });
-  return h + '</table>';
-}
-
-function renderViolations(viols) {
-  if (!viols || viols.length === 0) return '<div class="no-viol">No violations detected</div>';
-  let h = '<div class="viol">';
-  viols.forEach(v => {
-    h += '<div class="viol-item"><span class="viol-dot"></span>' + esc(v) + '</div>';
-  });
-  return h + '</div>';
-}
-
-function editActionCls(a) {
-  const al = (a||'').toUpperCase();
-  if (al === 'DELETE') return 'del';
-  if (al === 'REWRITE') return 'rew';
-  if (al === 'MOVE_TO_UNKNOWN') return 'mtu';
-  return '';
-}
-
-async function go(e) {
-  e.preventDefault();
-  const inp = document.getElementById('ui');
-  const btn = document.getElementById('sb');
-  const prompt = inp.value.trim();
-  if (!prompt) return;
-
-  ab('usr', 'You', esc(prompt));
-  inp.value = '';
-  btn.disabled = true;
-
-  const ch = document.getElementById('ch');
-  const ld = document.createElement('div');
-  ld.className = 'ld';
-  ld.innerHTML = '<div class="sp"></div><br>GPT-1 generating...';
-  ch.appendChild(ld);
-  ch.scrollTop = ch.scrollHeight;
-
-  const steps = [
-    {t: 3000, msg: 'GPT-2 verifying...', cls: 'sp s2'},
-    {t: 8000, msg: 'GPT-3 arbitrating...', cls: 'sp s3'},
-    {t: 14000, msg: 'Rewriting & re-verifying...', cls: 'sp'},
-  ];
-  const timers = steps.map(s => setTimeout(() => {
-    if (ld.parentNode) ld.innerHTML = '<div class="' + s.cls + '"></div><br>' + s.msg;
-  }, s.t));
-
-  try {
-    const r = await fetch('/api/pipeline', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        prompt: prompt,
-        gpt1_system: document.getElementById('g1s').value,
-        gpt2_system: document.getElementById('g2s').value.trim(),
-        gpt3_system: document.getElementById('g3s').value.trim(),
-      })
-    });
-
-    timers.forEach(t => clearTimeout(t));
-    ld.remove();
-
-    if (!r.ok) {
-      const err = await r.json();
-      ab('err', '', esc(err.detail || 'Request failed'));
-      return;
-    }
-
-    const d = await r.json();
-
-    // ---- GPT-1 output ----
-    ab('g1', 'GPT-1 (Generator)', esc(d.gpt1_output));
-
-    // ---- Bypass ----
-    if (d.bypassed) {
-      ab('byp', '', 'Activation phrase detected - verification bypassed');
-      ab('vp', '', '&#10003; PASS (bypassed)');
-      ab('fo', 'Final Output', esc(d.final_result));
-      return;
-    }
-
-    // ---- GPT-2 results ----
-    let g2body = renderClaimTable(d.claim_table) + renderViolations(d.violations);
-    ab('g2', 'GPT-2 (Verifier) &mdash; ' + d.gpt2_verdict, g2body);
-
-    if (d.gpt2_verdict === 'PASS') {
-      ab('vp', '', '&#10003; PASS');
-      ab('fo', 'Final Output', esc(d.final_result));
-      return;
-    }
-
-    // ---- GPT-2 FAIL: show verdict ----
-    ab('vf', '', '&#10007; GPT-2 FAIL &mdash; escalating to Arbiter');
-    addDivider();
-
-    // ---- GPT-3 Arbiter ----
-    if (d.arbiter_invoked) {
-      let g3body = '';
-
-      // Decision badge
-      const decLower = (d.arbiter_decision || '').toLowerCase().replace(/_/g, '');
-      let decCls = 'blk';
-      if (decLower === 'allowwithedits') decCls = 'awe';
-      if (decLower === 'allowasunknownonly') decCls = 'auo';
-      g3body += '<div class="arb-decision ' + decCls + '">' + esc(d.arbiter_decision) + '</div>';
-
-      // Rationale
-      if (d.arbiter_rationale && d.arbiter_rationale.length > 0) {
-        g3body += '<div class="arb-rationale">';
-        d.arbiter_rationale.forEach(r => {
-          g3body += '<div class="arb-item"><span class="arb-dot"></span>' + esc(r) + '</div>';
-        });
-        g3body += '</div>';
-      }
-
-      // Edits
-      if (d.arbiter_edits && d.arbiter_edits.length > 0) {
-        g3body += '<div class="edit-list">';
-        d.arbiter_edits.forEach(e => {
-          g3body += '<div class="edit-item">';
-          g3body += '<div class="edit-action ' + editActionCls(e.action) + '">' + esc(e.action) + '</div>';
-          g3body += '<div class="edit-target">' + esc(e.target) + '</div>';
-          if (e.replacement) g3body += '<div class="edit-repl">&rarr; ' + esc(e.replacement) + '</div>';
-          g3body += '</div>';
-        });
-        g3body += '</div>';
-      }
-
-      // Policy notes
-      if (d.arbiter_policy_notes && d.arbiter_policy_notes.length > 0) {
-        g3body += '<div class="policy-notes">';
-        d.arbiter_policy_notes.forEach(n => {
-          g3body += '<div>' + esc(n) + '</div>';
-        });
-        g3body += '</div>';
-      }
-
-      ab('g3', 'GPT-3 (Arbiter)', g3body);
-    }
-
-    // ---- Rewrite loop ----
-    if (d.rewrite_occurred) {
-      addDivider();
-      ab('rw', 'GPT-1 (Rewrite)', esc(d.rewrite_output));
-
-      // Re-verification
-      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderViolations(d.rewrite_violations);
-      ab('rv', 'GPT-2 (Re-verify) &mdash; ' + d.rewrite_verdict, rvBody);
-    }
-
-    // ---- Final verdict ----
-    addDivider();
-    if (d.final_verdict === 'PASS') {
-      ab('vp', '', '&#10003; FINAL PASS');
-      ab('fo', 'Final Output (Shown to You)', esc(d.final_result));
-    } else {
-      ab('vf', '', '&#10007; FINAL FAIL');
-      let blockMsg = 'NO PASS - Output blocked by verification';
-      if (d.arbiter_invoked && d.arbiter_decision === 'BLOCK' && d.arbiter_rationale && d.arbiter_rationale.length > 0) {
-        blockMsg += '\\n\\nArbiter rationale:\\n' + d.arbiter_rationale.map(r => '- ' + r).join('\\n');
-      }
-      ab('fo blk', 'Final Output', blockMsg);
-    }
-
-  } catch(err) {
-    timers.forEach(t => clearTimeout(t));
-    ld.remove();
-    ab('err', '', 'Error: ' + esc(err.message));
-  } finally {
-    btn.disabled = false;
-    inp.focus();
-  }
-}
-
-lc();
+// ---- Init ----
+loadConfig();
 document.getElementById('ui').focus();
 </script>
 </body>
