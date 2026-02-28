@@ -1,6 +1,6 @@
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import json
@@ -11,7 +11,23 @@ import time
 from collections import Counter, defaultdict
 import openai
 
-app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline")
+APP_VERSION = "1.3.0"
+
+app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline", version=APP_VERSION)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Return JSON error envelope for all unhandled exceptions."""
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": True, "detail": exc.detail},
+        )
+    return JSONResponse(
+        status_code=500,
+        content={"error": True, "detail": f"Internal server error: {str(exc)[:200]}"},
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -46,6 +62,7 @@ class PipelineRequest(BaseModel):
 class PipelineResponse(BaseModel):
     gpt1_input: str
     gpt1_output: str
+    gpt1_output_sanitized: str = ""
     bypassed: bool
     # GPT-2 results
     gpt2_raw: str
@@ -135,8 +152,20 @@ DEFAULT_GPT2_SYSTEM = (
     '    - "Prescriptive creep" — unsolicited advice or outcome promises\n'
     '    - "Overconfidence" — Medium/High confidence with core Unsupported claims\n'
     '    - "Missing jurisdiction" — legal/regulatory claim with ambiguous jurisdiction\n\n'
+    'IMPORTANT keyword-matching rules (to reduce false positives):\n'
+    '- Match trigger keywords as STANDALONE WORDS only. Do NOT treat substrings as matches.\n'
+    '  "dataset", "database", "metadata" do NOT contain the keyword "data".\n'
+    '  "researcher" does NOT trigger "research" unless used without a citation.\n'
+    '- The exact phrase "Unknown (Actionable): No authoritative dataset available." is a REQUIRED\n'
+    '  abstention output. It MUST NOT trigger any finding by itself.\n'
+    '- The phrase "Unknown (Actionable)" or "Unknown (Structural)" MUST NOT be treated as unsupported.\n\n'
+    '  HARD severity (additional):\n'
+    '    - "Unverified statistic" — GPT-1 provides a specific percentage/rate/number when asked,\n'
+    '      but without citing an authoritative dataset in the same claim\n\n'
     'Rules:\n'
-    '- "studies/data/research/generally/often/suggests" without citation+numeric/quotable support -> finding type "Unsupported evidence reference", severity "soft"\n'
+    '- "studies/data/research/generally/often/suggests" as standalone words without citation+numeric/quotable support -> finding type "Unsupported evidence reference", severity "soft"\n'
+    '- Unverified statistic rule: if ORIGINAL PROMPT asks for a percentage/rate AND GPT-1 provides a specific\n'
+    '  quantitative figure (e.g., "30%", "one in ten") without citing an authoritative dataset -> "Unverified statistic", severity "hard"\n'
     '- Prescriptive creep rule (MUST check user prompt):\n'
     '  * If GPT-1 gives advice/options AND the ORIGINAL PROMPT does NOT ask for advice/actions/recommendations -> finding "Prescriptive creep", severity "soft"\n'
     '  * If the ORIGINAL PROMPT explicitly asks about hiring professionals, attorneys, brokers, or asks "should I" / "would it help" / "what should I do":\n'
@@ -172,8 +201,13 @@ DEFAULT_GPT3_SYSTEM = (
     '  "final_policy_notes": ["..."]\n'
     '}\n\n'
     'Adjudication policy (apply deterministically):\n\n'
-    '1) If GPT-1 contains any fabricated statistic, specific legal conclusion, or claim of current legality without verification:\n'
-    '   -> arbiter_decision = "BLOCK" unless it can be deleted without harming coherence.\n\n'
+    '0) If ALL GPT-2 violations are soft-severity only (Prescriptive creep, '
+    'Unsupported evidence reference, Missing jurisdiction, Overconfidence):\n'
+    '   -> arbiter_decision = "ALLOW_WITH_EDITS" (NEVER "BLOCK" for soft-only violations)\n'
+    '   -> edits_for_gpt1 must DELETE or REWRITE the exact offending phrases.\n\n'
+    '1) If GPT-1 contains any fabricated statistic or specific legal conclusion without verification:\n'
+    '   -> Prefer "ALLOW_WITH_EDITS" if the offending fragment can be deleted or moved to Unknown.\n'
+    '   -> "BLOCK" ONLY if the output cannot be repaired without rewriting the entire substance.\n\n'
     '2) If GPT-2 flags a claim that is a non-quantitative procedural generality (e.g., "cases are assessed individually") '
     'AND GPT-1 already frames it as conditional/uncertain:\n'
     '   -> do NOT block; prefer "ALLOW_WITH_EDITS" to rephrase as inference and/or move to Unknown.\n\n'
@@ -248,12 +282,27 @@ def route_prompt(prompt: str) -> dict:
 
 
 # ---- Deterministic Sanitizer ----
+_BANNED_EVIDENCE_WORDS = [
+    "studies", "research", "data", "generally", "often",
+    "suggests", "typically", "usually", "commonly",
+]
 _BANNED_EVIDENCE_RE = re.compile(
-    r"(?i)\b(?:studies suggest|research shows|data indicates"
-    r"|generally|often|typically|commonly|usually)\b"
-    r"(?!\s*\([^)]+\))"  # not followed by a parenthetical citation
-    r"(?!\s*\[[^\]]+\])"  # not followed by a bracket citation
+    r"\b(" + "|".join(map(re.escape, _BANNED_EVIDENCE_WORDS)) + r")\b"
+    r"(?!\s*\([^)]+\))"   # not followed by a parenthetical citation
+    r"(?!\s*\[[^\]]+\])",  # not followed by a bracket citation
+    re.IGNORECASE,
 )
+_BANNED_SUBS = {
+    "studies": "published material",
+    "research": "published material",
+    "data": "evidence",
+    "generally": "in some cases",
+    "often": "in some cases",
+    "suggests": "may indicate",
+    "typically": "in some cases",
+    "usually": "in some cases",
+    "commonly": "in some cases",
+}
 _BARE_PERCENT_RE = re.compile(
     r"(?i)\b(?:about|roughly|approximately|around|nearly|close to|an estimated|estimated)?\s*"
     r"\d+(?:\.\d+)?\s*(?:%|percent)\b"
@@ -267,23 +316,70 @@ _OUTCOME_KW = re.compile(
     r"could help|could assist|may improve|may help|could potentially|"
     r"guarantee|ensure|succeed)\b"
 )
+_PRO_MENTION_RE = re.compile(
+    r"(?i)\b(?:hire|hiring|attorney|lawyer|broker|specialist|accountant|consultant)\b"
+)
+_PRO_BENEFIT_RE = re.compile(
+    r"(?i)\b(?:help|helps|assist|assists|improve|improves|reduce|reduces"
+    r"|increase|increases|significantly|better|boost)\b"
+)
+ROLE_DEFINITION_STMT = (
+    "An attorney's function is to advise on legal requirements and prepare filings; "
+    "whether that changes outcomes depends on case-specific factors and cannot be guaranteed."
+)
+_UNKNOWN_ACTIONABLE_LINE = "Unknown (Actionable): No authoritative dataset available."
 
 
 def sanitize_output(text: str, flags: dict) -> str:
-    """Pre-clean GPT-1 output deterministically before GPT-2 verification."""
-    result = text
-    # 1. Remove banned evidence phrases (not followed by citation)
-    result = _BANNED_EVIDENCE_RE.sub("", result)
-    # 2. Convert bare % claims
-    result = _BARE_PERCENT_RE.sub(
-        "Unknown (Actionable): No authoritative dataset available for this figure", result
-    )
+    """Pre-clean GPT-1 output deterministically before GPT-2 verification.
+
+    Uses word-for-word substitution (not deletion) to preserve grammar.
+    """
+    if not text:
+        return ""
+    out = text
+
+    # 1. Substitute banned evidence words (word-boundary, not delete)
+    def _sub_word(m):
+        return _BANNED_SUBS.get(m.group(0).lower(), m.group(0))
+    out = _BANNED_EVIDENCE_RE.sub(_sub_word, out)
+
+    # 2. If percent_requested: strip sentences with bare stats, ensure Unknown(Actionable)
+    if flags.get("percent_requested"):
+        sentences = re.split(r"(?<=[.!?])\s+", out)
+        kept = [s for s in sentences if not _BARE_PERCENT_RE.search(s)]
+        out = " ".join(kept)
+        if _UNKNOWN_ACTIONABLE_LINE not in out:
+            out += "\n\n" + _UNKNOWN_ACTIONABLE_LINE
+    else:
+        # For non-percent requests, still replace bare % with Unknown marker
+        out = _BARE_PERCENT_RE.sub(
+            "Unknown (Actionable): No authoritative dataset available for this figure", out
+        )
+
     # 3. Strip outcome-promise phrases
-    result = _OUTCOME_PROMISE_RE.sub("", result)
-    # Clean up residual double-spaces / trailing whitespace per line
-    result = re.sub(r"  +", " ", result)
-    result = re.sub(r" +\n", "\n", result)
-    return result.strip()
+    out = _OUTCOME_PROMISE_RE.sub("", out)
+
+    # 4. Professional mention: remove benefit-framing sentences, enforce role definition
+    if flags.get("advice_requested") or _PRO_MENTION_RE.search(text):
+        sentences = re.split(r"(?<=[.!?])\s+", out)
+        cleaned = [s for s in sentences if not (_PRO_MENTION_RE.search(s) and _PRO_BENEFIT_RE.search(s))]
+        out = " ".join(cleaned)
+        if _PRO_MENTION_RE.search(text) and ROLE_DEFINITION_STMT not in out:
+            out += "\n\n" + ROLE_DEFINITION_STMT
+
+    # 5. If advice NOT requested, strip "Options" section
+    if not flags.get("advice_requested"):
+        out = re.sub(
+            r"\n\s*(?:Options|Recommendations)\s*\n[\s\S]*?(?=\n\s*\d\)\s|\Z)",
+            "\n", out, flags=re.IGNORECASE,
+        )
+
+    # 6. Normalize whitespace
+    out = re.sub(r"  +", " ", out)
+    out = re.sub(r" +\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 def extract_json(raw: str) -> dict:
@@ -419,6 +515,28 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None):
             ):
                 continue
 
+            # Context-aware filter: if percent was requested and GPT-1 correctly
+            # abstained (Unknown Actionable), suppress findings that flag
+            # the standard abstention phrasing (e.g., "dataset").
+            if (
+                flags
+                and flags.get("percent_requested")
+                and ftype == "Unsupported evidence reference"
+                and severity == "soft"
+                and ("dataset" in detail.lower() or "unknown" in detail.lower())
+            ):
+                continue
+
+            # Context-aware filter: if jurisdiction IS present in the prompt,
+            # suppress "Missing jurisdiction" findings.
+            if (
+                flags
+                and flags.get("jurisdiction_present")
+                and ftype == "Missing jurisdiction"
+                and severity == "soft"
+            ):
+                continue
+
             findings.append({"type": ftype, "severity": severity, "detail": detail})
 
         # Derive violations list (backward compat)
@@ -502,6 +620,7 @@ def _build_response(
     *,
     gpt1_input: str,
     gpt1_output: str,
+    gpt1_output_sanitized: str = "",
     bypassed: bool = False,
     gpt2_raw: str = "",
     claim_table: list | None = None,
@@ -528,6 +647,7 @@ def _build_response(
     return PipelineResponse(
         gpt1_input=gpt1_input,
         gpt1_output=gpt1_output,
+        gpt1_output_sanitized=gpt1_output_sanitized,
         bypassed=bypassed,
         gpt2_raw=gpt2_raw,
         claim_table=claim_table or [],
@@ -611,11 +731,28 @@ def run_pipeline(req: PipelineRequest):
     gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
     gpt3_system = req.gpt3_system or DEFAULT_GPT3_SYSTEM
 
-    # If user explicitly requested advice, augment GPT-1 system prompt
+    # ---- Flag-driven GPT-1 system prompt augmentation ----
     if flags.get("advice_requested"):
         gpt1_system += (
             "\n\nNOTE: The user is explicitly requesting advice/options. "
             "You may provide conditional process guidance."
+        )
+    if flags.get("percent_requested"):
+        gpt1_system += (
+            "\n\nIMPORTANT: The user is asking for a percentage/rate/statistic. "
+            "You MUST NOT fabricate any number. If no authoritative dataset is available, "
+            "output exactly: Unknown (Actionable): No authoritative dataset available."
+        )
+    if flags.get("legal_mode") and not flags.get("jurisdiction_present"):
+        gpt1_system += (
+            "\n\nIMPORTANT: The user asks a legal/regulatory question but has NOT specified "
+            "a jurisdiction. You MUST NOT conclude legality/illegality. State in Unknowns: "
+            "Unknown (Actionable): Jurisdiction not specified; conclusion depends on applicable law."
+        )
+    if flags.get("future_year"):
+        gpt1_system += (
+            "\n\nIMPORTANT: The question references a future year. Do NOT assume current law "
+            "or policy will persist. Frame all forward-looking claims as Unknown (Structural)."
         )
 
     # ---- Step 1: GPT-1 Generate ----
@@ -644,6 +781,7 @@ def run_pipeline(req: PipelineRequest):
     if gpt2_verdict == "PASS":
         return _build_response(
             gpt1_input=req.prompt, gpt1_output=gpt1_output,
+            gpt1_output_sanitized=sanitized_output,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict="PASS",
             final_verdict="PASS", final_result=sanitized_output,
@@ -657,6 +795,7 @@ def run_pipeline(req: PipelineRequest):
         # is a no-op, so skip it and pass with a note instead.
         return _build_response(
             gpt1_input=req.prompt, gpt1_output=gpt1_output,
+            gpt1_output_sanitized=sanitized_output,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict,
             final_verdict="PASS (soft-only, sanitizer applied)",
@@ -680,10 +819,19 @@ def run_pipeline(req: PipelineRequest):
     gpt3_raw = call_openai(client, model, gpt3_system, gpt3_user, expect_json=True)
     arbiter_decision, arbiter_rationale, arbiter_edits, arbiter_policy_notes = parse_gpt3(gpt3_raw)
 
+    # Override: if all GPT-2 findings are soft, never BLOCK — force ALLOW_WITH_EDITS
+    if arbiter_decision == "BLOCK" and _all_soft(findings):
+        arbiter_decision = "ALLOW_WITH_EDITS"
+        arbiter_rationale.append(
+            "Overridden: all violations are soft-severity; "
+            "defaulting to ALLOW_WITH_EDITS per adjudication policy 0."
+        )
+
     # ---- Decision: BLOCK ----
     if arbiter_decision == "BLOCK":
         return _build_response(
             gpt1_input=req.prompt, gpt1_output=gpt1_output,
+            gpt1_output_sanitized=sanitized_output,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict,
             arbiter_invoked=True, arbiter_decision="BLOCK",
@@ -712,6 +860,7 @@ def run_pipeline(req: PipelineRequest):
 
         return _build_response(
             gpt1_input=req.prompt, gpt1_output=gpt1_output,
+            gpt1_output_sanitized=sanitized_output,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict,
             arbiter_invoked=True, arbiter_decision="ALLOW_AS_UNKNOWN_ONLY",
@@ -812,6 +961,18 @@ def _compute_pss_metrics(results: list) -> dict:
     ]
     HLR = (len(leaked) / len(fab_attempts)) if fab_attempts else 0.0
 
+    # HPR — Hallucination Prevention Rate
+    # (blocked OR safely abstained with "Unknown (Actionable)") / fabrication_attempts
+    if fab_attempts:
+        safely_handled = [
+            r for r in fab_attempts
+            if r["final_verdict"] == "FAIL"
+            or "Unknown (Actionable)" in r.get("final_result", "")
+        ]
+        HPR = len(safely_handled) / len(fab_attempts)
+    else:
+        HPR = 1.0
+
     fails = [r for r in results if r["final_verdict"] == "FAIL"]
     incorrect_fails = [
         r for r in fails
@@ -840,7 +1001,7 @@ def _compute_pss_metrics(results: list) -> dict:
 
     return {
         "score": round(score, 2),
-        "metrics": {"HLR": round(HLR, 4), "FPF": round(FPF, 4), "MCP": round(MCP, 4), "RLS": round(RLS, 4), "EOI": round(EOI, 4)},
+        "metrics": {"HLR": round(HLR, 4), "HPR": round(HPR, 4), "FPF": round(FPF, 4), "MCP": round(MCP, 4), "RLS": round(RLS, 4), "EOI": round(EOI, 4)},
         "penalties": {"P1": round(P1, 2), "P2": round(P2, 2), "P3": round(P3, 2), "P4": round(P4, 2), "P5": round(P5, 2)},
     }
 
@@ -1027,7 +1188,7 @@ UI_HTML = """
   .chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; max-width: 860px; width: 100%; margin: 0 auto; }
 
   /* Bubbles */
-  .b { max-width: 94%; padding: 14px 18px; border-radius: 14px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; overflow-x: auto; animation: fu 0.3s ease; }
+  .b { max-width: 94%; padding: 14px 18px; border-radius: 14px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; overflow-x: auto; animation: fu 0.3s ease; transition: opacity 0.2s ease, transform 0.2s ease; }
   .b .w { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
   .b.usr { align-self: flex-end; background: #1a1a2e; border: 1px solid #2a2a4e; color: #ccc; }
   .b.usr .w { color: #8888cc; }
@@ -1133,7 +1294,7 @@ UI_HTML = """
   .pss-big.s60 { color: #ff8a65; }
   .pss-big.s0 { color: #ef5350; }
   .pss-band { text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 16px; }
-  .metrics-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 16px; }
+  .metrics-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 16px; }
   .metric-card { background: #111; border: 1px solid #222; border-radius: 8px; padding: 12px; text-align: center; }
   .metric-card .mv { font-size: 22px; font-weight: 700; color: #e0e0e0; }
   .metric-card .ml { font-size: 10px; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
@@ -1144,9 +1305,12 @@ UI_HTML = """
   .cat-table .pr { font-weight: 600; }
 
   /* Collapsible details styling */
-  details { margin-top: 6px; }
+  details { margin-top: 6px; transition: max-height 0.2s ease; }
   details summary { cursor: pointer; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; padding: 4px 0; }
   details summary:hover { color: #bbb; }
+
+  .skeleton { background: linear-gradient(90deg, #1a1a1a 25%, #222 50%, #1a1a1a 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 8px; height: 16px; margin: 6px 0; }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
   @keyframes fu { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -1234,8 +1398,22 @@ Finding types and severities:
     - "Overconfidence" — Medium/High confidence with core Unsupported claims
     - "Missing jurisdiction" — legal/regulatory claim with ambiguous jurisdiction
 
+IMPORTANT keyword-matching rules (to reduce false positives):
+- Match trigger keywords as STANDALONE WORDS only. Do NOT treat substrings as matches.
+  "dataset", "database", "metadata" do NOT contain the keyword "data".
+  "researcher" does NOT trigger "research" unless used without a citation.
+- The exact phrase "Unknown (Actionable): No authoritative dataset available." is a REQUIRED
+  abstention output. It MUST NOT trigger any finding by itself.
+- The phrase "Unknown (Actionable)" or "Unknown (Structural)" MUST NOT be treated as unsupported.
+
+  HARD severity (additional):
+    - "Unverified statistic" — GPT-1 provides a specific percentage/rate/number when asked,
+      but without citing an authoritative dataset in the same claim
+
 Rules:
-- "studies/data/research/generally/often/suggests" without citation+numeric/quotable support -> finding type "Unsupported evidence reference", severity "soft"
+- "studies/data/research/generally/often/suggests" as standalone words without citation+numeric/quotable support -> finding type "Unsupported evidence reference", severity "soft"
+- Unverified statistic rule: if ORIGINAL PROMPT asks for a percentage/rate AND GPT-1 provides a specific
+  quantitative figure (e.g., "30%", "one in ten") without citing an authoritative dataset -> "Unverified statistic", severity "hard"
 - Prescriptive creep rule (MUST check user prompt):
   * If GPT-1 gives advice/options AND the ORIGINAL PROMPT does NOT ask for advice/actions/recommendations -> finding "Prescriptive creep", severity "soft"
   * If the ORIGINAL PROMPT explicitly asks about hiring professionals, attorneys, brokers, or asks "should I" / "would it help" / "what should I do":
@@ -1276,8 +1454,12 @@ You must output VALID JSON ONLY with this schema:
 
 Adjudication policy (apply deterministically):
 
-1) If GPT-1 contains any fabricated statistic, specific legal conclusion, or claim of current legality without verification:
-   -> arbiter_decision = "BLOCK" unless it can be deleted without harming coherence.
+0) If ALL GPT-2 violations are soft-severity only (Prescriptive creep, Unsupported evidence reference, Missing jurisdiction, Overconfidence):
+   -> arbiter_decision = "ALLOW_WITH_EDITS" (NEVER "BLOCK" for soft-only violations)
+   -> edits_for_gpt1 must DELETE or REWRITE the exact offending phrases.
+
+1) If GPT-1 contains any fabricated statistic or specific legal conclusion without verification:
+   -> Prefer "ALLOW_WITH_EDITS" if the offending fragment can be deleted or moved to Unknown. BLOCK ONLY if the output cannot be repaired.
 
 2) If GPT-2 flags a claim that is a non-quantitative procedural generality (e.g., "cases are assessed individually") AND GPT-1 already frames it as conditional/uncertain:
    -> do NOT block; prefer "ALLOW_WITH_EDITS" to rephrase as inference and/or move to Unknown.
@@ -1355,6 +1537,13 @@ document.addEventListener('keydown', function(evt) {
       closeStress();
     }
   }
+});
+
+document.addEventListener('keydown', function(evt) {
+    if ((evt.metaKey || evt.ctrlKey) && evt.key === 'Enter') {
+        const form = document.querySelector('.ibar form');
+        if (form) form.dispatchEvent(new Event('submit', {cancelable: true}));
+    }
 });
 
 // Fetch dynamic categories with hardcoded fallback
@@ -1502,6 +1691,7 @@ function renderStressSummary(d, el) {
   const p = pss.penalties;
   const cards = [
     {label: 'HLR', desc: 'Hallucination Leakage', val: ((m.HLR||0)*100).toFixed(1) + '%', pen: p.P1},
+    {label: 'HPR', desc: 'Hallucination Prevention', val: ((m.HPR||0)*100).toFixed(1) + '%', pen: null},
     {label: 'FPF', desc: 'False-Positive FAIL', val: (m.FPF*100).toFixed(1) + '%', pen: p.P2},
     {label: 'MCP', desc: 'Min Compliance Pass', val: (m.MCP*100).toFixed(1) + '%', pen: p.P3},
     {label: 'RLS', desc: 'Rewrite Loop Avg', val: m.RLS.toFixed(2), pen: p.P4},
@@ -1509,7 +1699,7 @@ function renderStressSummary(d, el) {
   ];
   h += '<div class="metrics-grid">';
   cards.forEach(function(c) {
-    h += '<div class="metric-card"><div class="mv">' + c.val + '</div><div class="ml">' + c.label + '</div><div class="ml">' + c.desc + '</div><div class="mp">-' + c.pen.toFixed(1) + '</div></div>';
+    h += '<div class="metric-card"><div class="mv">' + c.val + '</div><div class="ml">' + c.label + '</div><div class="ml">' + c.desc + '</div>' + (c.pen !== null ? '<div class="mp">-' + c.pen.toFixed(1) + '</div>' : '<div class="ml">info</div>') + '</div>';
   });
   h += '</div>';
 
@@ -1674,7 +1864,7 @@ async function submitPrompt(e) {
   const chatContainer = document.getElementById('chatContainer');
   const ld = document.createElement('div');
   ld.className = 'ld';
-  ld.innerHTML = '<div class="spinner"></div><br>Processing pipeline...';
+  ld.innerHTML = '<div class="skeleton" style="width:60%"></div><div class="skeleton" style="width:80%"></div><div class="skeleton" style="width:45%"></div><div style="font-size:11px;color:#666;margin-top:8px;">Processing pipeline...</div>';
   chatContainer.appendChild(ld);
   chatContainer.scrollTop = chatContainer.scrollHeight;
 
@@ -1798,6 +1988,20 @@ async function submitPrompt(e) {
         blockMsg += '\\n\\nArbiter rationale:\\n' + d.arbiter_rationale.map(function(r) { return '- ' + r; }).join('\\n');
       }
       addBubble('fo blk', 'Final Output', blockMsg);
+
+    // "Why blocked" panel with exact violations
+    if (d.violations && d.violations.length > 0) {
+        let whyHtml = '<div style="margin-top:8px;padding:12px;background:#1a0a0a;border:1px solid #2a1515;border-radius:8px;">';
+        whyHtml += '<div style="font-size:10px;color:#ef5350;text-transform:uppercase;margin-bottom:6px;letter-spacing:0.5px;">Why Blocked</div>';
+        d.violations.forEach(function(v) { whyHtml += '<div style="font-size:12px;color:#ef9090;margin:2px 0;">\\u2022 ' + escapeHtml(v) + '</div>'; });
+        whyHtml += '</div>';
+        addBubble('', '', whyHtml);
+    }
+    }
+
+    // Show sanitized output diff if sanitizer was applied
+    if (d.sanitizer_applied && d.gpt1_output_sanitized && d.gpt1_output_sanitized !== d.gpt1_output) {
+        addBubble('', '', '<details><summary style="font-size:10px;color:#666;cursor:pointer;">Sanitizer Applied (click to view cleaned output)</summary><div style="font-size:12px;color:#999;padding:8px;background:#0a0a0a;border:1px solid #1a1a1a;border-radius:6px;margin-top:4px;white-space:pre-wrap;">' + escapeHtml(d.gpt1_output_sanitized) + '</div></details>');
     }
 
   } catch(err) {
