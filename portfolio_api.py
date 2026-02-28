@@ -1,5 +1,6 @@
 from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
@@ -19,6 +20,16 @@ _CONFIG_PATH = _BASE_DIR / ".config.json"
 
 app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline")
 
+# CORS — allow n8n and external frontends to call the API
+_CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception):
@@ -30,6 +41,16 @@ async def _global_exception_handler(request: Request, exc: Exception):
 
 
 import hashlib as _hl
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "status": "ok",
+        "key_set": "api_key" in _openai_config,
+        "model": _openai_config.get("model", "not set"),
+    }
+
 
 @app.get("/")
 def ui():
@@ -1872,4 +1893,4 @@ document.getElementById('ui').focus();
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

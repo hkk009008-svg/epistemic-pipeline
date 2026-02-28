@@ -27,7 +27,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://localhost:8000/api/pipeline",
+        "url": "={{ $vars.PIPELINE_BASE_URL || 'http://localhost:8000' }}/api/pipeline",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ prompt: $json.body.prompt }) }}",
