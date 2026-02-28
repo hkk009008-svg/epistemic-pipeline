@@ -36,7 +36,16 @@
         "jsonBody": "{\"prompt\": \"What is a 401(k) retirement plan?\"}",
         "options": {
           "timeout": 60000
-        }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $env.PIPELINE_AUTH_TOKEN ? 'Bearer ' + $env.PIPELINE_AUTH_TOKEN : '' }}"
+            }
+          ]
+        },
+        "sendHeaders": true
       },
       "id": "k1b2c3d4-e5f6-7890-abcd-ef1234567900",
       "name": "Health Check Call",

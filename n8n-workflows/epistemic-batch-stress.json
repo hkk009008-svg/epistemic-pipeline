@@ -34,7 +34,16 @@
         "jsonBody": "={{ JSON.stringify({ api_key: $json.body.api_key || \"\", model: $json.body.model || \"gpt-4o-mini\" }) }}",
         "options": {
           "timeout": 10000
-        }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $env.PIPELINE_AUTH_TOKEN ? 'Bearer ' + $env.PIPELINE_AUTH_TOKEN : '' }}"
+            }
+          ]
+        },
+        "sendHeaders": true
       },
       "id": "g1b2c3d4-e5f6-7890-abcd-ef1234567896",
       "name": "Set API Key",
@@ -54,7 +63,20 @@
         "jsonBody": "={{ JSON.stringify({ category: $node[\"Stress Webhook\"].json.body.category || null, count: $node[\"Stress Webhook\"].json.body.count || null }) }}",
         "options": {
           "timeout": 600000
-        }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $env.PIPELINE_AUTH_TOKEN ? 'Bearer ' + $env.PIPELINE_AUTH_TOKEN : '' }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/x-ndjson"
+            }
+          ]
+        },
+        "sendHeaders": true
       },
       "id": "h1b2c3d4-e5f6-7890-abcd-ef1234567897",
       "name": "Run Stress Test",

@@ -34,7 +34,16 @@
         "jsonBody": "={{ JSON.stringify({ prompt: $json.body.prompt }) }}",
         "options": {
           "timeout": 180000
-        }
+        },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $env.PIPELINE_AUTH_TOKEN ? 'Bearer ' + $env.PIPELINE_AUTH_TOKEN : '' }}"
+            }
+          ]
+        },
+        "sendHeaders": true
       },
       "id": "b1b2c3d4-e5f6-7890-abcd-ef1234567891",
       "name": "Call Pipeline API",

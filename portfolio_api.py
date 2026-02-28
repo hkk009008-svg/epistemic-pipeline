@@ -1,6 +1,6 @@
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import json
@@ -8,10 +8,36 @@ import os
 import re
 import statistics
 import time
+import uuid
 from collections import Counter, defaultdict
 import openai
+import httpx
 
 app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline")
+
+
+def _require_auth(request: Request) -> None:
+    """Optional bearer-token auth for sensitive API routes."""
+    required = os.getenv("PIPELINE_AUTH_TOKEN", "").strip()
+    if not required:
+        return
+
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token.")
+
+    provided = auth.split(" ", 1)[1].strip()
+    if provided != required:
+        raise HTTPException(status_code=401, detail="Invalid bearer token.")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    error_id = str(uuid.uuid4())[:8]
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error_id": error_id},
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -354,8 +380,16 @@ def call_openai(client, model: str, system: str, user_content: str, expect_json:
         raise HTTPException(status_code=401, detail="Invalid OpenAI API key. Please re-enter your key.")
     except openai.RateLimitError:
         raise HTTPException(status_code=429, detail="OpenAI rate limit hit. Wait a moment and try again.")
+    except openai.APITimeoutError:
+        raise HTTPException(status_code=504, detail="OpenAI request timed out. Please retry.")
+    except openai.APIConnectionError:
+        raise HTTPException(status_code=503, detail="OpenAI connection failed. Please retry.")
     except openai.APIError as e:
         raise HTTPException(status_code=502, detail=f"OpenAI API error: {str(e)}")
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Upstream timeout contacting model provider.")
+    except httpx.NetworkError:
+        raise HTTPException(status_code=503, detail="Network error contacting model provider.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error calling OpenAI: {str(e)}")
 
@@ -479,7 +513,8 @@ def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
 # =====================================================
 
 @app.post("/api/openai/config")
-def set_openai_config(config: OpenAIConfig):
+def set_openai_config(config: OpenAIConfig, request: Request):
+    _require_auth(request)
     clean_key = config.api_key.strip()
     clean_key = clean_key.encode("ascii", errors="ignore").decode("ascii")
     clean_key = clean_key.replace(" ", "")
@@ -490,7 +525,8 @@ def set_openai_config(config: OpenAIConfig):
     return {"status": "ok", "model": config.model, "key_set": True}
 
 @app.get("/api/openai/config")
-def get_openai_config():
+def get_openai_config(request: Request):
+    _require_auth(request)
     if "api_key" not in _openai_config:
         return {"key_set": False}
     masked = _openai_config["api_key"][:8] + "..." + _openai_config["api_key"][-4:]
@@ -503,7 +539,8 @@ def _all_soft(findings: List[dict]) -> bool:
 
 
 @app.post("/api/pipeline", response_model=PipelineResponse)
-def run_pipeline(req: PipelineRequest):
+def run_pipeline(req: PipelineRequest, request: Request):
+    _require_auth(request)
     if "api_key" not in _openai_config:
         raise HTTPException(status_code=400, detail="Set your OpenAI API key first.")
 
@@ -755,8 +792,9 @@ def _compute_pss_metrics(results: list) -> dict:
 
 
 @app.post("/api/stress")
-def run_stress_test(req: StressRequest):
+def run_stress_test(req: StressRequest, request: Request):
     """Run stress harness inline — returns streaming JSONL progress + final score."""
+    _require_auth(request)
     if "api_key" not in _openai_config:
         raise HTTPException(status_code=400, detail="Set your OpenAI API key first.")
 
@@ -1070,6 +1108,13 @@ UI_HTML = """
     </div>
     <div class="cfg-st" id="ks">No key set</div>
 
+    <label>Access Token (optional)</label>
+    <div class="cfg-row">
+      <input type="password" id="at" placeholder="Bearer token for protected endpoints">
+      <button class="btn-s" onclick="saveToken()">Save Token</button>
+    </div>
+    <div class="cfg-st" id="ts">No token set</div>
+
     <label>GPT-1 System Prompt (Generator)</label>
     <textarea id="g1s" rows="4">You are GPT-1, a structured reasoning and synthesis engine.
 
@@ -1141,6 +1186,36 @@ function tog() { document.getElementById('cd').classList.toggle('open'); }
 function openStress() { document.getElementById('sp').classList.add('open'); }
 function closeStress() { document.getElementById('sp').classList.remove('open'); }
 
+function authToken() {
+  const input = document.getElementById('at');
+  const typed = input ? input.value.trim() : '';
+  if (typed) return typed;
+  return localStorage.getItem('pipeline_auth_token') || '';
+}
+
+function apiHeaders(extra = {}) {
+  const h = {...extra};
+  const token = authToken();
+  if (token) h['Authorization'] = 'Bearer ' + token;
+  return h;
+}
+
+function saveToken() {
+  const input = document.getElementById('at');
+  const status = document.getElementById('ts');
+  const token = input.value.trim();
+  if (token) {
+    localStorage.setItem('pipeline_auth_token', token);
+    status.textContent = 'Token saved';
+    status.className = 'cfg-st ok';
+    input.value = '';
+  } else {
+    localStorage.removeItem('pipeline_auth_token');
+    status.textContent = 'No token set';
+    status.className = 'cfg-st';
+  }
+}
+
 async function runStress() {
   const btn = document.getElementById('sr');
   const log = document.getElementById('sl');
@@ -1160,13 +1235,19 @@ async function runStress() {
   try {
     const resp = await fetch('/api/stress', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: apiHeaders({'Content-Type': 'application/json', 'Accept': 'application/x-ndjson'}),
       body: JSON.stringify(body),
     });
 
     if (!resp.ok) {
-      const err = await resp.json();
-      log.innerHTML += '<span class="fail">ERROR: ' + esc(err.detail || 'Request failed') + '</span>';
+      let detail = 'Request failed';
+      try {
+        const err = await resp.json();
+        detail = err.detail || detail;
+      } catch(_) {
+        detail = await resp.text() || detail;
+      }
+      log.innerHTML += '<span class="fail">ERROR: ' + esc(detail) + '</span>';
       btn.disabled = false;
       return;
     }
@@ -1183,7 +1264,13 @@ async function runStress() {
       buf = lines.pop();
       for (const line of lines) {
         if (!line.trim()) continue;
-        const d = JSON.parse(line);
+        let d;
+        try {
+          d = JSON.parse(line);
+        } catch(_) {
+          log.innerHTML += '<span class="fail">WARN: Non-JSON stream line: ' + esc(line) + '</span>\n';
+          continue;
+        }
         if (d.type === 'progress') {
           let cls = d.verdict === 'PASS' ? 'pass' : 'fail';
           let extra = '';
@@ -1256,8 +1343,13 @@ function renderStressSummary(d, el) {
 }
 
 async function lc() {
+  const tStatus = document.getElementById('ts');
+  const savedToken = localStorage.getItem('pipeline_auth_token') || '';
+  tStatus.textContent = savedToken ? 'Token saved' : 'No token set';
+  tStatus.className = savedToken ? 'cfg-st ok' : 'cfg-st';
+
   try {
-    const r = await fetch('/api/openai/config');
+    const r = await fetch('/api/openai/config', {headers: apiHeaders()});
     const d = await r.json();
     const dot = document.getElementById('kd');
     const st = document.getElementById('ks');
@@ -1278,7 +1370,7 @@ async function sav() {
   if (!k) return;
   await fetch('/api/openai/config', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: apiHeaders({'Content-Type': 'application/json'}),
     body: JSON.stringify({api_key: k, model: document.getElementById('md').value})
   });
   document.getElementById('ak').value = '';
@@ -1374,7 +1466,7 @@ async function go(e) {
   try {
     const r = await fetch('/api/pipeline', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: apiHeaders({'Content-Type': 'application/json'}),
       body: JSON.stringify({
         prompt: prompt,
         gpt1_system: document.getElementById('g1s').value,
@@ -1387,8 +1479,14 @@ async function go(e) {
     ld.remove();
 
     if (!r.ok) {
-      const err = await r.json();
-      ab('err', '', esc(err.detail || 'Request failed'));
+      let detail = 'Request failed';
+      try {
+        const err = await r.json();
+        detail = err.detail || detail;
+      } catch(_) {
+        detail = await r.text() || detail;
+      }
+      ab('err', '', esc(detail));
       return;
     }
 
