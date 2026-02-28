@@ -1,0 +1,216 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1680" font-family="'Segoe UI', -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0a0a0a"/>
+      <stop offset="100%" stop-color="#111118"/>
+    </linearGradient>
+    <linearGradient id="scoreGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4fc3f7"/>
+      <stop offset="100%" stop-color="#66bb6a"/>
+    </linearGradient>
+    <linearGradient id="barGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#4fc3f7"/>
+      <stop offset="100%" stop-color="#0277bd"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="1680" fill="url(#bg)" rx="16"/>
+
+  <!-- Header -->
+  <text x="500" y="52" text-anchor="middle" fill="#e0e0e0" font-size="24" font-weight="700">Epistemic Verification Pipeline</text>
+  <text x="500" y="78" text-anchor="middle" fill="#555" font-size="13">Comprehensive Application Rating &amp; Evaluation</text>
+
+  <!-- Overall Score Circle -->
+  <circle cx="500" cy="170" r="72" fill="none" stroke="#1a1a1a" stroke-width="8"/>
+  <circle cx="500" cy="170" r="72" fill="none" stroke="url(#scoreGrad)" stroke-width="8"
+          stroke-dasharray="362" stroke-dashoffset="54" stroke-linecap="round"
+          transform="rotate(-90 500 170)" filter="url(#glow)"/>
+  <text x="500" y="163" text-anchor="middle" fill="#e0e0e0" font-size="42" font-weight="800">85</text>
+  <text x="500" y="186" text-anchor="middle" fill="#888" font-size="13">/100</text>
+  <text x="500" y="265" text-anchor="middle" fill="#66bb6a" font-size="14" font-weight="600">STRONG — Production-Worthy with Minor Gaps</text>
+
+  <!-- Divider -->
+  <line x1="60" y1="290" x2="940" y2="290" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ===== CATEGORY SCORES ===== -->
+  <text x="60" y="325" fill="#888" font-size="11" font-weight="600" letter-spacing="1">CATEGORY SCORES</text>
+
+  <!-- Architecture — 90/100 -->
+  <text x="60" y="358" fill="#e0e0e0" font-size="14" font-weight="600">Architecture &amp; Design</text>
+  <text x="920" y="358" text-anchor="end" fill="#66bb6a" font-size="14" font-weight="700">90</text>
+  <rect x="60" y="366" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="366" width="774" height="6" rx="3" fill="url(#barGrad)"/>
+
+  <!-- Code Quality — 82/100 -->
+  <text x="60" y="400" fill="#e0e0e0" font-size="14" font-weight="600">Code Quality</text>
+  <text x="920" y="400" text-anchor="end" fill="#ffb74d" font-size="14" font-weight="700">82</text>
+  <rect x="60" y="408" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="408" width="705" height="6" rx="3" fill="#ffb74d"/>
+
+  <!-- AI/LLM Pipeline — 92/100 -->
+  <text x="60" y="442" fill="#e0e0e0" font-size="14" font-weight="600">AI/LLM Pipeline Logic</text>
+  <text x="920" y="442" text-anchor="end" fill="#66bb6a" font-size="14" font-weight="700">92</text>
+  <rect x="60" y="450" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="450" width="791" height="6" rx="3" fill="#66bb6a"/>
+
+  <!-- Testing & Evaluation — 88/100 -->
+  <text x="60" y="484" fill="#e0e0e0" font-size="14" font-weight="600">Testing &amp; Evaluation Framework</text>
+  <text x="920" y="484" text-anchor="end" fill="#66bb6a" font-size="14" font-weight="700">88</text>
+  <rect x="60" y="492" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="492" width="757" height="6" rx="3" fill="#66bb6a"/>
+
+  <!-- UI/UX — 80/100 -->
+  <text x="60" y="526" fill="#e0e0e0" font-size="14" font-weight="600">UI/UX Design</text>
+  <text x="920" y="526" text-anchor="end" fill="#ffb74d" font-size="14" font-weight="700">80</text>
+  <rect x="60" y="534" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="534" width="688" height="6" rx="3" fill="#ffb74d"/>
+
+  <!-- DevOps & Orchestration — 85/100 -->
+  <text x="60" y="568" fill="#e0e0e0" font-size="14" font-weight="600">DevOps &amp; Orchestration</text>
+  <text x="920" y="568" text-anchor="end" fill="#66bb6a" font-size="14" font-weight="700">85</text>
+  <rect x="60" y="576" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="576" width="731" height="6" rx="3" fill="#4fc3f7"/>
+
+  <!-- Security — 72/100 -->
+  <text x="60" y="610" fill="#e0e0e0" font-size="14" font-weight="600">Security</text>
+  <text x="920" y="610" text-anchor="end" fill="#ff8a65" font-size="14" font-weight="700">72</text>
+  <rect x="60" y="618" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="618" width="619" height="6" rx="3" fill="#ff8a65"/>
+
+  <!-- Documentation — 68/100 -->
+  <text x="60" y="652" fill="#e0e0e0" font-size="14" font-weight="600">Documentation</text>
+  <text x="920" y="652" text-anchor="end" fill="#ff8a65" font-size="14" font-weight="700">68</text>
+  <rect x="60" y="660" width="860" height="6" rx="3" fill="#1a1a1a"/>
+  <rect x="60" y="660" width="585" height="6" rx="3" fill="#ff8a65"/>
+
+  <!-- Divider -->
+  <line x1="60" y1="690" x2="940" y2="690" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ===== STRENGTHS ===== -->
+  <text x="60" y="722" fill="#66bb6a" font-size="11" font-weight="600" letter-spacing="1">STRENGTHS</text>
+
+  <circle cx="76" cy="748" r="4" fill="#66bb6a"/>
+  <text x="90" y="753" fill="#ccc" font-size="13">Three-stage epistemic pipeline (GPT-1 Generate → GPT-2 Verify → GPT-3 Arbitrate) is a novel, well-designed architecture</text>
+
+  <circle cx="76" cy="776" r="4" fill="#66bb6a"/>
+  <text x="90" y="781" fill="#ccc" font-size="13">Comprehensive 100-test stress harness with 5 quantitative metrics (HBR/HLR, FPF, MCP, RLS, EOI)</text>
+
+  <circle cx="76" cy="804" r="4" fill="#66bb6a"/>
+  <text x="90" y="809" fill="#ccc" font-size="13">Deterministic prompt routing and sanitizer layer reduces hallucination risk before LLM verification</text>
+
+  <circle cx="76" cy="832" r="4" fill="#66bb6a"/>
+  <text x="90" y="837" fill="#ccc" font-size="13">Sophisticated severity-tiered violation system (hard vs. soft) with calibrated verdict logic</text>
+
+  <circle cx="76" cy="860" r="4" fill="#66bb6a"/>
+  <text x="90" y="865" fill="#ccc" font-size="13">Self-healing rewrite loop with arbiter-directed edits (DELETE / REWRITE / MOVE_TO_UNKNOWN)</text>
+
+  <circle cx="76" cy="888" r="4" fill="#66bb6a"/>
+  <text x="90" y="893" fill="#ccc" font-size="13">Beautiful dark-themed single-page UI with real-time streaming stress test visualization</text>
+
+  <circle cx="76" cy="916" r="4" fill="#66bb6a"/>
+  <text x="90" y="921" fill="#ccc" font-size="13">Robust JSON extraction with fallback parsing, retry logic, and truncation recovery</text>
+
+  <circle cx="76" cy="944" r="4" fill="#66bb6a"/>
+  <text x="90" y="949" fill="#ccc" font-size="13">n8n workflow integration for orchestration, health checks (6h interval), and batch stress testing</text>
+
+  <!-- Divider -->
+  <line x1="60" y1="975" x2="940" y2="975" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ===== WEAKNESSES ===== -->
+  <text x="60" y="1007" fill="#ef5350" font-size="11" font-weight="600" letter-spacing="1">WEAKNESSES &amp; RISKS</text>
+
+  <circle cx="76" cy="1033" r="4" fill="#ef5350"/>
+  <text x="90" y="1038" fill="#ccc" font-size="13">API key stored in-memory dict (_openai_config) — no persistence, no encryption, lost on restart</text>
+
+  <circle cx="76" cy="1061" r="4" fill="#ef5350"/>
+  <text x="90" y="1066" fill="#ccc" font-size="13">No authentication/authorization on any endpoint — anyone can set API keys or run stress tests</text>
+
+  <circle cx="76" cy="1089" r="4" fill="#ef5350"/>
+  <text x="90" y="1094" fill="#ccc" font-size="13">Hardcoded n8n credentials in start.sh (admin@epistemic.local / EpistemicPipeline2024!)</text>
+
+  <circle cx="76" cy="1117" r="4" fill="#ff8a65"/>
+  <text x="90" y="1122" fill="#ccc" font-size="13">No README, requirements.txt, or dependency management — setup instructions are absent</text>
+
+  <circle cx="76" cy="1145" r="4" fill="#ff8a65"/>
+  <text x="90" y="1150" fill="#ccc" font-size="13">Entire UI is a single HTML string embedded in Python (1000+ lines) — no separation of concerns</text>
+
+  <circle cx="76" cy="1173" r="4" fill="#ff8a65"/>
+  <text x="90" y="1178" fill="#ccc" font-size="13">No unit tests — only integration-level stress harness exists; no pytest or test framework setup</text>
+
+  <circle cx="76" cy="1201" r="4" fill="#ff8a65"/>
+  <text x="90" y="1206" fill="#ccc" font-size="13">Single-file monolith (portfolio_api.py ~1400 lines) — models, routes, UI, prompts all in one file</text>
+
+  <circle cx="76" cy="1229" r="4" fill="#ffb74d"/>
+  <text x="90" y="1234" fill="#ccc" font-size="13">ACTIVATION_PATTERNS bypass could be exploited to skip verification on crafted outputs</text>
+
+  <!-- Divider -->
+  <line x1="60" y1="1265" x2="940" y2="1265" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ===== TECH STACK ===== -->
+  <text x="60" y="1297" fill="#4fc3f7" font-size="11" font-weight="600" letter-spacing="1">TECH STACK</text>
+
+  <rect x="60" y="1312" width="130" height="30" rx="6" fill="#0a1a2a" stroke="#1a3a5c" stroke-width="1"/>
+  <text x="125" y="1332" text-anchor="middle" fill="#4fc3f7" font-size="12" font-weight="600">Python 3 / FastAPI</text>
+
+  <rect x="200" y="1312" width="100" height="30" rx="6" fill="#0a1a2a" stroke="#1a3a5c" stroke-width="1"/>
+  <text x="250" y="1332" text-anchor="middle" fill="#4fc3f7" font-size="12" font-weight="600">OpenAI SDK</text>
+
+  <rect x="310" y="1312" width="80" height="30" rx="6" fill="#0a1a2a" stroke="#1a3a5c" stroke-width="1"/>
+  <text x="350" y="1332" text-anchor="middle" fill="#4fc3f7" font-size="12" font-weight="600">Pydantic</text>
+
+  <rect x="400" y="1312" width="60" height="30" rx="6" fill="#1a0a1a" stroke="#3a1540" stroke-width="1"/>
+  <text x="430" y="1332" text-anchor="middle" fill="#ce93d8" font-size="12" font-weight="600">n8n</text>
+
+  <rect x="470" y="1312" width="90" height="30" rx="6" fill="#1a120a" stroke="#3a2515" stroke-width="1"/>
+  <text x="515" y="1332" text-anchor="middle" fill="#ff8a65" font-size="12" font-weight="600">Vanilla JS</text>
+
+  <rect x="570" y="1312" width="70" height="30" rx="6" fill="#0a1a1a" stroke="#154040" stroke-width="1"/>
+  <text x="605" y="1332" text-anchor="middle" fill="#4db6ac" font-size="12" font-weight="600">Uvicorn</text>
+
+  <!-- Divider -->
+  <line x1="60" y1="1368" x2="940" y2="1368" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- ===== VERDICT ===== -->
+  <text x="60" y="1400" fill="#888" font-size="11" font-weight="600" letter-spacing="1">VERDICT</text>
+
+  <rect x="60" y="1416" width="880" height="120" rx="10" fill="#0d1a0d" stroke="#1b3e1b" stroke-width="1"/>
+  <text x="80" y="1445" fill="#e0e0e0" font-size="14" font-weight="600">A creative and technically impressive epistemic verification pipeline that demonstrates deep</text>
+  <text x="80" y="1467" fill="#e0e0e0" font-size="14" font-weight="600">understanding of LLM reliability challenges. The three-stage architecture with deterministic</text>
+  <text x="80" y="1489" fill="#e0e0e0" font-size="14" font-weight="600">sanitization, severity-tiered verification, and arbiter-directed rewrites is well-conceived.</text>
+  <text x="80" y="1518" fill="#aaa" font-size="13">To reach 90+: add auth, split the monolith, write unit tests, add a README, and secure credentials.</text>
+
+  <!-- File Stats -->
+  <text x="60" y="1570" fill="#555" font-size="11" font-weight="600" letter-spacing="1">CODEBASE STATS</text>
+
+  <rect x="60" y="1586" width="130" height="50" rx="6" fill="#111" stroke="#222" stroke-width="1"/>
+  <text x="125" y="1608" text-anchor="middle" fill="#e0e0e0" font-size="20" font-weight="700">~1400</text>
+  <text x="125" y="1626" text-anchor="middle" fill="#555" font-size="10">LINES (API)</text>
+
+  <rect x="210" y="1586" width="130" height="50" rx="6" fill="#111" stroke="#222" stroke-width="1"/>
+  <text x="275" y="1608" text-anchor="middle" fill="#e0e0e0" font-size="20" font-weight="700">100</text>
+  <text x="275" y="1626" text-anchor="middle" fill="#555" font-size="10">TEST CASES</text>
+
+  <rect x="360" y="1586" width="130" height="50" rx="6" fill="#111" stroke="#222" stroke-width="1"/>
+  <text x="425" y="1608" text-anchor="middle" fill="#e0e0e0" font-size="20" font-weight="700">10</text>
+  <text x="425" y="1626" text-anchor="middle" fill="#555" font-size="10">CATEGORIES</text>
+
+  <rect x="510" y="1586" width="130" height="50" rx="6" fill="#111" stroke="#222" stroke-width="1"/>
+  <text x="575" y="1608" text-anchor="middle" fill="#e0e0e0" font-size="20" font-weight="700">3</text>
+  <text x="575" y="1626" text-anchor="middle" fill="#555" font-size="10">n8n WORKFLOWS</text>
+
+  <rect x="660" y="1586" width="130" height="50" rx="6" fill="#111" stroke="#222" stroke-width="1"/>
+  <text x="725" y="1608" text-anchor="middle" fill="#e0e0e0" font-size="20" font-weight="700">5</text>
+  <text x="725" y="1626" text-anchor="middle" fill="#555" font-size="10">PSS METRICS</text>
+
+  <rect x="810" y="1586" width="130" height="50" rx="6" fill="#111" stroke="#222" stroke-width="1"/>
+  <text x="875" y="1608" text-anchor="middle" fill="#e0e0e0" font-size="20" font-weight="700">3</text>
+  <text x="875" y="1626" text-anchor="middle" fill="#555" font-size="10">LLM STAGES</text>
+
+  <!-- Footer -->
+  <text x="500" y="1665" text-anchor="middle" fill="#333" font-size="11">Generated by code review analysis — February 2026</text>
+</svg>
