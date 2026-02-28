@@ -1,0 +1,212 @@
+{
+  "updatedAt": "2026-02-28T04:32:54.012Z",
+  "createdAt": "2026-02-28T04:32:54.012Z",
+  "id": "LKxNWPQ6ahe3oVmP",
+  "name": "Epistemic Pipeline Health Check",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "j1b2c3d4-e5f6-7890-abcd-ef1234567899",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/pipeline",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"prompt\": \"What is a 401(k) retirement plan?\"}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "k1b2c3d4-e5f6-7890-abcd-ef1234567900",
+      "name": "Health Check Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "hc",
+              "leftValue": "={{ $json.final_verdict }}",
+              "rightValue": "PASS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "l1b2c3d4-e5f6-7890-abcd-ef1234567901",
+      "name": "Health Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "h1",
+              "name": "health_status",
+              "value": "HEALTHY",
+              "type": "string"
+            },
+            {
+              "id": "h2",
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "m1b2c3d4-e5f6-7890-abcd-ef1234567902",
+      "name": "Pipeline Healthy",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "u1",
+              "name": "health_status",
+              "value": "UNHEALTHY",
+              "type": "string"
+            },
+            {
+              "id": "u2",
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}",
+              "type": "string"
+            },
+            {
+              "id": "u3",
+              "name": "error",
+              "value": "={{ JSON.stringify($node[\"Health Check Call\"].json) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "n1b2c3d4-e5f6-7890-abcd-ef1234567903",
+      "name": "Pipeline Unhealthy",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        900,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Health Check Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Check Call": {
+      "main": [
+        [
+          {
+            "node": "Health Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Health Router": {
+      "main": [
+        [
+          {
+            "node": "Pipeline Healthy",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pipeline Unhealthy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "df3f2a5e-3b46-4f40-8bfc-aa4cd06a2588",
+  "versionCounter": 4,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-02-28T04:32:54.014Z",
+      "createdAt": "2026-02-28T04:32:54.014Z",
+      "role": "workflow:owner",
+      "workflowId": "LKxNWPQ6ahe3oVmP",
+      "projectId": "J8B0ZRRzuMSpIEH9",
+      "project": {
+        "updatedAt": "2026-02-28T04:26:25.445Z",
+        "createdAt": "2026-02-28T04:25:40.013Z",
+        "id": "J8B0ZRRzuMSpIEH9",
+        "name": "Admin User <admin@epistemic.local>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "0112d9c7-7222-4e80-9397-3138a890f4e4"
+      }
+    }
+  ],
+  "tags": []
+}

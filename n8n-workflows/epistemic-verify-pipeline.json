@@ -1,0 +1,263 @@
+{
+  "updatedAt": "2026-02-28T04:31:53.252Z",
+  "createdAt": "2026-02-28T04:31:53.252Z",
+  "id": "Mt2w64vlkt4XUzOk",
+  "name": "Epistemic Verification Pipeline",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "epistemic-verify",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/pipeline",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ prompt: $json.body.prompt }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "b1b2c3d4-e5f6-7890-abcd-ef1234567891",
+      "name": "Call Pipeline API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-pass",
+              "leftValue": "={{ $json.final_verdict }}",
+              "rightValue": "PASS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c1b2c3d4-e5f6-7890-abcd-ef1234567892",
+      "name": "Verdict Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "status",
+              "value": "PASS",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "result",
+              "value": "={{ $node[\"Call Pipeline API\"].json.final_result }}",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "gpt2_verdict",
+              "value": "={{ $node[\"Call Pipeline API\"].json.gpt2_verdict }}",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "arbiter_invoked",
+              "value": "={{ $node[\"Call Pipeline API\"].json.arbiter_invoked }}",
+              "type": "boolean"
+            },
+            {
+              "id": "a5",
+              "name": "arbiter_decision",
+              "value": "={{ $node[\"Call Pipeline API\"].json.arbiter_decision }}",
+              "type": "string"
+            },
+            {
+              "id": "a6",
+              "name": "rewrite_occurred",
+              "value": "={{ $node[\"Call Pipeline API\"].json.rewrite_occurred }}",
+              "type": "boolean"
+            },
+            {
+              "id": "a7",
+              "name": "violations",
+              "value": "={{ JSON.stringify($node[\"Call Pipeline API\"].json.violations) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d1b2c3d4-e5f6-7890-abcd-ef1234567893",
+      "name": "Format PASS Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b1",
+              "name": "status",
+              "value": "FAIL",
+              "type": "string"
+            },
+            {
+              "id": "b2",
+              "name": "result",
+              "value": "NO PASS - Output blocked",
+              "type": "string"
+            },
+            {
+              "id": "b3",
+              "name": "violations",
+              "value": "={{ JSON.stringify($node[\"Call Pipeline API\"].json.violations) }}",
+              "type": "string"
+            },
+            {
+              "id": "b4",
+              "name": "arbiter_decision",
+              "value": "={{ $node[\"Call Pipeline API\"].json.arbiter_decision }}",
+              "type": "string"
+            },
+            {
+              "id": "b5",
+              "name": "arbiter_rationale",
+              "value": "={{ JSON.stringify($node[\"Call Pipeline API\"].json.arbiter_rationale) }}",
+              "type": "string"
+            },
+            {
+              "id": "b6",
+              "name": "rewrite_occurred",
+              "value": "={{ $node[\"Call Pipeline API\"].json.rewrite_occurred }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e1b2c3d4-e5f6-7890-abcd-ef1234567894",
+      "name": "Format FAIL Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        900,
+        420
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Call Pipeline API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Pipeline API": {
+      "main": [
+        [
+          {
+            "node": "Verdict Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verdict Router": {
+      "main": [
+        [
+          {
+            "node": "Format PASS Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format FAIL Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "aee8d5ee-4631-45cd-b94d-8db47e6cee63",
+  "versionCounter": 3,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-02-28T04:31:53.253Z",
+      "createdAt": "2026-02-28T04:31:53.253Z",
+      "role": "workflow:owner",
+      "workflowId": "Mt2w64vlkt4XUzOk",
+      "projectId": "J8B0ZRRzuMSpIEH9",
+      "project": {
+        "updatedAt": "2026-02-28T04:26:25.445Z",
+        "createdAt": "2026-02-28T04:25:40.013Z",
+        "id": "J8B0ZRRzuMSpIEH9",
+        "name": "Admin User <admin@epistemic.local>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "0112d9c7-7222-4e80-9397-3138a890f4e4"
+      }
+    }
+  ],
+  "tags": []
+}

@@ -1,0 +1,161 @@
+{
+  "updatedAt": "2026-02-28T04:32:53.970Z",
+  "createdAt": "2026-02-28T04:32:53.970Z",
+  "id": "utTaOo06QXzya3wl",
+  "name": "Epistemic Batch Stress Test",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "epistemic-stress",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "f1b2c3d4-e5f6-7890-abcd-ef1234567895",
+      "name": "Stress Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "f1b2c3d4-e5f6-7890-abcd-ef1234567895"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/openai/config",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ api_key: $json.body.api_key || \"\", model: $json.body.model || \"gpt-4o-mini\" }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "g1b2c3d4-e5f6-7890-abcd-ef1234567896",
+      "name": "Set API Key",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:8000/api/stress",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ category: $node[\"Stress Webhook\"].json.body.category || null, count: $node[\"Stress Webhook\"].json.body.count || null }) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "h1b2c3d4-e5f6-7890-abcd-ef1234567897",
+      "name": "Run Stress Test",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s1",
+              "name": "test_completed",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "s2",
+              "name": "raw_response",
+              "value": "={{ JSON.stringify($json) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "i1b2c3d4-e5f6-7890-abcd-ef1234567898",
+      "name": "Stress Results",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        900,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Stress Webhook": {
+      "main": [
+        [
+          {
+            "node": "Set API Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set API Key": {
+      "main": [
+        [
+          {
+            "node": "Run Stress Test",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Stress Test": {
+      "main": [
+        [
+          {
+            "node": "Stress Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "d1e28eb5-359c-450d-87a7-65c9dcc96016",
+  "versionCounter": 3,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-02-28T04:32:53.971Z",
+      "createdAt": "2026-02-28T04:32:53.971Z",
+      "role": "workflow:owner",
+      "workflowId": "utTaOo06QXzya3wl",
+      "projectId": "J8B0ZRRzuMSpIEH9",
+      "project": {
+        "updatedAt": "2026-02-28T04:26:25.445Z",
+        "createdAt": "2026-02-28T04:25:40.013Z",
+        "id": "J8B0ZRRzuMSpIEH9",
+        "name": "Admin User <admin@epistemic.local>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "0112d9c7-7222-4e80-9397-3138a890f4e4"
+      }
+    }
+  ],
+  "tags": []
+}
