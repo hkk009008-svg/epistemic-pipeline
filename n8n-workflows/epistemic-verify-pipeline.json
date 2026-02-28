@@ -11,9 +11,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "epistemic-verify",
-        "options": {
-          "responseMode": "lastNode"
-        }
+        "responseMode": "lastNode",
+        "options": {}
       },
       "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "name": "Webhook Trigger",

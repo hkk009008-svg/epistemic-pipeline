@@ -1,4 +1,5 @@
 {
+  "id": "6rURf0fICupXbIj2",
   "name": "ECA — Stress Test (Webhook → Summary)",
   "active": true,
   "nodes": [
@@ -6,9 +7,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "eca-stress",
-        "options": {
-          "responseMode": "lastNode"
-        }
+        "responseMode": "lastNode",
+        "options": {}
       },
       "id": "eca-sw-0001-webhook",
       "name": "Webhook",

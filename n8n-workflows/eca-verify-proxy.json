@@ -1,4 +1,5 @@
 {
+  "id": "GtVTvxUeRtQtnw16",
   "name": "ECA — Verify Proxy (Router + Pipeline)",
   "active": true,
   "nodes": [
@@ -6,9 +7,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "eca-verify",
-        "options": {
-          "responseMode": "lastNode"
-        }
+        "responseMode": "lastNode",
+        "options": {}
       },
       "id": "eca-vp-0001-webhook",
       "name": "Webhook",
