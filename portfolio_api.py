@@ -1,6 +1,6 @@
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import json
@@ -17,6 +17,15 @@ _BASE_DIR = Path(__file__).resolve().parent
 _TESTS_PATH = _BASE_DIR / "tests.json"
 
 app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline")
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    """Ensure unhandled exceptions always return JSON, never plain text."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)}"},
+    )
 
 
 @app.get("/")
@@ -936,8 +945,11 @@ def run_stress_test(req: StressRequest):
     if not _TESTS_PATH.exists():
         return _error_stream(f"tests.json not found at {_TESTS_PATH}")
 
-    with open(_TESTS_PATH, "r", encoding="utf-8") as f:
-        tests = json.load(f)
+    try:
+        with open(_TESTS_PATH, "r", encoding="utf-8") as f:
+            tests = json.load(f)
+    except Exception as e:
+        return _error_stream(f"Failed to load tests.json: {e}")
 
     if req.category:
         tests = [t for t in tests if t["category"] == req.category]
@@ -1078,6 +1090,9 @@ UI_HTML = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>Epistemic Verification Pipeline</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
