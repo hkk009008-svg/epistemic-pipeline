@@ -7,10 +7,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN useradd --create-home appuser
+RUN useradd --create-home appuser && chown -R appuser:appuser /app
 USER appuser
 
 ENV PORT=8000
-EXPOSE ${PORT}
 
-CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "echo \"Starting uvicorn on port $PORT\" && exec uvicorn app:app --host 0.0.0.0 --port $PORT"]
