@@ -294,6 +294,7 @@ async function runStress() {
         if (d.type === 'progress') {
           let cls = d.verdict === 'PASS' ? 'pass' : 'fail';
           let extra = '';
+          if (d.error) extra += ' <span class="fail">' + esc(d.error) + '</span>';
           if (d.arbiter) extra += ' <span class="arb">arbiter:' + esc(d.arbiter) + '</span>';
           if (d.rewrite) extra += ' <span class="rew">[rewrite]</span>';
           log.innerHTML += '[' + d.index + '/' + d.total + '] ' + esc(d.id) + ' <span class="' + cls + '">' + d.verdict + '</span>' + extra + ' (' + d.duration_s + 's)\\n';

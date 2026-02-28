@@ -139,6 +139,7 @@ def generate_stress_results(tests: list):
             "arbiter": result["arbiter_decision"],
             "rewrite": result["rewrite_occurred"],
             "duration_s": result["duration_s"],
+            "error": result.get("error", ""),
         }
         yield json.dumps(progress, ensure_ascii=False) + "\n"
 
@@ -147,7 +148,11 @@ def generate_stress_results(tests: list):
     if valid:
         pss = compute_pss_metrics(valid)
     else:
-        pss = {"score": 0, "metrics": {}, "penalties": {}}
+        pss = {
+            "score": 0,
+            "metrics": {"HLR": 0, "FPF": 0, "MCP": 0, "RLS": 0, "EOI": 0},
+            "penalties": {"P1": 0, "P2": 0, "P3": 0, "P4": 0, "P5": 0},
+        }
 
     # Category breakdown
     by_cat = defaultdict(list)
