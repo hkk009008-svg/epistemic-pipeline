@@ -1003,46 +1003,51 @@ def run_stress_test(req: StressRequest):
             yield json.dumps(progress, ensure_ascii=False) + "\n"
 
         # Compute final score
-        valid = [r for r in results if r["final_verdict"] != "ERROR"]
-        if valid:
-            pss = _compute_pss_metrics(valid)
-        else:
-            pss = {"score": 0, "metrics": {}, "penalties": {}}
+        try:
+            valid = [r for r in results if r["final_verdict"] != "ERROR"]
+            if valid:
+                pss = _compute_pss_metrics(valid)
+            else:
+                pss = {"score": 0, "metrics": {}, "penalties": {}}
 
-        # Category breakdown
-        by_cat = defaultdict(list)
-        for r in results:
-            by_cat[r["category"]].append(r)
-        cat_breakdown = {}
-        for cat in sorted(by_cat):
-            rs = by_cat[cat]
-            cat_breakdown[cat] = {
-                "total": len(rs),
-                "pass": sum(1 for r in rs if r["final_verdict"] == "PASS"),
-                "fail": sum(1 for r in rs if r["final_verdict"] == "FAIL"),
-                "error": sum(1 for r in rs if r["final_verdict"] == "ERROR"),
-                "rewrites": sum(1 for r in rs if r.get("rewrite_occurred")),
-                "arbiter": sum(1 for r in rs if r.get("arbiter_invoked")),
+            # Category breakdown
+            by_cat = defaultdict(list)
+            for r in results:
+                by_cat[r["category"]].append(r)
+            cat_breakdown = {}
+            for cat in sorted(by_cat):
+                rs = by_cat[cat]
+                cat_breakdown[cat] = {
+                    "total": len(rs),
+                    "pass": sum(1 for r in rs if r["final_verdict"] == "PASS"),
+                    "fail": sum(1 for r in rs if r["final_verdict"] == "FAIL"),
+                    "error": sum(1 for r in rs if r["final_verdict"] == "ERROR"),
+                    "rewrites": sum(1 for r in rs if r.get("rewrite_occurred")),
+                    "arbiter": sum(1 for r in rs if r.get("arbiter_invoked")),
+                }
+
+            # Top violations
+            viol_counter = Counter()
+            for r in results:
+                if r["final_verdict"] == "FAIL":
+                    for v in r.get("final_violations", []):
+                        if isinstance(v, str):
+                            viol_counter[v] += 1
+
+            summary = {
+                "type": "summary",
+                "pss": pss,
+                "total_tests": len(results),
+                "total_pass": sum(1 for r in results if r["final_verdict"] == "PASS"),
+                "total_fail": sum(1 for r in results if r["final_verdict"] == "FAIL"),
+                "total_error": sum(1 for r in results if r["final_verdict"] == "ERROR"),
+                "avg_duration_s": round(statistics.mean([r["duration_s"] for r in results]), 2) if results else 0,
+                "categories": cat_breakdown,
+                "top_violations": dict(viol_counter.most_common(10)),
             }
-
-        # Top violations
-        viol_counter = Counter()
-        for r in results:
-            if r["final_verdict"] == "FAIL":
-                viol_counter.update(r.get("final_violations", []))
-
-        summary = {
-            "type": "summary",
-            "pss": pss,
-            "total_tests": len(results),
-            "total_pass": sum(1 for r in results if r["final_verdict"] == "PASS"),
-            "total_fail": sum(1 for r in results if r["final_verdict"] == "FAIL"),
-            "total_error": sum(1 for r in results if r["final_verdict"] == "ERROR"),
-            "avg_duration_s": round(statistics.mean([r["duration_s"] for r in results]), 2) if results else 0,
-            "categories": cat_breakdown,
-            "top_violations": dict(viol_counter.most_common(10)),
-        }
-        yield json.dumps(summary, ensure_ascii=False) + "\n"
+            yield json.dumps(summary, ensure_ascii=False) + "\n"
+        except Exception as e:
+            yield json.dumps({"type": "summary", "error": str(e), "pss": {"score": 0, "metrics": {}, "penalties": {}}, "total_tests": len(results), "total_pass": 0, "total_fail": 0, "total_error": len(results), "avg_duration_s": 0, "categories": {}, "top_violations": {}}) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
@@ -1709,7 +1714,8 @@ async function runStress() {
       buf = lines.pop();
       for (const line of lines) {
         if (!line.trim()) continue;
-        const d = JSON.parse(line);
+        let d;
+        try { d = JSON.parse(line); } catch(_) { log.innerHTML += '<span class="fail">' + esc(line) + '</span>\\n'; continue; }
         if (d.type === 'progress') {
           let cls = d.verdict === 'PASS' ? 'pass' : 'fail';
           let extra = '';
