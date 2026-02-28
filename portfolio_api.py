@@ -951,6 +951,7 @@ def run_stress_test(req: StressRequest):
         return _error_stream("No matching test cases.")
 
     def generate():
+      try:
         results = []
         client = openai.OpenAI(api_key=_openai_config["api_key"])
         model = _openai_config.get("model", "gpt-4o-mini")
@@ -1058,6 +1059,8 @@ def run_stress_test(req: StressRequest):
             yield json.dumps(summary, ensure_ascii=False) + "\n"
         except Exception as e:
             yield json.dumps({"type": "summary", "error": str(e), "pss": {"score": 0, "metrics": {}, "penalties": {}}, "total_tests": len(results), "total_pass": 0, "total_fail": 0, "total_error": len(results), "avg_duration_s": 0, "categories": {}, "top_violations": {}}) + "\n"
+      except Exception as fatal:
+        yield json.dumps({"type": "error", "error": str(fatal), "trace": traceback.format_exc().splitlines()[-5:]}) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
