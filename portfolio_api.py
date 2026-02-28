@@ -29,11 +29,19 @@ async def _global_exception_handler(request: Request, exc: Exception):
     )
 
 
+import hashlib as _hl
+
 @app.get("/")
 def ui():
+    etag = _hl.md5(UI_HTML.encode()).hexdigest()[:12]
     return HTMLResponse(
         content=UI_HTML,
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "ETag": f'"{etag}"',
+        },
     )
 
 
@@ -963,23 +971,17 @@ def _compute_pss_metrics(results: list) -> dict:
 def run_stress_test(req: StressRequest):
     """Run stress harness inline — returns streaming NDJSON progress + final score."""
 
-    # Pre-flight checks — return errors as NDJSON so callers never see plain-text 500
-    def _error_stream(msg: str):
-        def _gen():
-            yield json.dumps({"type": "error", "error": msg}) + "\n"
-        return StreamingResponse(_gen(), media_type="application/x-ndjson")
-
     if "api_key" not in _openai_config:
-        return _error_stream("Set your OpenAI API key first.")
+        raise HTTPException(status_code=400, detail="Set your OpenAI API key first.")
 
     if not _TESTS_PATH.exists():
-        return _error_stream(f"tests.json not found at {_TESTS_PATH}")
+        raise HTTPException(status_code=500, detail=f"tests.json not found at {_TESTS_PATH}")
 
     try:
         with open(_TESTS_PATH, "r", encoding="utf-8") as f:
             tests = json.load(f)
     except Exception as e:
-        return _error_stream(f"Failed to load tests.json: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load tests.json: {e}")
 
     if req.category:
         tests = [t for t in tests if t["category"] == req.category]
@@ -993,7 +995,7 @@ def run_stress_test(req: StressRequest):
             tests.extend(by_cat[cat][:req.count])
 
     if not tests:
-        return _error_stream("No matching test cases.")
+        raise HTTPException(status_code=400, detail="No matching test cases.")
 
     def generate():
       try:
@@ -1105,7 +1107,10 @@ def run_stress_test(req: StressRequest):
         except Exception as e:
             yield json.dumps({"type": "summary", "error": str(e), "pss": {"score": 0, "metrics": {}, "penalties": {}}, "total_tests": len(results), "total_pass": 0, "total_fail": 0, "total_error": len(results), "avg_duration_s": 0, "categories": {}, "top_violations": {}}) + "\n"
       except Exception as fatal:
-        yield json.dumps({"type": "error", "error": str(fatal), "trace": traceback.format_exc().splitlines()[-5:]}) + "\n"
+        try:
+            yield json.dumps({"type": "error", "error": str(fatal), "trace": traceback.format_exc().splitlines()[-5:]}) + "\n"
+        except Exception:
+            yield '{"type":"error","error":"Fatal internal error"}\n'
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
@@ -1124,6 +1129,7 @@ UI_HTML = """
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>Epistemic Verification Pipeline</title>
+<script>window.__EP_V=3;if(sessionStorage.__EP_V&&+sessionStorage.__EP_V<3){sessionStorage.__EP_V="3";location.reload(true);}sessionStorage.__EP_V="3";</script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; }
