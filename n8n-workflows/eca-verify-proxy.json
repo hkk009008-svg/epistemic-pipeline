@@ -1,0 +1,268 @@
+{
+  "name": "ECA — Verify Proxy (Router + Pipeline)",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "eca-verify",
+        "options": {
+          "responseMode": "lastNode"
+        }
+      },
+      "id": "eca-vp-0001-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "eca-vp-0001-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prompt = ($input.first().json.body && $input.first().json.body.prompt) || '';\nconst re = /\\b(?:percent|percentage|rate|odds|how many|how often|probability|fraction|proportion|typically)\\b|%/i;\nconst abstain = re.test(prompt);\nreturn [{ json: { abstain, prompt } }];"
+      },
+      "id": "eca-vp-0002-precheck",
+      "name": "Stat Pre-Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-abstain",
+              "leftValue": "={{ $json.abstain }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "eca-vp-0003-route",
+      "name": "Route",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "abs-1",
+              "name": "status",
+              "value": "ABSTAIN",
+              "type": "string"
+            },
+            {
+              "id": "abs-2",
+              "name": "result",
+              "value": "Unknown (Actionable): No authoritative dataset available.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "eca-vp-0004-abstain",
+      "name": "Abstain Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [880, 180]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PIPELINE_BASE_URL || 'http://localhost:8000' }}/api/pipeline",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ prompt: $json.prompt }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "eca-vp-0005-call-pipeline",
+      "name": "Call Pipeline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 420]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-pass",
+              "leftValue": "={{ $json.final_verdict }}",
+              "rightValue": "PASS",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "eca-vp-0006-verdict",
+      "name": "Verdict Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1100, 420]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "p1",
+              "name": "status",
+              "value": "PASS",
+              "type": "string"
+            },
+            {
+              "id": "p2",
+              "name": "final_result",
+              "value": "={{ $node[\"Call Pipeline\"].json.final_result }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "eca-vp-0007-pass",
+      "name": "Format PASS",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1320, 320]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f1",
+              "name": "status",
+              "value": "NO_PASS",
+              "type": "string"
+            },
+            {
+              "id": "f2",
+              "name": "violations",
+              "value": "={{ JSON.stringify($node[\"Call Pipeline\"].json.violations) }}",
+              "type": "string"
+            },
+            {
+              "id": "f3",
+              "name": "arbiter_decision",
+              "value": "={{ $node[\"Call Pipeline\"].json.arbiter_decision }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "eca-vp-0008-nopass",
+      "name": "Format NO_PASS",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1320, 520]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Stat Pre-Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stat Pre-Check": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Abstain Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Call Pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Pipeline": {
+      "main": [
+        [
+          {
+            "node": "Verdict Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verdict Router": {
+      "main": [
+        [
+          {
+            "node": "Format PASS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format NO_PASS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "triggerCount": 1,
+  "tags": []
+}

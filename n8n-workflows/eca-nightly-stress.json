@@ -1,0 +1,220 @@
+{
+  "name": "ECA — Nightly Stress (Cron → Alert)",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "eca-ns-0001-cron",
+      "name": "Daily 02:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.PIPELINE_BASE_URL || 'http://localhost:8000') + '/api/stress' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"category\": null, \"count\": null}",
+        "options": {
+          "timeout": 600000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "eca-ns-0002-stress",
+      "name": "Run Full Stress",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.data || '';\nconst lines = String(raw).split('\\n').filter(line => line.trim());\nlet summary = null;\nfor (const line of lines) {\n  try {\n    const obj = JSON.parse(line);\n    if (obj.type === 'summary') { summary = obj; break; }\n  } catch (e) { /* skip non-JSON lines */ }\n}\nif (!summary) {\n  return [{ json: { error: 'No summary found in stress response', raw_line_count: lines.length } }];\n}\nreturn [{ json: summary }];"
+      },
+      "id": "eca-ns-0003-parse",
+      "name": "Extract Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "score-lt-75",
+              "leftValue": "={{ $json.pss ? $json.pss.score : 100 }}",
+              "rightValue": 75,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "eca-ns-0004-check",
+      "name": "Score Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "al1",
+              "name": "alert",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "al2",
+              "name": "score",
+              "value": "={{ $json.pss ? $json.pss.score : null }}",
+              "type": "number"
+            },
+            {
+              "id": "al3",
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}",
+              "type": "string"
+            },
+            {
+              "id": "al4",
+              "name": "summary",
+              "value": "={{ JSON.stringify($json) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "eca-ns-0005-alert",
+      "name": "Alert Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ok1",
+              "name": "alert",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "ok2",
+              "name": "score",
+              "value": "={{ $json.pss ? $json.pss.score : null }}",
+              "type": "number"
+            },
+            {
+              "id": "ok3",
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}",
+              "type": "string"
+            },
+            {
+              "id": "ok4",
+              "name": "summary",
+              "value": "={{ JSON.stringify($json) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "eca-ns-0006-ok",
+      "name": "OK Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1120, 420]
+    }
+  ],
+  "connections": {
+    "Daily 02:00": {
+      "main": [
+        [
+          {
+            "node": "Run Full Stress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Full Stress": {
+      "main": [
+        [
+          {
+            "node": "Extract Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Summary": {
+      "main": [
+        [
+          {
+            "node": "Score Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Check": {
+      "main": [
+        [
+          {
+            "node": "Alert Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OK Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "triggerCount": 1,
+  "tags": []
+}
