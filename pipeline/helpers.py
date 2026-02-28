@@ -57,7 +57,9 @@ def extract_json(raw: str) -> dict:
     # Try fixing truncated JSON by closing brackets
     for suffix in ["}", "]}", '"]}', '"}]}', '"]}]}']:
         try:
-            return json.loads(cleaned + suffix)
+            result = json.loads(cleaned + suffix)
+            if isinstance(result, dict):
+                return result
         except json.JSONDecodeError:
             continue
 

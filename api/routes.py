@@ -60,6 +60,11 @@ def get_openai_config():
 
 @router.post("/api/pipeline", response_model=PipelineResponse)
 def pipeline_endpoint(req: PipelineRequest):
+    if len(req.prompt) > config.MAX_PROMPT_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Prompt exceeds maximum length of {config.MAX_PROMPT_LENGTH} characters.",
+        )
     try:
         return run_pipeline(req)
     except PipelineError as e:

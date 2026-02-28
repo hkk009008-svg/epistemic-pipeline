@@ -7,7 +7,7 @@ import openai
 
 import config
 from pipeline.models import PipelineRequest, PipelineResponse
-from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM
+from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_openai, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft
@@ -40,12 +40,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
     gpt3_system = req.gpt3_system or DEFAULT_GPT3_SYSTEM
 
-    # If user explicitly requested advice, augment GPT-1 system prompt
-    if flags.get("advice_requested"):
-        gpt1_system += (
-            "\n\nNOTE: The user is explicitly requesting advice/options. "
-            "You may provide conditional process guidance."
-        )
+    # Flag-driven augmentation for all 3 stages
+    gpt1_aug, gpt2_aug, gpt3_aug = build_augmentation(flags)
+    gpt1_system += gpt1_aug
+    gpt2_system += gpt2_aug
+    gpt3_system += gpt3_aug
 
     # Empty defaults for response
     empty_response = dict(
@@ -89,10 +88,10 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         )
 
     # ---- GPT-2 FAIL: soft-only auto-repair path ----
+    max_rewrite_loops = getattr(config, "MAX_REWRITE_LOOPS", 1)
     if _all_soft(findings):
-        # Try auto-repair via sanitize_output + re-verify (no arbiter yet)
-        repaired = sanitize_output(sanitized_output, flags)
-        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{repaired}"
+        # Re-verify with GPT-2 directly (sanitizer already ran on sanitized_output)
+        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
         re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
 
@@ -101,16 +100,15 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
                 gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
                 gpt2_verdict=gpt2_verdict,
-                rewrite_occurred=True, rewrite_output=repaired,
+                rewrite_occurred=True, rewrite_output=sanitized_output,
                 rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
                 rewrite_violations=re_viol, rewrite_verdict=re_verdict,
                 arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
                 arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
-                final_verdict="PASS", final_result=repaired,
+                final_verdict="PASS", final_result=sanitized_output,
                 prompt_flags=flags, sanitizer_applied=True,
             )
         # Auto-repair didn't clear it -- fall through to arbiter below
-        sanitized_output = repaired
 
     # ---- Step 3: GPT-2 FAIL -> invoke GPT-3 Arbiter ----
     gpt2_json_for_arbiter = json.dumps({
@@ -122,10 +120,12 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         "verdict": gpt2_verdict,
     }, indent=2)
 
+    flags_json = json.dumps(flags, indent=2)
     gpt3_user = (
         f"user_prompt:\n{req.prompt}\n\n"
         f"gpt1_output:\n{sanitized_output}\n\n"
-        f"gpt2_result_json:\n{gpt2_json_for_arbiter}"
+        f"gpt2_result_json:\n{gpt2_json_for_arbiter}\n\n"
+        f"prompt_flags:\n{flags_json}"
     )
 
     gpt3_raw = call_openai(client, model, gpt3_system, gpt3_user, expect_json=True)
@@ -187,7 +187,10 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
 
     # If still failing on soft-only violations after arbiter rewrite, force Unknown-only
-    if re_verdict == "FAIL" and _all_soft(re_findings):
+    # and re-verify (up to max_rewrite_loops)
+    rewrite_count = 0
+    while re_verdict == "FAIL" and _all_soft(re_findings) and rewrite_count < max_rewrite_loops:
+        rewrite_count += 1
         unknown_prompt = (
             f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
             f"Remaining soft violations could not be resolved. "
@@ -195,7 +198,10 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"Do NOT make conclusions. Do NOT add new facts. Output the corrected response in full."
         )
         rewrite_output = call_openai(client, model, gpt1_system, unknown_prompt)
-        re_verdict = "PASS"
+        # Re-verify instead of force-passing
+        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+        re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
+        re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
 
     return PipelineResponse(
         gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,

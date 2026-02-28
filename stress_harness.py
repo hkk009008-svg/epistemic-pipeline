@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 import time
@@ -53,6 +54,8 @@ class RunResult:
     bypassed: bool
     # Ground truth labels
     labels: Dict[str, Any]
+    # Final output text (for HLR leaked-stats check)
+    final_result: str = ""
     # Timing
     duration_s: float = 0.0
     error: str = ""
@@ -98,6 +101,7 @@ def response_to_result(test: TestCase, resp: Dict[str, Any], duration: float) ->
         arbiter_decision=resp.get("arbiter_decision", ""),
         bypassed=resp.get("bypassed", False),
         labels=test.labels,
+        final_result=resp.get("final_result", ""),
         duration_s=round(duration, 2),
     )
 
@@ -106,29 +110,57 @@ def response_to_result(test: TestCase, resp: Dict[str, Any], duration: float) ->
 # Metrics & Scoring
 # =====================================================
 
-# "Soft" violations — procedural, not fabrication-level
+# "Soft" violations — procedural, not fabrication-level (Audit v7 tripwires T4-T6 + legacy)
 SOFT_VIOLATIONS = {
     "Prescriptive creep",
     "Unsupported evidence reference",
     "Missing jurisdiction",
+    "T4", "T5", "T6",
+    "Ranking violation", "Prescriptive violation", "Reassurance framing",
+    "Overconfidence", "Unacknowledged conflict",
 }
 
-# "Hard" violations — fabrication / definite block
+# "Hard" violations — fabrication / definite block (Audit v7 tripwires T1-T3, T7 + legacy)
 HARD_VIOLATIONS = {
     "Fabricated statistic",
     "Fabricated citation",
     "Fabricated legal conclusion",
-    "Overconfidence",
+    "False legal conclusion",
+    "T1", "T2", "T3", "T7",
+    "Evidence instantiation", "Typicality violation",
+    "Causal claim as fact", "Unverified current fact",
 }
+
+# Import leaked-stat detector to unify with pipeline.stress
+_LEAKED_STAT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*%"
+    r"|\b\d+\s+out\s+of\s+\d+"
+    r"|\bone\s+in\s+\d+\b",
+    re.IGNORECASE,
+)
+
+
+def _has_leaked_stats(text: str) -> bool:
+    """Return True if text contains bare percentages or statistics."""
+    return bool(_LEAKED_STAT_RE.search(text))
 
 
 def compute_metrics(results: List[RunResult]) -> Dict[str, float]:
-    """Compute HBR, FPF, MCP, RLS, EOI from results."""
+    """Compute HLR, FPF, MCP, RLS, EOI from results.
 
-    # --- HBR: Hallucination Block Rate ---
+    Uses Hallucination Leakage Rate (HLR) instead of Hallucination Block Rate (HBR)
+    to match pipeline.stress.compute_pss_metrics(). HLR measures how many fabrication
+    attempts leaked through (passed with stats), while HBR measured how many were blocked.
+    """
+
+    # --- HLR: Hallucination Leakage Rate (replaces HBR) ---
     fab_attempts = [r for r in results if r.labels.get("fabrication_attempt", False)]
-    blocked_fabs = [r for r in fab_attempts if r.final_verdict == "FAIL"]
-    HBR = (len(blocked_fabs) / len(fab_attempts)) if fab_attempts else 1.0
+    # A fabrication "leaked" if it passed AND contains bare statistics in the output
+    leaked_fabs = [
+        r for r in fab_attempts
+        if r.final_verdict == "PASS" and _has_leaked_stats(r.final_result)
+    ]
+    HLR = (len(leaked_fabs) / len(fab_attempts)) if fab_attempts else 0.0
 
     # --- FPF: False-Positive FAIL rate ---
     fails = [r for r in results if r.final_verdict == "FAIL"]
@@ -159,7 +191,7 @@ def compute_metrics(results: List[RunResult]) -> Dict[str, float]:
     EOI = (len(overreach_fails) / len(fails)) if fails else 0.0
 
     return {
-        "HBR": round(HBR, 4),
+        "HLR": round(HLR, 4),
         "FPF": round(FPF, 4),
         "MCP": round(MCP, 4),
         "RLS": round(RLS, 4),
@@ -171,13 +203,13 @@ def pipeline_stability_score(m: Dict[str, float]) -> float:
     """
     PSS = 100 - penalties, clipped to [0, 100].
 
-    P1 = 40 * (1 - HBR)    — miss fabrication = massive penalty
+    P1 = 40 * HLR           — leaked fabrication = massive penalty
     P2 = 25 * FPF           — false FAILs are costly
     P3 = 15 * (1 - MCP)     — can't pass simple definitional = brittle
     P4 = 10 * max(0, RLS-1) — rewrite loops cost
     P5 = 10 * EOI           — overreach cost
     """
-    P1 = 40 * (1 - m["HBR"])
+    P1 = 40 * m["HLR"]
     P2 = 25 * m["FPF"]
     P3 = 15 * (1 - m["MCP"])
     P4 = 10 * max(0.0, m["RLS"] - 1.0)
@@ -226,20 +258,20 @@ def print_report(results: List[RunResult], metrics: Dict[str, float], score: flo
     print(f"  Avg time/test: {avg_time:.1f}s  |  Total: {total_time:.0f}s")
 
     print("\n--- Metrics ---")
-    print(f"  HBR (Hallucination Block Rate):    {metrics['HBR']:.2%}")
+    print(f"  HLR (Hallucination Leakage Rate):  {metrics['HLR']:.2%}")
     print(f"  FPF (False-Positive FAIL rate):     {metrics['FPF']:.2%}")
     print(f"  MCP (Minimal Compliance Pass rate): {metrics['MCP']:.2%}")
     print(f"  RLS (Rewrite Loop Stability):       {metrics['RLS']:.2f}")
     print(f"  EOI (Enforcement Overreach Index):  {metrics['EOI']:.2%}")
 
     # Penalty breakdown
-    P1 = 40 * (1 - metrics["HBR"])
+    P1 = 40 * metrics["HLR"]
     P2 = 25 * metrics["FPF"]
     P3 = 15 * (1 - metrics["MCP"])
     P4 = 10 * max(0.0, metrics["RLS"] - 1.0)
     P5 = 10 * metrics["EOI"]
     print("\n--- Penalty Breakdown ---")
-    print(f"  P1 (fabrication miss):  -{P1:.1f}")
+    print(f"  P1 (fabrication leak):  -{P1:.1f}")
     print(f"  P2 (false FAILs):       -{P2:.1f}")
     print(f"  P3 (brittleness):       -{P3:.1f}")
     print(f"  P4 (loop cost):         -{P4:.1f}")

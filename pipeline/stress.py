@@ -11,8 +11,13 @@ from collections import Counter, defaultdict
 from pipeline.models import PipelineRequest
 from pipeline.orchestrator import run_pipeline
 
-# "Soft" violations -- procedural, not fabrication-level
-SOFT_VIOLATIONS = {"Prescriptive creep", "Unsupported evidence reference", "Missing jurisdiction"}
+# "Soft" violations -- procedural, not fabrication-level (Audit v7 T4-T6 + legacy)
+SOFT_VIOLATIONS = {
+    "Prescriptive creep", "Unsupported evidence reference", "Missing jurisdiction",
+    "T4", "T5", "T6",
+    "Ranking violation", "Prescriptive violation", "Reassurance framing",
+    "Overconfidence", "Unacknowledged conflict",
+}
 
 _LEAKED_STAT_RE = re.compile(
     r"\b\d+(?:\.\d+)?\s*%"
