@@ -15,6 +15,7 @@ import openai
 
 _BASE_DIR = Path(__file__).resolve().parent
 _TESTS_PATH = _BASE_DIR / "tests.json"
+_CONFIG_PATH = _BASE_DIR / ".config.json"
 
 app = FastAPI(title="GPT-1 > GPT-2 > GPT-3 Verification Pipeline")
 
@@ -91,6 +92,34 @@ class PipelineResponse(BaseModel):
     sanitizer_applied: bool = False
 
 _openai_config: dict = {}
+
+def _load_config_from_disk():
+    """Load saved API config from disk or environment on startup."""
+    if _CONFIG_PATH.exists():
+        try:
+            data = json.loads(_CONFIG_PATH.read_text())
+            if data.get("api_key"):
+                _openai_config["api_key"] = data["api_key"]
+                _openai_config["model"] = data.get("model", "gpt-4o-mini")
+                return
+        except Exception:
+            pass
+    env_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if env_key:
+        _openai_config["api_key"] = env_key
+        _openai_config["model"] = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+def _save_config_to_disk():
+    """Persist current API config to disk."""
+    try:
+        _CONFIG_PATH.write_text(json.dumps({
+            "api_key": _openai_config.get("api_key", ""),
+            "model": _openai_config.get("model", "gpt-4o-mini"),
+        }))
+    except Exception:
+        pass
+
+_load_config_from_disk()
 
 MAX_REWRITE_LOOPS = 1  # prevent infinite loops
 
@@ -620,6 +649,7 @@ def set_openai_config(config: OpenAIConfig):
         raise HTTPException(status_code=400, detail="Invalid API key.")
     _openai_config["api_key"] = clean_key
     _openai_config["model"] = config.model
+    _save_config_to_disk()
     return {"status": "ok", "model": config.model, "key_set": True}
 
 @app.get("/api/openai/config")
