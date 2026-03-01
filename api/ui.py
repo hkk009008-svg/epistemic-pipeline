@@ -301,6 +301,10 @@ body {
   margin-bottom: 14px;
 }
 .cfg-section-title.tavily { color: var(--accent-violet); }
+.cfg-section-title.stage { color: var(--accent-teal); }
+.stage-row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
+.stage-row select, .stage-row input { font-size: 11px; padding: 5px 8px; }
+.stage-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); min-width: 42px; }
 
 .cfg-in label {
   display: block;
@@ -1103,7 +1107,7 @@ body {
   line-height: 1.8;
   position: relative;
 }
-.stress-log::after {
+.stress-log::before {
   content: '';
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -1111,11 +1115,26 @@ body {
     0deg,
     transparent,
     transparent 2px,
-    rgba(56,189,248,0.008) 2px,
-    rgba(56,189,248,0.008) 4px
+    rgba(56,189,248,0.03) 2px,
+    rgba(56,189,248,0.03) 4px
   );
   pointer-events: none;
   border-radius: var(--radius-lg);
+  z-index: 1;
+}
+.stress-log::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  height: 6px;
+  background: linear-gradient(180deg, transparent, rgba(56,189,248,0.07), transparent);
+  pointer-events: none;
+  z-index: 2;
+  animation: scanline 4s linear infinite;
+}
+@keyframes scanline {
+  0% { top: 0; }
+  100% { top: 100%; }
 }
 .stress-log .pass { color: var(--accent-emerald); }
 .stress-log .fail { color: var(--accent-rose); }
@@ -1344,6 +1363,49 @@ body {
         <span>Enable web search enrichment</span>
       </label>
       <div class="cfg-st" id="ts">Loading...</div>
+    </div>
+
+    <div class="cfg-divider"></div>
+
+    <div class="cfg-section">
+      <div class="cfg-section-title stage">Per-Stage Model Config</div>
+      <div class="stage-row">
+        <span class="stage-label">GPT-1</span>
+        <select id="g1p" style="width:100px">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="ollama">Ollama</option>
+        </select>
+        <input id="g1m" placeholder="Model name" style="width:130px">
+        <input id="g1k" type="password" placeholder="API key (if different)" style="width:160px">
+        <button class="btn-s" onclick="savStage('gpt1','g1p','g1m','g1k')">Set</button>
+      </div>
+      <div class="stage-row">
+        <span class="stage-label">GPT-2</span>
+        <select id="g2p" style="width:100px">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="ollama">Ollama</option>
+        </select>
+        <input id="g2m" placeholder="Model name" style="width:130px">
+        <input id="g2k" type="password" placeholder="API key (if different)" style="width:160px">
+        <button class="btn-s" onclick="savStage('gpt2','g2p','g2m','g2k')">Set</button>
+      </div>
+      <div class="stage-row">
+        <span class="stage-label">GPT-3</span>
+        <select id="g3p" style="width:100px">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="ollama">Ollama</option>
+        </select>
+        <input id="g3m" placeholder="Model name" style="width:130px">
+        <input id="g3k" type="password" placeholder="API key (if different)" style="width:160px">
+        <button class="btn-s" onclick="savStage('gpt3','g3p','g3m','g3k')">Set</button>
+      </div>
+      <div class="cfg-st" id="stg-st">Falls back to global OpenAI config if not set</div>
     </div>
 
     <div class="cfg-divider"></div>
@@ -1605,6 +1667,27 @@ async function savTav() {
   });
   document.getElementById('tk').value = '';
   loadTav();
+}
+
+async function savStage(stage, selectId, modelId, keyId) {
+  const provider = document.getElementById(selectId).value;
+  const model = document.getElementById(modelId).value.trim();
+  const key = document.getElementById(keyId).value.trim();
+  if (!model && !key) return;
+  const st = document.getElementById('stg-st');
+  try {
+    await fetch('/api/stage/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({stage, provider, model, api_key: key || '', base_url: ''})
+    });
+    st.textContent = stage.toUpperCase() + ' set: ' + provider + '/' + (model || 'default');
+    st.className = 'cfg-st ok';
+    document.getElementById(keyId).value = '';
+  } catch(e) {
+    st.textContent = 'Error saving ' + stage;
+    st.className = 'cfg-st';
+  }
 }
 
 document.getElementById('te').addEventListener('change', async function() {

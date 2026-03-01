@@ -90,3 +90,47 @@ def get_tavily_key_preview() -> str:
     if not key:
         return ""
     return key[:8] + "..." + key[-4:]
+
+
+# ---- Per-stage model configuration ----
+# Each stage can have its own provider, model, API key, and base URL.
+# Falls back to the global OpenAI config if not set.
+_stage_configs: dict = {}  # {"gpt1": {...}, "gpt2": {...}, "gpt3": {...}}
+_stage_lock = threading.Lock()
+
+# Valid provider types
+PROVIDERS = {"openai", "anthropic", "openrouter", "ollama"}
+
+
+def set_stage_config(stage: str, provider: str = "openai", api_key: str = "",
+                     model: str = "", base_url: str = ""):
+    """Configure a specific pipeline stage (gpt1, gpt2, gpt3).
+
+    provider: "openai" | "anthropic" | "openrouter" | "ollama"
+    api_key: Provider-specific API key (falls back to global OpenAI key)
+    model: Model identifier (falls back to global model)
+    base_url: Custom API endpoint (optional, needed for openrouter/ollama)
+    """
+    assert stage in ("gpt1", "gpt2", "gpt3"), f"Invalid stage: {stage}"
+    assert provider in PROVIDERS, f"Invalid provider: {provider}"
+    with _stage_lock:
+        _stage_configs[stage] = {
+            "provider": provider,
+            "api_key": api_key,
+            "model": model,
+            "base_url": base_url,
+        }
+
+
+def get_stage_config(stage: str) -> dict:
+    """Return config for a stage. Falls back to global OpenAI config."""
+    with _stage_lock:
+        if stage in _stage_configs and _stage_configs[stage].get("api_key"):
+            return _stage_configs[stage]
+    # Fallback to global
+    return {
+        "provider": "openai",
+        "api_key": get_api_key(),
+        "model": get_model(),
+        "base_url": "",
+    }

@@ -113,7 +113,21 @@ DEFAULT_GPT2_SYSTEM = (
     '- T4 (soft): Ranking without evidence\n'
     '- T5 (soft): Unsolicited advice or outcome promises\n'
     '- T6 (soft): Reassurance framing\n\n'
-    'ALWAYS check the ORIGINAL PROMPT to determine if advice was requested.'
+    'ALWAYS check the ORIGINAL PROMPT to determine if advice was requested.\n\n'
+    '## Pre-Decomposed Claims\n'
+    'If PRE-DECOMPOSED ATOMIC CLAIMS are provided in the input, use them as your '
+    'claim_table basis. Verify each atomic claim individually. '
+    'Claims marked has_citation:true should be checked against provided sources. '
+    'Claims marked is_unknown:true should be categorized as Hypothesis or acceptable Unknown. '
+    'Claims marked is_user_provided:true should be categorized as User-provided. '
+    'You may add additional claims you discover that were missed in decomposition.\n\n'
+    '## NLI Pre-Verification Signals\n'
+    'If NLI PRE-VERIFICATION SIGNALS are provided, use them as supporting evidence:\n'
+    '- NLI-SUPPORTED claims: These have been verified by a separate NLI model against '
+    'provided sources. Treat as strong evidence for "Observed" categorization.\n'
+    '- NLI-CONTRADICTED claims: These conflict with provided sources. Flag as T1 or T7 '
+    'depending on context.\n'
+    '- Claims without NLI signals: Evaluate normally using your standard tripwire rules.'
 )
 
 # Detailed tripwire definitions — injected into user content BEFORE the task
