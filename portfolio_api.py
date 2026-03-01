@@ -10,6 +10,7 @@ import statistics
 import time
 from collections import Counter, defaultdict
 import openai
+from tavily import TavilyClient
 
 APP_VERSION = "1.3.0"
 
@@ -42,6 +43,16 @@ def ui():
 class OpenAIConfig(BaseModel):
     api_key: str
     model: str = "gpt-4o-mini"
+
+class TavilyConfig(BaseModel):
+    api_key: str
+    enabled: bool = True
+
+class SearchSource(BaseModel):
+    title: str
+    url: str
+    snippet: str
+    score: float = 0.0
 
 class ClaimEntry(BaseModel):
     claim: str
@@ -89,6 +100,10 @@ class PipelineResponse(BaseModel):
     # Prompt routing / sanitizer metadata
     prompt_flags: Optional[dict] = None
     sanitizer_applied: bool = False
+    # Web search enrichment
+    search_performed: bool = False
+    search_query: str = ""
+    search_sources: List[SearchSource] = []
 
 # NOTE: Global mutable dict shared across all requests. Acceptable for a
 # single-user portfolio/demo app, but would need per-session isolation
@@ -96,6 +111,10 @@ class PipelineResponse(BaseModel):
 _openai_config: dict = {}
 _openai_client: openai.OpenAI | None = None  # cached client, recreated when config changes
 _openai_client_key: str = ""  # tracks which api_key the cached client was built with
+
+_tavily_config: dict = {}  # {"api_key": "tvly-...", "enabled": True}
+_tavily_client: TavilyClient | None = None
+_tavily_client_key: str = ""
 
 MAX_REWRITE_LOOPS = 3  # max rewrite iterations before giving up
 
@@ -498,10 +517,21 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None):
                 for v in parsed["violations"]
             ]
 
+        # Deterministic severity map — override GPT-2's classification to
+        # prevent the LLM from mis-labeling soft violations as hard.
+        _HARD_TYPES = frozenset({
+            "Fabricated statistic",
+            "Fabricated citation",
+            "False legal conclusion",
+            "Unverified statistic",
+        })
+
         findings = []  # type: List[dict]
         for f in raw_findings:
             ftype = f.get("type", "")
-            severity = f.get("severity", "soft").lower()
+            # Enforce severity by finding type — GPT-2 sometimes assigns
+            # "hard" to types that should always be "soft" (and vice versa).
+            severity = "hard" if ftype in _HARD_TYPES else "soft"
             detail = f.get("detail", "")
 
             # Context-aware filter: if advice was requested, drop soft
@@ -611,6 +641,75 @@ def _get_openai_client() -> openai.OpenAI:
     return _openai_client
 
 
+def _get_tavily_client() -> TavilyClient | None:
+    """Return a cached TavilyClient, or None if not configured/disabled."""
+    global _tavily_client, _tavily_client_key
+    if not _tavily_config.get("enabled", False):
+        return None
+    current_key = _tavily_config.get("api_key", "")
+    if not current_key:
+        return None
+    if _tavily_client is None or _tavily_client_key != current_key:
+        _tavily_client = TavilyClient(api_key=current_key)
+        _tavily_client_key = current_key
+    return _tavily_client
+
+
+def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:
+    """Call Tavily search API. Returns (sources, raw_context_string).
+
+    Returns empty results on any error (search is best-effort).
+    """
+    client = _get_tavily_client()
+    if client is None:
+        return [], ""
+
+    try:
+        response = client.search(
+            query=query,
+            search_depth="basic",
+            max_results=max_results,
+            include_answer=True,
+            topic="general",
+        )
+    except Exception:
+        return [], ""
+
+    sources = []
+    for r in response.get("results", []):
+        sources.append(SearchSource(
+            title=r.get("title", ""),
+            url=r.get("url", ""),
+            snippet=r.get("content", ""),
+            score=r.get("score", 0.0),
+        ))
+
+    context_lines = []
+    for i, s in enumerate(sources, 1):
+        context_lines.append(f"[{i}] {s.title}\n    URL: {s.url}\n    Excerpt: {s.snippet}")
+
+    raw_context = "\n\n".join(context_lines)
+
+    answer = response.get("answer", "")
+    if answer:
+        raw_context = f"Tavily Summary: {answer}\n\n---\nSources:\n{raw_context}"
+
+    return sources, raw_context
+
+
+def _should_search(flags: dict) -> bool:
+    """Determine if web search should be triggered based on prompt routing flags."""
+    if not _tavily_config.get("enabled", False):
+        return False
+    if not _tavily_config.get("api_key", ""):
+        return False
+    return (
+        flags.get("percent_requested", False)
+        or flags.get("legal_mode", False)
+        or flags.get("future_year", False)
+    )
+
+
 def _build_gpt2_prompt(original_prompt: str, text_to_verify: str) -> str:
     """Build the user prompt sent to GPT-2 for verification."""
     return f"ORIGINAL PROMPT:\n{original_prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{text_to_verify}"
@@ -642,6 +741,9 @@ def _build_response(
     final_result: str = "",
     prompt_flags: dict | None = None,
     sanitizer_applied: bool = False,
+    search_performed: bool = False,
+    search_query: str = "",
+    search_sources: list | None = None,
 ) -> PipelineResponse:
     """Construct a PipelineResponse with sensible defaults for optional fields."""
     return PipelineResponse(
@@ -669,6 +771,9 @@ def _build_response(
         final_result=final_result,
         prompt_flags=prompt_flags,
         sanitizer_applied=sanitizer_applied,
+        search_performed=search_performed,
+        search_query=search_query,
+        search_sources=search_sources or [],
     )
 
 
@@ -709,6 +814,38 @@ def get_openai_config():
         return {"key_set": False}
     masked = _openai_config["api_key"][:8] + "..." + _openai_config["api_key"][-4:]
     return {"key_set": True, "model": _openai_config.get("model"), "key_preview": masked}
+
+
+@app.post("/api/tavily/config")
+def set_tavily_config(config: TavilyConfig):
+    clean_key = config.api_key.strip()
+    clean_key = clean_key.encode("ascii", errors="ignore").decode("ascii")
+    clean_key = clean_key.replace(" ", "")
+    if not clean_key:
+        raise HTTPException(status_code=400, detail="Invalid Tavily API key.")
+    _tavily_config["api_key"] = clean_key
+    _tavily_config["enabled"] = config.enabled
+    return {"status": "ok", "enabled": config.enabled, "key_set": True}
+
+
+@app.get("/api/tavily/config")
+def get_tavily_config():
+    if "api_key" not in _tavily_config:
+        return {"key_set": False, "enabled": False}
+    masked = _tavily_config["api_key"][:8] + "..." + _tavily_config["api_key"][-4:]
+    return {
+        "key_set": True,
+        "enabled": _tavily_config.get("enabled", False),
+        "key_preview": masked,
+    }
+
+
+@app.post("/api/tavily/toggle")
+def toggle_tavily(enabled: bool = True):
+    if "api_key" not in _tavily_config:
+        raise HTTPException(status_code=400, detail="Set Tavily API key first.")
+    _tavily_config["enabled"] = enabled
+    return {"status": "ok", "enabled": enabled}
 
 
 def _all_soft(findings: List[dict]) -> bool:
@@ -755,8 +892,51 @@ def run_pipeline(req: PipelineRequest):
             "or policy will persist. Frame all forward-looking claims as Unknown (Structural)."
         )
 
+    # ---- Web Search Enrichment (before GPT-1) ----
+    search_sources: list[SearchSource] = []
+    search_context = ""
+    search_performed = False
+
+    if _should_search(flags):
+        search_sources, search_context = perform_web_search(req.prompt)
+        search_performed = len(search_sources) > 0
+
+    gpt1_user_content = req.prompt
+    if search_performed and search_context:
+        gpt1_system += (
+            "\n\nWEB SEARCH RESULTS are provided below the user's question. "
+            "You MUST ground your response in these sources. "
+            "When citing a fact from a source, reference it as [1], [2], etc. "
+            "If a source provides a specific statistic, you may quote it with the citation. "
+            "Do NOT fabricate additional sources beyond what is provided. "
+            "If the sources do not contain the answer, state Unknown (Actionable)."
+        )
+        gpt1_user_content = (
+            f"{req.prompt}\n\n"
+            f"--- WEB SEARCH RESULTS ---\n"
+            f"{search_context}\n"
+            f"--- END SEARCH RESULTS ---"
+        )
+
+        # Augment GPT-2 to recognize the provided sources
+        source_summary = "; ".join(
+            f'[{i}] "{s.title}" ({s.url})' for i, s in enumerate(search_sources, 1)
+        )
+        gpt2_system += (
+            "\n\nIMPORTANT: GPT-1 was given web search results from the following sources:\n"
+            f"{source_summary}\n\n"
+            "When evaluating claims:\n"
+            "- If a claim cites one of these sources (e.g., [1], [2]) and the source snippet "
+            "supports the claim, categorize it as 'Supported' (not 'Unsupported').\n"
+            "- A statistic that is attributed to a provided source is NOT 'Fabricated' or "
+            "'Unverified' -- categorize it as 'Supported'.\n"
+            "- If GPT-1 cites a source number that does not exist in the list above, "
+            "flag it as 'Fabricated citation'.\n"
+            "- Claims NOT backed by any provided source should still be evaluated normally."
+        )
+
     # ---- Step 1: GPT-1 Generate ----
-    gpt1_output = call_openai(client, model, gpt1_system, req.prompt)
+    gpt1_output = call_openai(client, model, gpt1_system, gpt1_user_content)
 
     # ---- Activation bypass ----
     if is_activation_phrase(gpt1_output):
@@ -765,6 +945,9 @@ def run_pipeline(req: PipelineRequest):
             gpt2_raw="(bypassed)", gpt2_verdict="PASS",
             final_verdict="PASS", final_result=gpt1_output,
             prompt_flags=flags,
+            search_performed=search_performed,
+            search_query=req.prompt if search_performed else "",
+            search_sources=search_sources,
         )
 
     # ---- Deterministic sanitizer (pre-clean before GPT-2) ----
@@ -786,6 +969,9 @@ def run_pipeline(req: PipelineRequest):
             gpt2_verdict="PASS",
             final_verdict="PASS", final_result=sanitized_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            search_performed=search_performed,
+            search_query=req.prompt if search_performed else "",
+            search_sources=search_sources,
         )
 
     # ---- GPT-2 FAIL: soft-only → auto-pass (sanitizer already cleaned) ----
@@ -801,6 +987,9 @@ def run_pipeline(req: PipelineRequest):
             final_verdict="PASS (soft-only, sanitizer applied)",
             final_result=sanitized_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            search_performed=search_performed,
+            search_query=req.prompt if search_performed else "",
+            search_sources=search_sources,
         )
 
     # ---- Step 3: GPT-2 FAIL -> invoke GPT-3 Arbiter ----
@@ -839,6 +1028,9 @@ def run_pipeline(req: PipelineRequest):
             arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
             final_verdict="FAIL", final_result="NO PASS",
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            search_performed=search_performed,
+            search_query=req.prompt if search_performed else "",
+            search_sources=search_sources,
         )
 
     # ---- Decision: ALLOW_AS_UNKNOWN_ONLY ----
@@ -872,6 +1064,9 @@ def run_pipeline(req: PipelineRequest):
             final_verdict=re_verdict,
             final_result=rewrite_output if re_verdict == "PASS" else "NO PASS",
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            search_performed=search_performed,
+            search_query=req.prompt if search_performed else "",
+            search_sources=search_sources,
         )
 
     # ---- Decision: ALLOW_WITH_EDITS (with rewrite loop) ----
@@ -925,6 +1120,9 @@ def run_pipeline(req: PipelineRequest):
         final_verdict=re_verdict,
         final_result=rewrite_output if "PASS" in re_verdict else "NO PASS",
         prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+        search_performed=search_performed,
+        search_query=req.prompt if search_performed else "",
+        search_sources=search_sources,
     )
 
 
@@ -1148,873 +1346,1309 @@ def run_stress_test(req: StressRequest):
 # =====================================================
 
 UI_HTML = """
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GPT-1 &rarr; GPT-2 &rarr; GPT-3 Pipeline</title>
+<title>Epistemic Pipeline OS</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; display: flex; flex-direction: column; }
+  :root {
+    --bg: #e8edf5;
+    --bg-soft: #f4f7fb;
+    --ink: #163046;
+    --ink-soft: #44617a;
+    --line: rgba(25, 58, 86, 0.14);
+    --panel: rgba(255, 255, 255, 0.76);
+    --panel-strong: rgba(255, 255, 255, 0.9);
+    --accent: #1677c5;
+    --accent-2: #0f9f8f;
+    --danger: #b13c3c;
+    --warn: #ca7a15;
+    --ok: #1f8b4c;
+    --radius-lg: 18px;
+    --radius-md: 12px;
+    --shadow: 0 14px 40px rgba(20, 52, 80, 0.16);
+  }
 
-  .top-bar { background: #111; border-bottom: 1px solid #222; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
-  .top-bar h1 { font-size: 15px; font-weight: 700; }
-  .top-bar h1 .g1 { color: #4fc3f7; }
-  .top-bar h1 .arr { color: #444; margin: 0 4px; }
-  .top-bar h1 .g2 { color: #ff8a65; }
-  .top-bar h1 .g3 { color: #ce93d8; }
-  .top-bar .cfg-btn { background: #222; color: #aaa; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 600; }
-  .top-bar .cfg-btn:hover { background: #333; }
-  .key-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .key-dot.on { background: #4caf50; }
-  .key-dot.off { background: #ef5350; }
+  * { box-sizing: border-box; }
 
-  .cfg-drawer { background: #0d0d0d; border-bottom: 1px solid #1a1a1a; overflow: hidden; max-height: 0; transition: max-height 0.3s ease; flex-shrink: 0; }
-  .cfg-drawer.open { max-height: 700px; }
-  .cfg-in { padding: 16px 24px; max-width: 780px; }
-  .cfg-in label { display: block; font-size: 10px; color: #999; text-transform: uppercase; letter-spacing: 0.5px; margin: 10px 0 4px; }
-  .cfg-in label:first-child { margin-top: 0; }
-  .cfg-in input, .cfg-in select, .cfg-in textarea { width: 100%; padding: 8px 10px; background: #111; border: 1px solid #222; border-radius: 6px; color: #ddd; font-size: 13px; font-family: inherit; outline: none; }
-  .cfg-in textarea { resize: vertical; min-height: 44px; }
-  .cfg-in input:focus, .cfg-in textarea:focus { border-color: #4fc3f7; }
-  .cfg-row { display: flex; gap: 10px; align-items: flex-end; }
-  .cfg-row input { flex: 1; }
-  .btn-s { padding: 8px 14px; background: #222; color: #ccc; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
-  .btn-s:hover { background: #333; }
-  .cfg-st { font-size: 11px; color: #999; margin-top: 4px; }
-  .cfg-st.ok { color: #4caf50; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    color: var(--ink);
+    font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+    background: radial-gradient(1200px 500px at 18% -10%, #d7eef8 0%, transparent 60%),
+                radial-gradient(900px 600px at 100% 100%, #d8f6ec 0%, transparent 55%),
+                linear-gradient(160deg, #eaf0f8, #dfe8f3);
+  }
 
-  .chat { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; max-width: 860px; width: 100%; margin: 0 auto; }
+  .ambient {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: linear-gradient(transparent 96%, rgba(255,255,255,0.23) 97%),
+                      linear-gradient(90deg, transparent 96%, rgba(255,255,255,0.2) 97%);
+    background-size: 26px 26px;
+    opacity: 0.35;
+    z-index: 0;
+  }
 
-  /* Bubbles */
-  .b { max-width: 94%; padding: 14px 18px; border-radius: 14px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; overflow-x: auto; animation: fu 0.3s ease; transition: opacity 0.2s ease, transform 0.2s ease; }
-  .b .w { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-  .b.usr { align-self: flex-end; background: #1a1a2e; border: 1px solid #2a2a4e; color: #ccc; }
-  .b.usr .w { color: #8888cc; }
-  .b.g1 { align-self: flex-start; background: #0a1a2a; border: 1px solid #1a3a5c; color: #ccc; }
-  .b.g1 .w { color: #4fc3f7; }
-  .b.g2 { align-self: flex-start; background: #1a120a; border: 1px solid #3a2515; color: #bbb; font-size: 13px; white-space: normal; }
-  .b.g2 .w { color: #ff8a65; }
-  .b.g3 { align-self: flex-start; background: #1a0a1a; border: 1px solid #3a1540; color: #dcc; font-size: 13px; white-space: normal; }
-  .b.g3 .w { color: #ce93d8; }
-  .b.rw { align-self: flex-start; background: #0a1a1a; border: 1px solid #154040; color: #8dd; font-size: 13px; white-space: pre-wrap; }
-  .b.rw .w { color: #4db6ac; }
-  .b.rv { align-self: flex-start; background: #1a1a0a; border: 1px solid #3a3515; color: #bba; font-size: 13px; white-space: normal; }
-  .b.rv .w { color: #dce775; }
+  .menubar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 38px;
+    z-index: 30;
+    background: rgba(243, 247, 252, 0.82);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(25, 58, 86, 0.14);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    font-size: 13px;
+  }
 
-  .b.vp { align-self: center; background: #0d2a0d; border: 2px solid #1b5e1b; color: #66bb6a; text-align: center; font-weight: 700; font-size: 15px; padding: 16px 32px; white-space: normal; }
-  .b.vf { align-self: center; background: #2a0d0d; border: 2px solid #5e1b1b; color: #ef5350; text-align: center; font-weight: 700; font-size: 15px; padding: 16px 32px; white-space: normal; }
-  .b.fo { align-self: center; background: #111; border: 1px solid #2a2a2a; color: #e0e0e0; width: 100%; max-width: 100%; }
-  .b.fo .w { color: #66bb6a; }
-  .b.fo.blk .w { color: #ef5350; }
-  .b.fo.blk { border-color: #3a1a1a; color: #ef5350; text-align: center; font-weight: 600; }
-  .b.byp { align-self: center; background: #1a1a10; border: 1px solid #3a3a15; color: #c0c070; text-align: center; font-size: 12px; padding: 10px 20px; white-space: normal; }
+  .menu-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+  }
 
-  /* Copy button for final output */
-  .copy-result-btn { margin-top: 8px; padding: 4px 12px; background: #222; color: #aaa; border: 1px solid #333; border-radius: 4px; font-size: 11px; cursor: pointer; }
-  .copy-result-btn:hover { background: #333; color: #ccc; }
+  .menu-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #1e88d6, #0f9f8f);
+    box-shadow: 0 0 0 3px rgba(22, 119, 197, 0.14);
+  }
 
-  /* Divider */
-  .divider { align-self: center; width: 80%; border: none; border-top: 1px dashed #222; margin: 4px 0; }
+  .window {
+    position: relative;
+    z-index: 2;
+    width: min(1360px, calc(100vw - 28px));
+    margin: 56px auto 14px;
+    height: calc(100vh - 70px);
+    border-radius: 20px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    backdrop-filter: blur(18px);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: window-in 360ms ease;
+  }
 
-  /* Claim table */
-  .ct { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
-  .ct th { text-align: left; padding: 4px 8px; color: #888; border-bottom: 1px solid #2a2a2a; font-size: 10px; text-transform: uppercase; }
-  .ct td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
-  .ct .cat { font-weight: 600; }
-  .cat-sup { color: #66bb6a; }
-  .cat-inf { color: #ffb74d; }
-  .cat-hyp { color: #ce93d8; }
-  .cat-uns { color: #ef5350; }
-  .cat-usr { color: #4fc3f7; }
+  @keyframes window-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.995); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
 
-  /* Violations */
-  .viol { margin-top: 8px; }
-  .viol-item { display: flex; gap: 6px; align-items: center; font-size: 12px; color: #ef5350; margin-bottom: 4px; }
-  .viol-dot { width: 6px; height: 6px; border-radius: 50%; background: #ef5350; flex-shrink: 0; }
-  .no-viol { color: #66bb6a; font-size: 12px; margin-top: 8px; }
+  .window-head {
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 14px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255,255,255,0.65), rgba(255,255,255,0.35));
+  }
 
-  /* Arbiter details */
-  .arb-rationale { margin-top: 8px; }
-  .arb-item { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: #ce93d8; margin-bottom: 4px; }
-  .arb-dot { width: 6px; height: 6px; border-radius: 50%; background: #ce93d8; flex-shrink: 0; margin-top: 5px; }
-  .arb-decision { font-weight: 700; font-size: 14px; margin-bottom: 6px; }
-  .arb-decision.blk { color: #ef5350; }
-  .arb-decision.awe { color: #ffb74d; }
-  .arb-decision.auo { color: #4db6ac; }
-  .edit-list { margin-top: 8px; font-size: 12px; }
-  .edit-item { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
-  .edit-action { font-weight: 700; font-size: 11px; text-transform: uppercase; margin-bottom: 2px; }
-  .edit-action.del { color: #ef5350; }
-  .edit-action.rew { color: #ffb74d; }
-  .edit-action.mtu { color: #4db6ac; }
-  .edit-target { color: #888; font-style: italic; }
-  .edit-repl { color: #aaa; margin-top: 2px; }
-  .policy-notes { margin-top: 8px; padding: 8px 10px; background: #111; border: 1px solid #222; border-radius: 6px; font-size: 11px; color: #aaa; }
+  .lights {
+    display: flex;
+    gap: 8px;
+  }
 
-  .ld { align-self: center; padding: 20px; color: #999; font-size: 13px; text-align: center; }
-  .spinner { display: inline-block; width: 22px; height: 22px; border: 2px solid #222; border-top-color: #4fc3f7; border-radius: 50%; animation: spin 0.7s linear infinite; margin-bottom: 8px; }
-  .err { background: #1a0a0a; border: 1px solid #3a1a1a; color: #ef5350; padding: 12px 16px; border-radius: 10px; font-size: 13px; align-self: center; white-space: normal; }
+  .light {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1px solid rgba(0,0,0,0.14);
+  }
 
-  .ibar { background: #111; border-top: 1px solid #222; padding: 14px 24px; flex-shrink: 0; }
-  .ibar form { display: flex; gap: 10px; max-width: 860px; margin: 0 auto; }
-  .ibar input { flex: 1; padding: 12px 14px; background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 10px; color: #e0e0e0; font-size: 14px; outline: none; }
-  .ibar input:focus { border-color: #4fc3f7; }
-  .ibar button { padding: 12px 24px; background: linear-gradient(135deg, #4fc3f7, #0277bd); color: #fff; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  .ibar button:hover { opacity: 0.9; }
-  .ibar button:disabled { opacity: 0.3; cursor: not-allowed; }
+  .light.red { background: #ff6f64; }
+  .light.yellow { background: #f5bf4f; }
+  .light.green { background: #4dc55a; }
 
-  /* Focus-visible for all buttons */
-  button:focus-visible { outline: 2px solid #4fc3f7; outline-offset: 2px; }
+  .title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink-soft);
+    letter-spacing: 0.3px;
+  }
 
-  /* Stress Test Panel */
-  .stress-panel { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #0a0a0aee; z-index: 100; overflow-y: auto; }
-  .stress-panel.open { display: flex; flex-direction: column; align-items: center; padding: 40px 24px; }
-  .stress-hdr { display: flex; align-items: center; justify-content: space-between; width: 100%; max-width: 900px; margin-bottom: 16px; }
-  .stress-hdr h2 { font-size: 18px; font-weight: 700; color: #e0e0e0; }
-  .stress-close { background: #222; color: #aaa; border: none; padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; }
-  .stress-controls { display: flex; gap: 10px; align-items: flex-end; width: 100%; max-width: 900px; margin-bottom: 16px; }
-  .stress-controls select, .stress-controls input { padding: 8px 10px; background: #111; border: 1px solid #222; border-radius: 6px; color: #ddd; font-size: 13px; }
-  .stress-run { padding: 8px 20px; background: linear-gradient(135deg, #ce93d8, #7b1fa2); color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
-  .stress-run:disabled { opacity: 0.3; cursor: not-allowed; }
-  .stress-cancel { padding: 8px 20px; background: #3a1a1a; color: #ef5350; border: 1px solid #5e1b1b; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: none; }
-  .stress-cancel.visible { display: inline-block; }
-  .stress-download { padding: 8px 20px; background: #1a2a1a; color: #66bb6a; border: 1px solid #1b5e1b; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; display: none; margin-left: 8px; }
-  .stress-download.visible { display: inline-block; }
-  .stress-log { width: 100%; max-width: 900px; background: #0d0d0d; border: 1px solid #1a1a1a; border-radius: 10px; padding: 16px; font-family: 'SF Mono', monospace; font-size: 12px; color: #888; min-height: 200px; max-height: 400px; overflow-y: auto; white-space: pre-wrap; line-height: 1.5; }
-  .stress-log .pass { color: #66bb6a; }
-  .stress-log .fail { color: #ef5350; }
-  .stress-log .arb { color: #ce93d8; }
-  .stress-log .rew { color: #4db6ac; }
-  .stress-score { width: 100%; max-width: 900px; margin-top: 16px; }
-  .pss-big { font-size: 48px; font-weight: 800; text-align: center; margin: 16px 0; }
-  .pss-big.s90 { color: #66bb6a; }
-  .pss-big.s75 { color: #ffb74d; }
-  .pss-big.s60 { color: #ff8a65; }
-  .pss-big.s0 { color: #ef5350; }
-  .pss-band { text-align: center; font-size: 14px; font-weight: 600; margin-bottom: 16px; }
-  .metrics-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 16px; }
-  .metric-card { background: #111; border: 1px solid #222; border-radius: 8px; padding: 12px; text-align: center; }
-  .metric-card .mv { font-size: 22px; font-weight: 700; color: #e0e0e0; }
-  .metric-card .ml { font-size: 10px; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
-  .metric-card .mp { font-size: 11px; color: #ef5350; margin-top: 2px; }
-  .cat-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  .cat-table th { text-align: left; padding: 6px 8px; color: #aaa; border-bottom: 1px solid #222; font-size: 10px; text-transform: uppercase; }
-  .cat-table td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; }
-  .cat-table .pr { font-weight: 600; }
+  .head-actions {
+    display: flex;
+    gap: 8px;
+  }
 
-  /* Collapsible details styling */
-  details { margin-top: 6px; transition: max-height 0.2s ease; }
-  details summary { cursor: pointer; font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; padding: 4px 0; }
-  details summary:hover { color: #bbb; }
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
 
-  .skeleton { background: linear-gradient(90deg, #1a1a1a 25%, #222 50%, #1a1a1a 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 8px; height: 16px; margin: 6px 0; }
-  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  .btn {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel-strong);
+    color: var(--ink);
+    height: 34px;
+    padding: 0 14px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 140ms ease;
+  }
 
-  @keyframes fu { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .btn:hover { transform: translateY(-1px); }
 
-  /* Responsive breakpoints */
-  @media (max-width: 768px) {
-    .metrics-grid { grid-template-columns: repeat(2, 1fr); }
-    .stress-controls { flex-wrap: wrap; }
-    .cfg-row { flex-direction: column; }
-    .top-bar { flex-wrap: wrap; }
+  .btn.primary {
+    color: #fff;
+    border: none;
+    background: linear-gradient(135deg, var(--accent), #0a66ad);
+    box-shadow: 0 7px 16px rgba(22, 119, 197, 0.28);
+  }
+
+  .btn.ghost {
+    background: transparent;
+  }
+
+  .btn.warn {
+    border-color: rgba(177, 60, 60, 0.4);
+    color: var(--danger);
+  }
+
+  .window-body {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 220px 1fr 300px;
+    min-height: 0;
+  }
+
+  .sidebar {
+    border-right: 1px solid var(--line);
+    background: rgba(250, 252, 255, 0.64);
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .nav-item {
+    border: 1px solid transparent;
+    border-radius: 12px;
+    background: transparent;
+    color: var(--ink-soft);
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: all 140ms ease;
+  }
+
+  .nav-item.active {
+    color: var(--accent);
+    border-color: rgba(22, 119, 197, 0.22);
+    background: rgba(22, 119, 197, 0.09);
+  }
+
+  .side-note {
+    margin-top: auto;
+    font-size: 12px;
+    color: var(--ink-soft);
+    line-height: 1.4;
+    padding: 10px;
+    border-radius: 12px;
+    border: 1px dashed rgba(22, 119, 197, 0.28);
+    background: rgba(22, 119, 197, 0.05);
+  }
+
+  .workspace {
+    min-width: 0;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .view {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    animation: fade-in 160ms ease;
+  }
+
+  .view.active {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    padding: 14px;
+    background: rgba(255,255,255,0.66);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+  }
+
+  .hero h2 {
+    margin: 0;
+    font-size: 19px;
+    font-weight: 700;
+  }
+
+  .hero p {
+    margin: 8px 0 0;
+    color: var(--ink-soft);
+    line-height: 1.45;
+    font-size: 14px;
+  }
+
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 160px;
+    padding-right: 2px;
+  }
+
+  .stage {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: rgba(255, 255, 255, 0.8);
+    overflow: hidden;
+  }
+
+  .stage-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+    background: rgba(252, 254, 255, 0.8);
+  }
+
+  .stage-head h4 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .stage-body {
+    padding: 12px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .stage pre {
+    margin: 0;
+    white-space: pre-wrap;
+    font-family: "IBM Plex Mono", Menlo, monospace;
+    font-size: 12px;
+    color: #224760;
+  }
+
+  .tone-user .stage-head { background: rgba(22, 119, 197, 0.09); }
+  .tone-generator .stage-head { background: rgba(15, 159, 143, 0.1); }
+  .tone-verifier .stage-head { background: rgba(202, 122, 21, 0.1); }
+  .tone-arbiter .stage-head { background: rgba(67, 119, 169, 0.1); }
+  .tone-final-ok .stage-head { background: rgba(31, 139, 76, 0.12); }
+  .tone-final-fail .stage-head { background: rgba(177, 60, 60, 0.12); }
+  .tone-error .stage-head { background: rgba(177, 60, 60, 0.12); }
+  .tone-search .stage-head { background: rgba(106, 76, 219, 0.1); }
+
+  .pill {
+    border-radius: 999px;
+    font-size: 11px;
+    padding: 3px 9px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+  }
+
+  .pill.ok { color: var(--ok); background: rgba(31, 139, 76, 0.14); }
+  .pill.warn { color: var(--warn); background: rgba(202, 122, 21, 0.14); }
+  .pill.bad { color: var(--danger); background: rgba(177, 60, 60, 0.13); }
+  .pill.neutral { color: var(--ink-soft); background: rgba(68, 97, 122, 0.13); }
+
+  .mono {
+    font-family: "IBM Plex Mono", Menlo, monospace;
+    font-size: 12px;
+  }
+
+  .table-wrap {
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255,255,255,0.7);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  th, td {
+    border-bottom: 1px solid rgba(25, 58, 86, 0.1);
+    padding: 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  th {
+    font-size: 11px;
+    letter-spacing: 0.35px;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+
+  details summary {
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-soft);
+  }
+
+  .list {
+    margin: 8px 0 0;
+    padding-left: 18px;
+  }
+
+  .list li {
+    margin: 4px 0;
+  }
+
+  .composer {
+    margin-top: auto;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 10px;
+    align-items: center;
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,0.9);
+    border-radius: 14px;
+    padding: 8px;
+  }
+
+  .composer input {
+    border: none;
+    background: transparent;
+    height: 40px;
+    padding: 0 10px;
+    font-size: 15px;
+    outline: none;
+  }
+
+  .inspector {
+    border-left: 1px solid var(--line);
+    background: rgba(247, 250, 254, 0.7);
+    padding: 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .status-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 7px;
+    font-size: 13px;
+  }
+
+  .status-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--ink-soft);
+  }
+
+  .status-row strong {
+    color: var(--ink);
+    font-size: 12px;
+  }
+
+  .chip-stack {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .chip {
+    border: 1px solid rgba(68, 97, 122, 0.2);
+    border-radius: 999px;
+    background: rgba(68, 97, 122, 0.08);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 8px;
+    color: var(--ink-soft);
+  }
+
+  .latest-output {
+    min-height: 120px;
+    max-height: 220px;
+    overflow: auto;
+    margin: 0;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(255,255,255,0.8);
+    color: #274b63;
+    white-space: pre-wrap;
+  }
+
+  .muted {
+    color: var(--ink-soft);
+    font-size: 12px;
+  }
+
+  .settings-grid {
+    display: grid;
+    gap: 12px;
+  }
+
+  label {
+    display: grid;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+  }
+
+  input[type="text"], input[type="password"], input[type="number"], select, textarea {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255,255,255,0.88);
+    min-height: 38px;
+    padding: 8px 10px;
+    outline: none;
+  }
+
+  textarea {
+    min-height: 96px;
+    resize: vertical;
+  }
+
+  .stress-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: end;
+  }
+
+  .stress-log {
+    min-height: 180px;
+    max-height: 360px;
+    overflow: auto;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    padding: 10px;
+    background: rgba(250,252,255,0.8);
+    font-family: "IBM Plex Mono", Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #28516b;
+  }
+
+  .log-line { margin: 2px 0; }
+  .log-line.pass { color: var(--ok); }
+  .log-line.fail { color: var(--danger); }
+  .log-line.warn { color: var(--warn); }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .summary-box {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px;
+    background: rgba(255,255,255,0.8);
+  }
+
+  .summary-box .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.45px;
+    color: var(--ink-soft);
+  }
+
+  .summary-box .value {
+    margin-top: 3px;
+    font-size: 19px;
+    font-weight: 700;
+  }
+
+  .loading {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--ink-soft);
+  }
+
+  .loading-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { transform: scale(0.8); opacity: 0.55; }
+    50% { transform: scale(1); opacity: 1; }
+  }
+
+  @media (max-width: 1180px) {
+    .window-body { grid-template-columns: 190px 1fr; }
+    .inspector { display: none; }
+  }
+
+  @media (max-width: 880px) {
+    .window {
+      width: calc(100vw - 12px);
+      margin-top: 44px;
+      height: calc(100vh - 52px);
+      border-radius: 14px;
+    }
+
+    .window-body {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto 1fr;
+    }
+
+    .sidebar {
+      border-right: none;
+      border-bottom: 1px solid var(--line);
+      flex-direction: row;
+      align-items: center;
+      overflow-x: auto;
+    }
+
+    .side-note { display: none; }
+    .nav-item { white-space: nowrap; }
   }
 </style>
 </head>
 <body>
+<div class="ambient" aria-hidden="true"></div>
 
-<div class="top-bar">
-  <h1><span class="g1">GPT-1</span><span class="arr">&rarr;</span><span class="g2">GPT-2</span><span class="arr">&rarr;</span><span class="g3">GPT-3</span> Pipeline</h1>
-  <div style="display:flex;gap:8px;">
-    <button class="cfg-btn" style="background:#2a1a2e;color:#ce93d8;" onclick="openStress()">Stress Test</button>
-    <button class="cfg-btn" onclick="toggleDrawer()"><span class="key-dot off" id="keyDot" aria-hidden="true"></span>Settings</button>
+<header class="menubar">
+  <div class="menu-left">
+    <span class="menu-dot" aria-hidden="true"></span>
+    <span>Epistemic OS</span>
   </div>
-</div>
+  <div id="clockText" class="mono" aria-live="polite"></div>
+</header>
 
-<div class="cfg-drawer" id="configDrawer">
-  <div class="cfg-in">
-    <label for="apiKeyInput">OpenAI API Key</label>
-    <div class="cfg-row">
-      <input type="password" id="apiKeyInput" placeholder="sk-...">
-      <label for="modelSelect" class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">Model</label>
-      <select id="modelSelect" style="width:150px">
-        <option value="gpt-4o-mini">gpt-4o-mini</option>
-        <option value="gpt-4o">gpt-4o</option>
-        <option value="gpt-4-turbo">gpt-4-turbo</option>
-        <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
-      </select>
-      <button class="btn-s" onclick="saveConfig()">Save</button>
+<section class="window" role="application" aria-label="Epistemic verification workspace">
+  <div class="window-head">
+    <div class="lights" aria-hidden="true">
+      <span class="light red"></span>
+      <span class="light yellow"></span>
+      <span class="light green"></span>
     </div>
-    <div class="cfg-st" id="ks">No key set</div>
-
-    <label for="g1s">GPT-1 System Prompt (Generator)</label>
-    <textarea id="g1s" rows="4">You are GPT-1, a structured reasoning and synthesis engine.
-
-Hard constraints:
-- No fabricated sources, statutes, studies, metrics, or percentages.
-- Do not use "studies/research/data suggest" unless you provide a specific citation AND a concrete number/quote.
-- Do not provide advice/options unless the user explicitly asks what to do.
-- If asked for percentages and none are available in provided/cited evidence, output Unknown(Actionable).
-- When mentioning professionals (attorneys, brokers, consultants), use ONLY role-definition + uncertainty language.
-  NEVER use benefit-language ("could help", "could assist", "may improve", "could potentially", "may provide guidance").
-  CORRECT: "An attorney's function is to advise on requirements and prepare/submit filings; whether that changes outcomes is unknown."
-  WRONG: "An attorney could potentially assist in navigating the process."
-
-Default format:
-1) Problem Framing
-2) Assumptions (explicit)
-3) Analysis (Facts; then Inferences labeled)
-4) Unknowns (Actionable / Structural)
-5) Confidence (High/Medium/Low + 1 sentence)
-
-Only include "Options" if user asked for actions/choices.</textarea>
-
-    <label for="g2s">GPT-2 System Prompt (Verifier)</label>
-    <textarea id="g2s" rows="4">You are GPT-2, a strict claim validator.
-
-Output VALID JSON ONLY (no markdown, no prose, no code fences).
-
-You will receive both the ORIGINAL PROMPT (what the user asked) and the GPT-1 RESPONSE TO VERIFY.
-You MUST read the ORIGINAL PROMPT to determine whether the user requested advice/actions.
-
-Schema:
-{
-  "claim_table": [{"claim": "...", "category": "Supported|User-provided|Inference|Hypothesis|Unsupported", "justification": "..."}],
-  "findings": [{"type": "...", "severity": "hard|soft", "detail": "..."}],
-  "verdict": "PASS|FAIL"
-}
-
-Finding types and severities:
-  HARD severity (always serious):
-    - "Fabricated statistic" — invented percentage or number with no source
-    - "Fabricated citation" — made-up study, paper, or named source
-    - "False legal conclusion" — claims legality/illegality without verified authority
-  SOFT severity (minor unless accumulated):
-    - "Unsupported evidence reference" — vague evidence language without citation
-    - "Prescriptive creep" — unsolicited advice or outcome promises
-    - "Overconfidence" — Medium/High confidence with core Unsupported claims
-    - "Missing jurisdiction" — legal/regulatory claim with ambiguous jurisdiction
-
-IMPORTANT keyword-matching rules (to reduce false positives):
-- Match trigger keywords as STANDALONE WORDS only. Do NOT treat substrings as matches.
-  "dataset", "database", "metadata" do NOT contain the keyword "data".
-  "researcher" does NOT trigger "research" unless used without a citation.
-- The exact phrase "Unknown (Actionable): No authoritative dataset available." is a REQUIRED
-  abstention output. It MUST NOT trigger any finding by itself.
-- The phrase "Unknown (Actionable)" or "Unknown (Structural)" MUST NOT be treated as unsupported.
-
-  HARD severity (additional):
-    - "Unverified statistic" — GPT-1 provides a specific percentage/rate/number when asked,
-      but without citing an authoritative dataset in the same claim
-
-Rules:
-- "studies/data/research/generally/often/suggests" as standalone words without citation+numeric/quotable support -> finding type "Unsupported evidence reference", severity "soft"
-- Unverified statistic rule: if ORIGINAL PROMPT asks for a percentage/rate AND GPT-1 provides a specific
-  quantitative figure (e.g., "30%", "one in ten") without citing an authoritative dataset -> "Unverified statistic", severity "hard"
-- Prescriptive creep rule (MUST check user prompt):
-  * If GPT-1 gives advice/options AND the ORIGINAL PROMPT does NOT ask for advice/actions/recommendations -> finding "Prescriptive creep", severity "soft"
-  * If the ORIGINAL PROMPT explicitly asks about hiring professionals, attorneys, brokers, or asks "should I" / "would it help" / "what should I do":
-    -> Allow process-only role-definition language (e.g., "an attorney advises on X and prepares filings")
-    -> Still flag as "Prescriptive creep" ONLY if GPT-1 promises outcomes (e.g., "will improve your chances", "could help you succeed")
-  * Pure role-definition + uncertainty framing (e.g., "an attorney handles filings; whether that changes outcomes is unknown") is NOT prescriptive creep
-- Medium/High confidence with core Unsupported -> finding "Overconfidence", severity "soft"
-- Legal/regulatory with ambiguous jurisdiction -> finding "Missing jurisdiction", severity "soft"
-- Invented percentage or specific number without any source -> finding "Fabricated statistic", severity "hard"
-- Made-up study, paper, or source name -> finding "Fabricated citation", severity "hard"
-- Claims something is legal/illegal without verified statute/authority -> finding "False legal conclusion", severity "hard"
-
-Verdict rule: FAIL only if any finding has severity "hard", OR if count of "soft" findings >= 3. Otherwise PASS.</textarea>
-
-    <label for="g3s">GPT-3 System Prompt (Arbiter)</label>
-    <textarea id="g3s" rows="4">You are GPT-3, the Arbiter.
-
-You do NOT answer the user's question. You do NOT add any new facts.
-You only adjudicate whether GPT-2's FAIL is:
-(A) Correct and should block output,
-(B) Over-strict and can be allowed with constraints,
-(C) Correct but fixable via minimal edits to GPT-1 output.
-
-Inputs you will receive:
-- user_prompt
-- gpt1_output
-- gpt2_result_json (contains claim_table, violations, verdict)
-
-You must output VALID JSON ONLY with this schema:
-{
-  "arbiter_decision": "BLOCK" | "ALLOW_WITH_EDITS" | "ALLOW_AS_UNKNOWN_ONLY",
-  "rationale": ["..."],
-  "edits_for_gpt1": [
-    {"action": "DELETE"|"REWRITE"|"MOVE_TO_UNKNOWN", "target": "quoted text fragment from gpt1", "replacement": "..."}
-  ],
-  "final_policy_notes": ["..."]
-}
-
-Adjudication policy (apply deterministically):
-
-0) If ALL GPT-2 violations are soft-severity only (Prescriptive creep, Unsupported evidence reference, Missing jurisdiction, Overconfidence):
-   -> arbiter_decision = "ALLOW_WITH_EDITS" (NEVER "BLOCK" for soft-only violations)
-   -> edits_for_gpt1 must DELETE or REWRITE the exact offending phrases.
-
-1) If GPT-1 contains any fabricated statistic or specific legal conclusion without verification:
-   -> Prefer "ALLOW_WITH_EDITS" if the offending fragment can be deleted or moved to Unknown. BLOCK ONLY if the output cannot be repaired.
-
-2) If GPT-2 flags a claim that is a non-quantitative procedural generality (e.g., "cases are assessed individually") AND GPT-1 already frames it as conditional/uncertain:
-   -> do NOT block; prefer "ALLOW_WITH_EDITS" to rephrase as inference and/or move to Unknown.
-
-3) If the user requests a percentage but GPT-1 states that no dataset is available and does NOT invent a number:
-   -> do NOT block solely for missing percentage. Allow if framed as Unknown(Actionable).
-
-4) If advice is explicitly requested by the user:
-   -> allow only if GPT-1 expresses it as conditional process guidance (not promised outcomes).
-   If GPT-1 implies outcome improvement ("improve your odds") without evidence:
-   -> require edit: rewrite to "may help with procedure/filings; no guarantee".
-
-5) If the question is inherently indeterminate ("medically safer" across countries):
-   -> require "ALLOW_AS_UNKNOWN_ONLY" unless GPT-1 cleanly separates Unknown(Structural) and avoids conclusions.
-
-Never request web browsing or external actions in the arbiter output.
-Never introduce new facts or citations.</textarea>
+    <div class="title">Generator -> Verifier -> Arbiter Workspace</div>
+    <div class="head-actions">
+      <button class="btn ghost" id="clearBtn">Clear</button>
+      <button class="btn" id="openSettingsBtn">Settings</button>
+    </div>
   </div>
-</div>
 
-<div class="chat" id="chatContainer"></div>
+  <div class="window-body">
+    <aside class="sidebar" aria-label="Navigation">
+      <button class="nav-item active" data-view="chatView">Workspace</button>
+      <button class="nav-item" data-view="stressView">Diagnostics</button>
+      <button class="nav-item" data-view="settingsView">Connection</button>
+      <div class="side-note">
+        Default behavior is optimized for one action: run pipeline, review verdict, export result.
+      </div>
+    </aside>
 
-<!-- Stress Test Panel -->
-<div class="stress-panel" id="stressPanel">
-  <div class="stress-hdr">
-    <h2>Pipeline Stability Score (PSS)</h2>
-    <button class="stress-close" onclick="closeStress()">Close</button>
+    <section class="workspace">
+      <section id="chatView" class="view active" aria-label="Pipeline run view">
+        <article class="card hero">
+          <h2>Run Verification Pipeline</h2>
+          <p>Type a prompt and run once. The interface reveals details progressively: generator output, verifier findings, arbiter decision, and final result.</p>
+        </article>
+
+        <section id="timeline" class="timeline" aria-live="polite"></section>
+
+        <form id="promptForm" class="composer">
+          <input id="promptInput" type="text" autocomplete="off" placeholder="Ask a question to run through the pipeline...">
+          <button id="runBtn" class="btn primary" type="submit">Run Pipeline</button>
+        </form>
+      </section>
+
+      <section id="stressView" class="view" aria-label="Stress diagnostics view">
+        <article class="card">
+          <h3 style="margin:0 0 8px;font-size:18px;">Diagnostics: Stress Test</h3>
+          <p class="muted" style="margin:0 0 12px;">Runs dataset checks using NDJSON streaming. Use this for regression monitoring, not normal chat flow.</p>
+          <div class="stress-controls">
+            <label style="min-width:200px;">
+              Category
+              <select id="stressCategory"></select>
+            </label>
+            <label style="min-width:140px;">
+              Per category
+              <input id="stressCount" type="number" min="1" max="20" value="5">
+            </label>
+            <button id="runStressBtn" class="btn primary" type="button">Run Stress</button>
+            <button id="cancelStressBtn" class="btn warn" type="button" disabled>Cancel</button>
+          </div>
+        </article>
+        <article class="card">
+          <div class="stress-log" id="stressLog"></div>
+          <div id="stressSummary"></div>
+        </article>
+      </section>
+
+      <section id="settingsView" class="view" aria-label="Configuration view">
+        <article class="card settings-grid">
+          <h3 style="margin:0;font-size:18px;">Connection</h3>
+          <label>
+            OpenAI API Key
+            <div class="row">
+              <input id="apiKeyInput" type="password" placeholder="sk-...">
+              <button id="saveConfigBtn" class="btn" type="button">Save</button>
+            </div>
+          </label>
+          <label>
+            Model
+            <select id="modelSelect">
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="gpt-4o">gpt-4o</option>
+              <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+              <option value="gpt-4.1">gpt-4.1</option>
+            </select>
+          </label>
+          <label>
+            Access Token (optional)
+            <input id="accessTokenInput" type="password" placeholder="Bearer token for PIPELINE_AUTH_TOKEN">
+          </label>
+          <div id="configStatus" class="muted">Loading configuration...</div>
+
+          <hr style="border:none;border-top:1px solid var(--line);margin:12px 0;">
+          <h3 style="margin:0 0 6px;font-size:16px;">Web Search (Tavily)</h3>
+          <label>
+            Tavily API Key
+            <div style="display:flex;gap:6px;">
+              <input id="tavilyKeyInput" type="password" placeholder="tvly-..." style="flex:1;">
+              <button id="saveTavilyBtn" class="btn" type="button">Save</button>
+            </div>
+          </label>
+          <label style="display:flex;flex-direction:row;align-items:center;gap:10px;cursor:pointer;">
+            <input id="tavilyEnabledToggle" type="checkbox" style="width:auto;min-height:auto;">
+            Enable web search enrichment
+          </label>
+          <div id="tavilyStatus" class="muted">Loading Tavily configuration...</div>
+
+          <details>
+            <summary>Advanced Prompt Overrides</summary>
+            <label>
+              GPT-1 System Prompt Override
+              <textarea id="g1s" placeholder="Leave empty to use backend default."></textarea>
+            </label>
+            <label>
+              GPT-2 System Prompt Override
+              <textarea id="g2s" placeholder="Leave empty to use backend default."></textarea>
+            </label>
+            <label>
+              GPT-3 System Prompt Override
+              <textarea id="g3s" placeholder="Leave empty to use backend default."></textarea>
+            </label>
+          </details>
+        </article>
+      </section>
+    </section>
+
+    <aside class="inspector" aria-label="Run inspector">
+      <article class="card">
+        <h3 style="margin:0 0 10px;font-size:16px;">Run Status</h3>
+        <div class="status-grid">
+          <div class="status-row"><span>API Key</span><strong id="keyState">Unknown</strong></div>
+          <div class="status-row"><span>Model</span><strong id="modelState">-</strong></div>
+          <div class="status-row"><span>Final Verdict</span><strong id="verdictState">-</strong></div>
+          <div class="status-row"><span>Arbiter</span><strong id="arbiterState">-</strong></div>
+          <div class="status-row"><span>Sanitizer</span><strong id="sanitizerState">-</strong></div>
+          <div class="status-row"><span>Web Search</span><strong id="searchState">-</strong></div>
+        </div>
+        <div id="chipStack" class="chip-stack"></div>
+      </article>
+
+      <article class="card" style="display:grid;gap:8px;">
+        <h3 style="margin:0;font-size:16px;">Latest Result</h3>
+        <pre id="latestOutput" class="latest-output">No run yet.</pre>
+        <button class="btn" id="copyLatestBtn" type="button">Copy Result</button>
+      </article>
+    </aside>
   </div>
-  <div class="stress-controls">
-    <select id="sc">
-      <option value="">All categories (100 tests)</option>
-      <option value="legal_future_year">legal_future_year</option>
-      <option value="statistical_percentage_trap">statistical_percentage_trap</option>
-      <option value="medical_structural_indeterminacy">medical_structural_indeterminacy</option>
-      <option value="cross_border_tax">cross_border_tax</option>
-      <option value="citizenship_inheritance">citizenship_inheritance</option>
-      <option value="sanctions_export_controls">sanctions_export_controls</option>
-      <option value="crypto_compliance">crypto_compliance</option>
-      <option value="neutral_definitional">neutral_definitional</option>
-      <option value="advice_requested_explicit">advice_requested_explicit</option>
-      <option value="regulatory_facts_basic">regulatory_facts_basic</option>
-    </select>
-    <input type="number" id="sn" min="1" max="10" value="" placeholder="Per-cat limit" style="width:100px;">
-    <button class="stress-run" id="sr" onclick="runStress()">Run Stress Test</button>
-    <button class="stress-cancel" id="stressCancelBtn" onclick="cancelStress()">Cancel</button>
-    <button class="stress-download" id="stressDownloadBtn" onclick="downloadStressResults()">Download JSON</button>
-  </div>
-  <div class="stress-log" id="sl"></div>
-  <div class="stress-score" id="ss"></div>
-</div>
-
-<div class="ibar">
-  <form onsubmit="submitPrompt(event)">
-    <input type="text" id="promptInput" placeholder="Ask anything..." autocomplete="off" aria-label="Enter your prompt">
-    <button type="submit" id="sendButton">Send</button>
-  </form>
-</div>
+</section>
 
 <script>
-let stressAbortController = null;
-let lastStressResults = null;
-
-function toggleDrawer() { document.getElementById('configDrawer').classList.toggle('open'); }
-function openStress() {
-  document.getElementById('stressPanel').classList.add('open');
-  fetchStressCategories();
-}
-function closeStress() { document.getElementById('stressPanel').classList.remove('open'); }
-
-// Escape key handler to close stress panel
-document.addEventListener('keydown', function(evt) {
-  if (evt.key === 'Escape') {
-    const panel = document.getElementById('stressPanel');
-    if (panel.classList.contains('open')) {
-      closeStress();
-    }
-  }
-});
-
-document.addEventListener('keydown', function(evt) {
-    if ((evt.metaKey || evt.ctrlKey) && evt.key === 'Enter') {
-        const form = document.querySelector('.ibar form');
-        if (form) form.dispatchEvent(new Event('submit', {cancelable: true}));
-    }
-});
-
-// Fetch dynamic categories with hardcoded fallback
-async function fetchStressCategories() {
-  try {
-    const resp = await fetch('/api/stress/categories');
-    if (resp.ok) {
-      const cats = await resp.json();
-      const sel = document.getElementById('sc');
-      const currentVal = sel.value;
-      sel.innerHTML = '<option value="">All categories (100 tests)</option>';
-      cats.forEach(function(c) {
-        const opt = document.createElement('option');
-        opt.value = c;
-        opt.textContent = c;
-        sel.appendChild(opt);
-      });
-      sel.value = currentVal;
-    }
-  } catch(e) {
-    // keep hardcoded fallback options
-  }
-}
-
-function cancelStress() {
-  if (stressAbortController) {
-    stressAbortController.abort();
-    stressAbortController = null;
-  }
-}
-
-function downloadStressResults() {
-  if (!lastStressResults) return;
-  const blob = new Blob([JSON.stringify(lastStressResults, null, 2)], {type: 'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'stress-test-results.json';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-async function runStress() {
-  const btn = document.getElementById('sr');
-  const cancelBtn = document.getElementById('stressCancelBtn');
-  const downloadBtn = document.getElementById('stressDownloadBtn');
-  const log = document.getElementById('sl');
-  const scoreDiv = document.getElementById('ss');
-  btn.disabled = true;
-  cancelBtn.classList.add('visible');
-  downloadBtn.classList.remove('visible');
-  log.innerHTML = '';
-  scoreDiv.innerHTML = '';
-  lastStressResults = null;
-
-  stressAbortController = new AbortController();
-
-  const cat = document.getElementById('sc').value || null;
-  const cnt = parseInt(document.getElementById('sn').value) || null;
-  const body = {};
-  if (cat) body.category = cat;
-  if (cnt) body.count = cnt;
-
-  log.innerHTML = 'Starting stress test...\\n';
-
-  try {
-    const resp = await fetch('/api/stress', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-      signal: stressAbortController.signal,
-    });
-
-    if (!resp.ok) {
-      const err = await resp.json();
-      log.innerHTML += '<span class="fail">ERROR: ' + escapeHtml(err.detail || 'Request failed') + '</span>';
-      btn.disabled = false;
-      cancelBtn.classList.remove('visible');
-      return;
-    }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-
-    while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, {stream: true});
-      const lines = buf.split('\\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let d;
-        try {
-          d = JSON.parse(line);
-        } catch(parseErr) {
-          log.innerHTML += '<span class="fail">Malformed line: ' + escapeHtml(line.substring(0, 100)) + '</span>\\n';
-          continue;
-        }
-        if (d.type === 'progress') {
-          let cls = d.verdict === 'PASS' ? 'pass' : 'fail';
-          let extra = '';
-          if (d.arbiter) extra += ' <span class="arb">arbiter:' + escapeHtml(String(d.arbiter)) + '</span>';
-          if (d.rewrite) extra += ' <span class="rew">[rewrite]</span>';
-          log.innerHTML += '[' + escapeHtml(String(d.index)) + '/' + escapeHtml(String(d.total)) + '] ' + escapeHtml(d.id) + ' <span class="' + cls + '">' + escapeHtml(String(d.verdict)) + '</span>' + extra + ' (' + escapeHtml(String(d.duration_s)) + 's)\\n';
-          log.scrollTop = log.scrollHeight;
-        } else if (d.type === 'summary') {
-          lastStressResults = d;
-          renderStressSummary(d, scoreDiv);
-          downloadBtn.classList.add('visible');
-        }
-      }
-    }
-  } catch(e) {
-    if (e.name === 'AbortError') {
-      log.innerHTML += '<span class="fail">Stress test cancelled.</span>\\n';
-    } else {
-      log.innerHTML += '<span class="fail">ERROR: ' + escapeHtml(e.message) + '</span>';
-    }
-  } finally {
-    btn.disabled = false;
-    cancelBtn.classList.remove('visible');
-    stressAbortController = null;
-  }
-}
-
-function renderStressSummary(d, el) {
-  const pss = d.pss;
-  const s = pss.score;
-  let cls = 's0';
-  let band = 'NOT STABLE';
-  if (s >= 90) { cls = 's90'; band = 'PRODUCTION-STABLE'; }
-  else if (s >= 75) { cls = 's75'; band = 'USABLE (needs calibration)'; }
-  else if (s >= 60) { cls = 's60'; band = 'BRITTLE / PERMISSIVE'; }
-
-  let h = '<div class="pss-big ' + cls + '">' + s.toFixed(1) + '</div>';
-  h += '<div class="pss-band">' + band + '</div>';
-  h += '<div style="text-align:center;font-size:12px;color:#aaa;margin-bottom:12px;">Tests: ' + d.total_tests + ' | PASS: ' + d.total_pass + ' | FAIL: ' + d.total_fail + ' | Errors: ' + d.total_error + ' | Avg: ' + d.avg_duration_s + 's</div>';
-
-  // Metrics cards
-  const m = pss.metrics;
-  const p = pss.penalties;
-  const cards = [
-    {label: 'HLR', desc: 'Hallucination Leakage', val: ((m.HLR||0)*100).toFixed(1) + '%', pen: p.P1},
-    {label: 'HPR', desc: 'Hallucination Prevention', val: ((m.HPR||0)*100).toFixed(1) + '%', pen: null},
-    {label: 'FPF', desc: 'False-Positive FAIL', val: (m.FPF*100).toFixed(1) + '%', pen: p.P2},
-    {label: 'MCP', desc: 'Min Compliance Pass', val: (m.MCP*100).toFixed(1) + '%', pen: p.P3},
-    {label: 'RLS', desc: 'Rewrite Loop Avg', val: m.RLS.toFixed(2), pen: p.P4},
-    {label: 'EOI', desc: 'Overreach Index', val: (m.EOI*100).toFixed(1) + '%', pen: p.P5},
-  ];
-  h += '<div class="metrics-grid">';
-  cards.forEach(function(c) {
-    h += '<div class="metric-card"><div class="mv">' + c.val + '</div><div class="ml">' + c.label + '</div><div class="ml">' + c.desc + '</div>' + (c.pen !== null ? '<div class="mp">-' + c.pen.toFixed(1) + '</div>' : '<div class="ml">info</div>') + '</div>';
-  });
-  h += '</div>';
-
-  // Category table
-  const cats = d.categories;
-  h += '<table class="cat-table"><tr><th>Category</th><th>Pass</th><th>Fail</th><th>Err</th><th>Rate</th><th>Rewrites</th><th>Arbiter</th></tr>';
-  for (const cat in cats) {
-    const c = cats[cat];
-    const rate = c.total > 0 ? ((c.pass / c.total) * 100).toFixed(0) : '0';
-    const rc = parseInt(rate) >= 80 ? 'pass' : parseInt(rate) >= 50 ? 'arb' : 'fail';
-    h += '<tr><td>' + escapeHtml(cat) + '</td><td>' + c.pass + '</td><td>' + c.fail + '</td><td>' + c.error + '</td><td class="pr"><span class="' + rc + '">' + rate + '%</span></td><td>' + c.rewrites + '</td><td>' + c.arbiter + '</td></tr>';
-  }
-  h += '</table>';
-
-  // Top violations
-  const viols = d.top_violations;
-  if (Object.keys(viols).length > 0) {
-    h += '<div style="margin-top:12px;font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:0.5px;">Top Violation Reasons</div>';
-    for (const v in viols) {
-      h += '<div style="font-size:12px;color:#ef5350;margin:2px 0;">' + escapeHtml(v) + ': ' + viols[v] + '</div>';
-    }
-  }
-
-  el.innerHTML = h;
-}
-
-async function loadConfig() {
-  try {
-    const r = await fetch('/api/openai/config');
-    const d = await r.json();
-    const dot = document.getElementById('keyDot');
-    const st = document.getElementById('ks');
-    if (d.key_set) {
-      dot.className = 'key-dot on';
-      st.textContent = d.key_preview + ' | ' + d.model;
-      st.className = 'cfg-st ok';
-    } else {
-      dot.className = 'key-dot off';
-      st.textContent = 'No key set';
-      st.className = 'cfg-st';
-    }
-  } catch(e) {
-    console.error('Failed to load config:', e);
-    const st = document.getElementById('ks');
-    st.textContent = 'Failed to load config';
-    st.className = 'cfg-st';
-  }
-}
-
-async function saveConfig() {
-  const k = document.getElementById('apiKeyInput').value.trim();
-  if (!k) return;
-  const st = document.getElementById('ks');
-  try {
-    const r = await fetch('/api/openai/config', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({api_key: k, model: document.getElementById('modelSelect').value})
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(function() { return {}; });
-      st.textContent = 'Save failed: ' + (err.detail || r.statusText);
-      st.className = 'cfg-st';
-      return;
-    }
-    document.getElementById('apiKeyInput').value = '';
-    loadConfig();
-  } catch(e) {
-    st.textContent = 'Save failed: ' + e.message;
-    st.className = 'cfg-st';
-  }
-}
-
-function addBubble(cls, who, body) {
-  const container = document.getElementById('chatContainer');
-  const el = document.createElement('div');
-  el.className = 'b ' + cls;
-  el.innerHTML = (who ? '<div class="w">' + who + '</div>' : '') + body;
-  container.appendChild(el);
-  container.scrollTop = container.scrollHeight;
-  return el;
-}
-
-function addDivider() {
-  const container = document.getElementById('chatContainer');
-  const hr = document.createElement('hr');
-  hr.className = 'divider';
-  container.appendChild(hr);
-}
-
-function escapeHtml(t) {
-  if (!t) return '';
-  const el = document.createElement('div');
-  el.textContent = String(t);
-  return el.innerHTML;
-}
-
-function catCls(cat) {
-  const c = (cat || '').toLowerCase();
-  if (c === 'supported') return 'cat-sup';
-  if (c === 'inference') return 'cat-inf';
-  if (c === 'hypothesis') return 'cat-hyp';
-  if (c === 'unsupported') return 'cat-uns';
-  if (c === 'user-provided') return 'cat-usr';
-  return '';
-}
-
-function renderClaimTable(claims) {
-  if (!claims || claims.length === 0) return '';
-  let h = '<details><summary>Claim Table (' + claims.length + ' claims)</summary>';
-  h += '<table class="ct"><tr><th>Claim</th><th>Category</th><th>Justification</th></tr>';
-  claims.forEach(function(c) {
-    h += '<tr><td>' + escapeHtml(c.claim) + '</td><td class="cat ' + catCls(c.category) + '">' + escapeHtml(c.category) + '</td><td>' + escapeHtml(c.justification) + '</td></tr>';
-  });
-  return h + '</table></details>';
-}
-
-function renderViolations(viols) {
-  if (!viols || viols.length === 0) return '<div class="no-viol">No violations detected</div>';
-  let h = '<div class="viol">';
-  viols.forEach(function(v) {
-    h += '<div class="viol-item"><span class="viol-dot"></span>' + escapeHtml(v) + '</div>';
-  });
-  return h + '</div>';
-}
-
-function editActionCls(a) {
-  const al = (a||'').toUpperCase();
-  if (al === 'DELETE') return 'del';
-  if (al === 'REWRITE') return 'rew';
-  if (al === 'MOVE_TO_UNKNOWN') return 'mtu';
-  return '';
-}
-
-function addCopyButton(parentEl, textContent) {
-  const btn = document.createElement('button');
-  btn.className = 'copy-result-btn';
-  btn.textContent = 'Copy Result';
-  btn.onclick = function() {
-    navigator.clipboard.writeText(textContent).then(function() {
-      btn.textContent = 'Copied!';
-      setTimeout(function() { btn.textContent = 'Copy Result'; }, 2000);
-    }).catch(function() {
-      btn.textContent = 'Copy failed';
-      setTimeout(function() { btn.textContent = 'Copy Result'; }, 2000);
-    });
+  const state = {
+    lastResponse: null,
+    config: { key_set: false, model: "gpt-4o-mini" },
+    running: false,
+    stressAbortController: null,
   };
-  parentEl.appendChild(btn);
-}
 
-async function submitPrompt(e) {
-  e.preventDefault();
-  const inp = document.getElementById('promptInput');
-  const btn = document.getElementById('sendButton');
-  const prompt = inp.value.trim();
-  if (!prompt) return;
+  const timelineEl = document.getElementById("timeline");
+  const promptForm = document.getElementById("promptForm");
+  const promptInput = document.getElementById("promptInput");
+  const runBtn = document.getElementById("runBtn");
+  const stressLog = document.getElementById("stressLog");
+  const stressSummary = document.getElementById("stressSummary");
 
-  addBubble('usr', 'You', escapeHtml(prompt));
-  inp.value = '';
-  btn.disabled = true;
-
-  const chatContainer = document.getElementById('chatContainer');
-  const ld = document.createElement('div');
-  ld.className = 'ld';
-  ld.innerHTML = '<div class="skeleton" style="width:60%"></div><div class="skeleton" style="width:80%"></div><div class="skeleton" style="width:45%"></div><div style="font-size:11px;color:#666;margin-top:8px;">Processing pipeline...</div>';
-  chatContainer.appendChild(ld);
-  chatContainer.scrollTop = chatContainer.scrollHeight;
-
-  try {
-    const r = await fetch('/api/pipeline', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        prompt: prompt,
-        gpt1_system: document.getElementById('g1s').value,
-        gpt2_system: document.getElementById('g2s').value.trim(),
-        gpt3_system: document.getElementById('g3s').value.trim(),
-      })
-    });
-
-    ld.remove();
-
-    if (!r.ok) {
-      const err = await r.json();
-      addBubble('err', '', escapeHtml(err.detail || 'Request failed'));
-      return;
-    }
-
-    const d = await r.json();
-
-    // ---- GPT-1 output ----
-    addBubble('g1', 'GPT-1 (Generator)', escapeHtml(d.gpt1_output));
-
-    // ---- Bypass ----
-    if (d.bypassed) {
-      addBubble('byp', '', 'Activation phrase detected - verification bypassed');
-      addBubble('vp', '', '&#10003; PASS (bypassed)');
-      const foEl = addBubble('fo', 'Final Output', escapeHtml(d.final_result));
-      addCopyButton(foEl, d.final_result);
-      return;
-    }
-
-    // ---- GPT-2 results ----
-    let g2body = renderClaimTable(d.claim_table) + renderViolations(d.violations);
-    addBubble('g2', 'GPT-2 (Verifier) &mdash; ' + d.gpt2_verdict, g2body);
-
-    if (d.gpt2_verdict === 'PASS') {
-      addBubble('vp', '', '&#10003; PASS');
-      const foEl = addBubble('fo', 'Final Output', escapeHtml(d.final_result));
-      addCopyButton(foEl, d.final_result);
-      return;
-    }
-
-    // ---- GPT-2 FAIL: show verdict ----
-    addBubble('vf', '', '&#10007; GPT-2 FAIL &mdash; escalating to Arbiter');
-    addDivider();
-
-    // ---- GPT-3 Arbiter ----
-    if (d.arbiter_invoked) {
-      let g3body = '';
-
-      // Decision badge
-      const decLower = (d.arbiter_decision || '').toLowerCase().replace(/_/g, '');
-      let decCls = 'blk';
-      if (decLower === 'allowwithedits') decCls = 'awe';
-      if (decLower === 'allowasunknownonly') decCls = 'auo';
-      g3body += '<div class="arb-decision ' + decCls + '">' + escapeHtml(d.arbiter_decision) + '</div>';
-
-      // Rationale (collapsible)
-      if (d.arbiter_rationale && d.arbiter_rationale.length > 0) {
-        g3body += '<details><summary>Arbiter Rationale (' + d.arbiter_rationale.length + ' points)</summary>';
-        g3body += '<div class="arb-rationale">';
-        d.arbiter_rationale.forEach(function(r) {
-          g3body += '<div class="arb-item"><span class="arb-dot"></span>' + escapeHtml(r) + '</div>';
-        });
-        g3body += '</div></details>';
-      }
-
-      // Edits (collapsible)
-      if (d.arbiter_edits && d.arbiter_edits.length > 0) {
-        g3body += '<details><summary>Edits (' + d.arbiter_edits.length + ')</summary>';
-        g3body += '<div class="edit-list">';
-        d.arbiter_edits.forEach(function(ed) {
-          g3body += '<div class="edit-item">';
-          g3body += '<div class="edit-action ' + editActionCls(ed.action) + '">' + escapeHtml(ed.action) + '</div>';
-          g3body += '<div class="edit-target">' + escapeHtml(ed.target) + '</div>';
-          if (ed.replacement) g3body += '<div class="edit-repl">&rarr; ' + escapeHtml(ed.replacement) + '</div>';
-          g3body += '</div>';
-        });
-        g3body += '</div></details>';
-      }
-
-      // Policy notes (collapsible)
-      if (d.arbiter_policy_notes && d.arbiter_policy_notes.length > 0) {
-        g3body += '<details><summary>Policy Notes (' + d.arbiter_policy_notes.length + ')</summary>';
-        g3body += '<div class="policy-notes">';
-        d.arbiter_policy_notes.forEach(function(n) {
-          g3body += '<div>' + escapeHtml(n) + '</div>';
-        });
-        g3body += '</div></details>';
-      }
-
-      addBubble('g3', 'GPT-3 (Arbiter)', g3body);
-    }
-
-    // ---- Rewrite loop ----
-    if (d.rewrite_occurred) {
-      addDivider();
-      addBubble('rw', 'GPT-1 (Rewrite)', escapeHtml(d.rewrite_output));
-
-      // Re-verification
-      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderViolations(d.rewrite_violations);
-      addBubble('rv', 'GPT-2 (Re-verify) &mdash; ' + d.rewrite_verdict, rvBody);
-    }
-
-    // ---- Final verdict ----
-    addDivider();
-    if (d.final_verdict === 'PASS') {
-      addBubble('vp', '', '&#10003; FINAL PASS');
-      const foEl = addBubble('fo', 'Final Output (Shown to You)', escapeHtml(d.final_result));
-      addCopyButton(foEl, d.final_result);
-    } else {
-      addBubble('vf', '', '&#10007; FINAL FAIL');
-      let blockMsg = 'NO PASS - Output blocked by verification';
-      if (d.arbiter_invoked && d.arbiter_decision === 'BLOCK' && d.arbiter_rationale && d.arbiter_rationale.length > 0) {
-        blockMsg += '\\n\\nArbiter rationale:\\n' + d.arbiter_rationale.map(function(r) { return '- ' + r; }).join('\\n');
-      }
-      addBubble('fo blk', 'Final Output', blockMsg);
-
-    // "Why blocked" panel with exact violations
-    if (d.violations && d.violations.length > 0) {
-        let whyHtml = '<div style="margin-top:8px;padding:12px;background:#1a0a0a;border:1px solid #2a1515;border-radius:8px;">';
-        whyHtml += '<div style="font-size:10px;color:#ef5350;text-transform:uppercase;margin-bottom:6px;letter-spacing:0.5px;">Why Blocked</div>';
-        d.violations.forEach(function(v) { whyHtml += '<div style="font-size:12px;color:#ef9090;margin:2px 0;">\\u2022 ' + escapeHtml(v) + '</div>'; });
-        whyHtml += '</div>';
-        addBubble('', '', whyHtml);
-    }
-    }
-
-    // Show sanitized output diff if sanitizer was applied
-    if (d.sanitizer_applied && d.gpt1_output_sanitized && d.gpt1_output_sanitized !== d.gpt1_output) {
-        addBubble('', '', '<details><summary style="font-size:10px;color:#666;cursor:pointer;">Sanitizer Applied (click to view cleaned output)</summary><div style="font-size:12px;color:#999;padding:8px;background:#0a0a0a;border:1px solid #1a1a1a;border-radius:6px;margin-top:4px;white-space:pre-wrap;">' + escapeHtml(d.gpt1_output_sanitized) + '</div></details>');
-    }
-
-  } catch(err) {
-    ld.remove();
-    addBubble('err', '', 'Error: ' + escapeHtml(err.message));
-  } finally {
-    btn.disabled = false;
-    inp.focus();
+  function escapeHtml(value) {
+    if (value === null || value === undefined) return "";
+    const div = document.createElement("div");
+    div.textContent = String(value);
+    return div.innerHTML;
   }
-}
 
-loadConfig();
-document.getElementById('promptInput').focus();
+  function nowLabel() {
+    return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function updateClock() {
+    document.getElementById("clockText").textContent = nowLabel();
+  }
+
+  function authHeaders(extra = {}) {
+    const token = document.getElementById("accessTokenInput").value.trim();
+    const headers = { ...extra };
+    if (token) headers["Authorization"] = "Bearer " + token;
+    return headers;
+  }
+
+  function setView(viewId) {
+    document.querySelectorAll(".view").forEach((node) => {
+      node.classList.toggle("active", node.id === viewId);
+    });
+    document.querySelectorAll(".nav-item").forEach((node) => {
+      node.classList.toggle("active", node.dataset.view === viewId);
+    });
+  }
+
+  function verdictPill(verdict) {
+    const text = verdict || "Unknown";
+    const upper = String(text).toUpperCase();
+    let cls = "neutral";
+    if (upper.includes("PASS")) cls = "ok";
+    if (upper.includes("FAIL") || upper.includes("BLOCK")) cls = "bad";
+    if (upper.includes("ALLOW") || upper.includes("UNKNOWN")) cls = "warn";
+    return '<span class="pill ' + cls + '">' + escapeHtml(text) + '</span>';
+  }
+
+  function addTimelineCard(tone, title, bodyHtml, statusText) {
+    const card = document.createElement("article");
+    card.className = "stage tone-" + tone;
+    card.innerHTML =
+      '<div class="stage-head"><h4>' + escapeHtml(title) + '</h4>' +
+      (statusText ? verdictPill(statusText) : "") +
+      "</div>" +
+      '<div class="stage-body">' + bodyHtml + "</div>";
+    timelineEl.appendChild(card);
+    timelineEl.scrollTop = timelineEl.scrollHeight;
+    return card;
+  }
+
+  function renderClaimTable(claims) {
+    if (!claims || claims.length === 0) return '<div class="muted">No claim table returned.</div>';
+    let html = '<details><summary>Claim table (' + claims.length + ')</summary>';
+    html += '<div class="table-wrap"><table><thead><tr><th>Claim</th><th>Category</th><th>Justification</th></tr></thead><tbody>';
+    claims.forEach((item) => {
+      html += '<tr><td>' + escapeHtml(item.claim) + '</td><td>' + escapeHtml(item.category) + '</td><td>' + escapeHtml(item.justification) + '</td></tr>';
+    });
+    html += "</tbody></table></div></details>";
+    return html;
+  }
+
+  function renderViolations(violations) {
+    if (!violations || violations.length === 0) return '<div class="muted">No violations detected.</div>';
+    let html = '<ul class="list">';
+    violations.forEach((item) => {
+      html += "<li>" + escapeHtml(item) + "</li>";
+    });
+    html += "</ul>";
+    return html;
+  }
+
+  function renderArbiter(data) {
+    let html = '<p><strong>Decision:</strong> ' + escapeHtml(data.arbiter_decision || "-") + "</p>";
+    if (data.arbiter_rationale && data.arbiter_rationale.length) {
+      html += '<details><summary>Rationale (' + data.arbiter_rationale.length + ')</summary>';
+      html += '<ul class="list">' + data.arbiter_rationale.map((x) => "<li>" + escapeHtml(x) + "</li>").join("") + "</ul></details>";
+    }
+    if (data.arbiter_edits && data.arbiter_edits.length) {
+      html += '<details><summary>Edits (' + data.arbiter_edits.length + ')</summary>';
+      html += '<ul class="list">';
+      data.arbiter_edits.forEach((edit) => {
+        const replacement = edit.replacement ? " -> " + escapeHtml(edit.replacement) : "";
+        html += "<li><strong>" + escapeHtml(edit.action) + "</strong>: " + escapeHtml(edit.target || "") + replacement + "</li>";
+      });
+      html += "</ul></details>";
+    }
+    return html;
+  }
+
+  function renderSearchSources(sources) {
+    if (!sources || sources.length === 0) return '<div class="muted">No sources found.</div>';
+    let html = '<details open><summary>Sources (' + sources.length + ')</summary>';
+    html += '<div class="table-wrap"><table><thead><tr><th>#</th><th>Title</th><th>Snippet</th><th>Score</th></tr></thead><tbody>';
+    sources.forEach(function(src, idx) {
+      html += '<tr><td>[' + (idx + 1) + ']</td>';
+      html += '<td><a href="' + escapeHtml(src.url) + '" target="_blank" rel="noopener">' + escapeHtml(src.title) + '</a></td>';
+      html += '<td>' + escapeHtml(src.snippet ? src.snippet.slice(0, 200) : '') + '</td>';
+      html += '<td>' + (src.score ? src.score.toFixed(2) : '-') + '</td></tr>';
+    });
+    html += '</tbody></table></div></details>';
+    return html;
+  }
+
+  function setInspector(response) {
+    state.lastResponse = response || null;
+    const verdict = response ? (response.final_verdict || "-") : "-";
+    const arbiter = response ? (response.arbiter_invoked ? (response.arbiter_decision || "Invoked") : "Not used") : "-";
+    const sanitizer = response ? (response.sanitizer_applied ? "Applied" : "No") : "-";
+    const searchSt = response ? (response.search_performed ? (response.search_sources.length + " sources") : "Off") : "-";
+
+    document.getElementById("verdictState").textContent = verdict;
+    document.getElementById("arbiterState").textContent = arbiter;
+    document.getElementById("sanitizerState").textContent = sanitizer;
+    document.getElementById("searchState").textContent = searchSt;
+
+    const chips = [];
+    if (response) {
+      chips.push(response.final_verdict || "Unknown");
+      if (response.bypassed) chips.push("Bypass");
+      if (response.search_performed) chips.push("Search");
+      if (response.arbiter_invoked) chips.push("Arbiter");
+      if (response.rewrite_occurred) chips.push("Rewrite");
+      if (response.sanitizer_applied) chips.push("Sanitized");
+    }
+
+    const chipStack = document.getElementById("chipStack");
+    chipStack.innerHTML = chips.map((chip) => '<span class="chip">' + escapeHtml(chip) + '</span>').join("");
+
+    const finalText = response && response.final_result ? response.final_result : "No run yet.";
+    document.getElementById("latestOutput").textContent = finalText;
+  }
+
+  async function parseErrorResponse(response) {
+    const text = await response.text();
+    try {
+      const parsed = JSON.parse(text);
+      return parsed.detail || parsed.error || text || response.statusText;
+    } catch {
+      return text || response.statusText;
+    }
+  }
+
+  async function loadConfig() {
+    const keyState = document.getElementById("keyState");
+    const modelState = document.getElementById("modelState");
+    const status = document.getElementById("configStatus");
+    try {
+      const response = await fetch("/api/openai/config", { headers: authHeaders() });
+      if (!response.ok) throw new Error(await parseErrorResponse(response));
+      const data = await response.json();
+      state.config = data;
+      if (data.key_set) {
+        keyState.textContent = data.key_preview || "Set";
+        modelState.textContent = data.model || "-";
+        document.getElementById("modelSelect").value = data.model || "gpt-4o-mini";
+        status.textContent = "Key configured on server.";
+      } else {
+        keyState.textContent = "Not set";
+        modelState.textContent = data.model || "gpt-4o-mini";
+        status.textContent = "No key set. Save a key to run pipeline.";
+      }
+    } catch (error) {
+      keyState.textContent = "Error";
+      modelState.textContent = "-";
+      status.textContent = "Failed to load config: " + error.message;
+    }
+  }
+
+  async function saveConfig() {
+    const key = document.getElementById("apiKeyInput").value.trim();
+    const model = document.getElementById("modelSelect").value;
+    const status = document.getElementById("configStatus");
+    if (!key) {
+      status.textContent = "Enter API key first.";
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/openai/config", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ api_key: key, model })
+      });
+      if (!response.ok) throw new Error(await parseErrorResponse(response));
+      document.getElementById("apiKeyInput").value = "";
+      status.textContent = "Saved.";
+      await loadConfig();
+    } catch (error) {
+      status.textContent = "Save failed: " + error.message;
+    }
+  }
+
+  async function loadTavilyConfig() {
+    const status = document.getElementById("tavilyStatus");
+    try {
+      const response = await fetch("/api/tavily/config", { headers: authHeaders() });
+      if (!response.ok) throw new Error(await parseErrorResponse(response));
+      const data = await response.json();
+      if (data.key_set) {
+        document.getElementById("tavilyEnabledToggle").checked = data.enabled;
+        status.textContent = "Tavily key configured. " + (data.enabled ? "Search enabled." : "Search disabled.");
+      } else {
+        document.getElementById("tavilyEnabledToggle").checked = false;
+        status.textContent = "No Tavily key set. Enter key to enable web search.";
+      }
+    } catch (error) {
+      status.textContent = "Failed to load Tavily config: " + error.message;
+    }
+  }
+
+  async function saveTavilyConfig() {
+    const key = document.getElementById("tavilyKeyInput").value.trim();
+    const enabled = document.getElementById("tavilyEnabledToggle").checked;
+    const status = document.getElementById("tavilyStatus");
+    if (!key) {
+      status.textContent = "Enter Tavily API key first.";
+      return;
+    }
+    try {
+      const response = await fetch("/api/tavily/config", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ api_key: key, enabled: enabled })
+      });
+      if (!response.ok) throw new Error(await parseErrorResponse(response));
+      document.getElementById("tavilyKeyInput").value = "";
+      status.textContent = "Saved.";
+      await loadTavilyConfig();
+    } catch (error) {
+      status.textContent = "Save failed: " + error.message;
+    }
+  }
+
+  async function toggleTavilyEnabled() {
+    const enabled = document.getElementById("tavilyEnabledToggle").checked;
+    const status = document.getElementById("tavilyStatus");
+    try {
+      const response = await fetch("/api/tavily/toggle?enabled=" + enabled, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      if (!response.ok) throw new Error(await parseErrorResponse(response));
+      status.textContent = enabled ? "Search enabled." : "Search disabled.";
+    } catch (error) {
+      status.textContent = "Toggle failed: " + error.message;
+      document.getElementById("tavilyEnabledToggle").checked = !enabled;
+    }
+  }
+
+  async function runPipeline(event) {
+    event.preventDefault();
+    if (state.running) return;
+
+    const prompt = promptInput.value.trim();
+    if (!prompt) return;
+
+    state.running = true;
+    runBtn.disabled = true;
+    addTimelineCard("user", "Prompt", '<pre>' + escapeHtml(prompt) + "</pre>", nowLabel());
+    promptInput.value = "";
+
+    const loadingCard = addTimelineCard("generator", "Running", '<div class="loading"><span class="loading-dot"></span><span>Calling pipeline API...</span></div>', "In progress");
+
+    try {
+      const response = await fetch("/api/pipeline", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          prompt,
+          gpt1_system: document.getElementById("g1s").value,
+          gpt2_system: document.getElementById("g2s").value,
+          gpt3_system: document.getElementById("g3s").value,
+        })
+      });
+
+      loadingCard.remove();
+
+      if (!response.ok) {
+        throw new Error(await parseErrorResponse(response));
+      }
+
+      const data = await response.json();
+
+      if (data.search_performed && data.search_sources && data.search_sources.length > 0) {
+        addTimelineCard(
+          "search",
+          "Web Search",
+          '<p class="muted">Query: ' + escapeHtml(data.search_query || data.gpt1_input) + '</p>' +
+          renderSearchSources(data.search_sources),
+          data.search_sources.length + " sources"
+        );
+      }
+
+      addTimelineCard("generator", "GPT-1 Generator", '<pre>' + escapeHtml(data.gpt1_output || "") + "</pre>", "Done");
+
+      if (data.bypassed) {
+        addTimelineCard("final-ok", "Bypass Result", '<p>Activation phrase detected. Verification bypassed.</p><pre>' + escapeHtml(data.final_result || "") + "</pre>", data.final_verdict || "PASS");
+        setInspector(data);
+        return;
+      }
+
+      const verifierBody =
+        '<p><strong>Verifier verdict:</strong> ' + escapeHtml(data.gpt2_verdict || "-") + '</p>' +
+        renderClaimTable(data.claim_table) +
+        renderViolations(data.violations);
+      addTimelineCard("verifier", "GPT-2 Verifier", verifierBody, data.gpt2_verdict || "-");
+
+      if (data.arbiter_invoked) {
+        addTimelineCard("arbiter", "GPT-3 Arbiter", renderArbiter(data), data.arbiter_decision || "-");
+      }
+
+      if (data.rewrite_occurred) {
+        addTimelineCard("generator", "Rewrite Output", '<pre>' + escapeHtml(data.rewrite_output || "") + "</pre>", data.rewrite_verdict || "-");
+        addTimelineCard("verifier", "Re-Verification", renderClaimTable(data.rewrite_claim_table) + renderViolations(data.rewrite_violations), data.rewrite_verdict || "-");
+      }
+
+      const isPass = String(data.final_verdict || "").toUpperCase().includes("PASS");
+      addTimelineCard(
+        isPass ? "final-ok" : "final-fail",
+        "Final Result",
+        '<pre>' + escapeHtml(data.final_result || "NO PASS") + "</pre>",
+        data.final_verdict || "-"
+      );
+
+      if (data.sanitizer_applied && data.gpt1_output_sanitized && data.gpt1_output_sanitized !== data.gpt1_output) {
+        addTimelineCard("generator", "Sanitizer Output", '<pre>' + escapeHtml(data.gpt1_output_sanitized) + "</pre>", "Applied");
+      }
+
+      setInspector(data);
+    } catch (error) {
+      loadingCard.remove();
+      addTimelineCard("error", "Pipeline Error", '<pre>' + escapeHtml(error.message) + "</pre>", "Failed");
+    } finally {
+      state.running = false;
+      runBtn.disabled = false;
+      promptInput.focus();
+    }
+  }
+
+  function appendStressLine(text, tone = "") {
+    const row = document.createElement("div");
+    row.className = "log-line " + tone;
+    row.textContent = text;
+    stressLog.appendChild(row);
+    stressLog.scrollTop = stressLog.scrollHeight;
+  }
+
+  function renderStressSummary(data) {
+    const pss = data.pss || {};
+    const metrics = pss.metrics || {};
+    stressSummary.innerHTML =
+      '<div class="summary-grid">' +
+      '<div class="summary-box"><div class="label">PSS Score</div><div class="value">' + Number(pss.score || 0).toFixed(1) + "</div></div>" +
+      '<div class="summary-box"><div class="label">Total Tests</div><div class="value">' + (data.total_tests || 0) + "</div></div>" +
+      '<div class="summary-box"><div class="label">Pass</div><div class="value">' + (data.total_pass || 0) + "</div></div>" +
+      '<div class="summary-box"><div class="label">Fail</div><div class="value">' + (data.total_fail || 0) + "</div></div>" +
+      '<div class="summary-box"><div class="label">HLR</div><div class="value">' + ((metrics.HLR || 0) * 100).toFixed(1) + "%</div></div>" +
+      '<div class="summary-box"><div class="label">HPR</div><div class="value">' + ((metrics.HPR || 0) * 100).toFixed(1) + "%</div></div>" +
+      "</div>";
+  }
+
+  async function loadStressCategories() {
+    const select = document.getElementById("stressCategory");
+    select.innerHTML = '<option value="">All categories</option>';
+    try {
+      const response = await fetch("/api/stress/categories", { headers: authHeaders() });
+      if (!response.ok) return;
+      const categories = await response.json();
+      categories.forEach((cat) => {
+        const option = document.createElement("option");
+        option.value = cat;
+        option.textContent = cat;
+        select.appendChild(option);
+      });
+    } catch (error) {
+      appendStressLine("Failed to load categories: " + error.message, "fail");
+    }
+  }
+
+  async function runStress() {
+    if (state.stressAbortController) return;
+
+    const runStressBtn = document.getElementById("runStressBtn");
+    const cancelStressBtn = document.getElementById("cancelStressBtn");
+    const category = document.getElementById("stressCategory").value;
+    const count = parseInt(document.getElementById("stressCount").value || "0", 10);
+
+    stressLog.innerHTML = "";
+    stressSummary.innerHTML = "";
+    appendStressLine("Starting stress run...", "warn");
+
+    const body = {};
+    if (category) body.category = category;
+    if (count > 0) body.count = count;
+
+    const controller = new AbortController();
+    state.stressAbortController = controller;
+    runStressBtn.disabled = true;
+    cancelStressBtn.disabled = false;
+
+    try {
+      const response = await fetch("/api/stress", {
+        method: "POST",
+        headers: authHeaders({
+          "Content-Type": "application/json",
+          "Accept": "application/x-ndjson"
+        }),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(await parseErrorResponse(response));
+      }
+
+      if (!response.body) {
+        const fallbackText = await response.text();
+        appendStressLine("Non-stream response:", "warn");
+        appendStressLine(fallbackText.slice(0, 240), "warn");
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        lines.forEach((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return;
+          let obj;
+          try {
+            obj = JSON.parse(trimmed);
+          } catch {
+            appendStressLine(trimmed, "warn");
+            return;
+          }
+
+          if (obj.type === "progress") {
+            const tone = String(obj.verdict || "").toUpperCase().includes("PASS") ? "pass" :
+                         String(obj.verdict || "").toUpperCase().includes("FAIL") ? "fail" : "warn";
+            appendStressLine(
+              "[" + obj.index + "/" + obj.total + "] " + obj.id + " -> " + obj.verdict +
+              (obj.arbiter ? " | arbiter: " + obj.arbiter : "") +
+              (obj.rewrite ? " | rewrite" : "") +
+              " | " + obj.duration_s + "s",
+              tone
+            );
+            return;
+          }
+
+          if (obj.type === "summary") {
+            appendStressLine("Completed. Rendering summary.", "pass");
+            renderStressSummary(obj);
+          }
+        });
+      }
+    } catch (error) {
+      if (error.name === "AbortError") {
+        appendStressLine("Stress run cancelled.", "warn");
+      } else {
+        appendStressLine("Stress error: " + error.message, "fail");
+      }
+    } finally {
+      state.stressAbortController = null;
+      runStressBtn.disabled = false;
+      cancelStressBtn.disabled = true;
+    }
+  }
+
+  function cancelStress() {
+    if (state.stressAbortController) {
+      state.stressAbortController.abort();
+    }
+  }
+
+  function clearWorkspace() {
+    timelineEl.innerHTML = "";
+    setInspector(null);
+  }
+
+  function copyLatest() {
+    const text = document.getElementById("latestOutput").textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const btn = document.getElementById("copyLatestBtn");
+      const old = btn.textContent;
+      btn.textContent = "Copied";
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    }).catch(() => {
+      appendStressLine("Clipboard write failed.", "warn");
+    });
+  }
+
+  document.querySelectorAll(".nav-item").forEach((node) => {
+    node.addEventListener("click", () => setView(node.dataset.view));
+  });
+
+  document.getElementById("openSettingsBtn").addEventListener("click", () => setView("settingsView"));
+  document.getElementById("saveConfigBtn").addEventListener("click", saveConfig);
+  document.getElementById("saveTavilyBtn").addEventListener("click", saveTavilyConfig);
+  document.getElementById("tavilyEnabledToggle").addEventListener("change", toggleTavilyEnabled);
+  document.getElementById("clearBtn").addEventListener("click", clearWorkspace);
+  document.getElementById("copyLatestBtn").addEventListener("click", copyLatest);
+  document.getElementById("runStressBtn").addEventListener("click", runStress);
+  document.getElementById("cancelStressBtn").addEventListener("click", cancelStress);
+  promptForm.addEventListener("submit", runPipeline);
+
+  updateClock();
+  setInterval(updateClock, 15000);
+  loadConfig();
+  loadTavilyConfig();
+  loadStressCategories();
+  promptInput.focus();
 </script>
 </body>
 </html>
