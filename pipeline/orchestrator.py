@@ -156,10 +156,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         )
 
         # Augment GPT-2 to recognize the provided sources
-        source_summary = "; ".join(
-            f'[{i}] "{s.title}" ({s.url})' for i, s in enumerate(search_sources, 1)
-        )
-        # Also pass source snippets so GPT-2 can verify claims against them
+        # Pass source snippets so GPT-2 can verify claims against them
         source_detail = "\n".join(
             f'[{i}] "{s.title}" ({s.url})\n    Snippet: {s.snippet[:300]}'
             for i, s in enumerate(search_sources, 1)
