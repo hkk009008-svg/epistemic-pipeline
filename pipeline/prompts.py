@@ -215,11 +215,12 @@ DEFAULT_GPT3_SYSTEM = (
 # ---------------------------------------------------------------------------
 # build_augmentation — flag-driven prompt shaping for all 3 stages
 # ---------------------------------------------------------------------------
-def build_augmentation(flags: dict) -> tuple:
+def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
     """Return (gpt1_aug, gpt2_aug, gpt3_aug) strings based on prompt-routing flags.
 
     Each string is appended to the respective system prompt to adapt behavior
-    for the specific prompt context.
+    for the specific prompt context.  When search_performed is True, current-events
+    augmentation is relaxed because GPT-1 has verified web sources to ground its claims.
     """
     gpt1_parts = []
     gpt2_parts = []
@@ -307,44 +308,52 @@ def build_augmentation(flags: dict) -> tuple:
         )
 
     if flags.get("current_events"):
-        gpt1_parts.append(
-            "FLAG — current_events: The user is asking about current/recent information. "
-            "Your training data is LIKELY OUTDATED for this query. "
-            "If web search results are provided below, ground your answer ENTIRELY in those sources. "
-            "If NO search results are provided, you MUST: "
-            "(1) Place ALL time-sensitive claims (who holds office, current prices, recent events, "
-            "current status) in the Unknown(Actionable) section — NOT in Analysis or Observed. "
-            "(2) State your knowledge cutoff date explicitly. "
-            "(3) Do NOT present any time-sensitive information as 'Observed' or as fact. "
-            "(4) Set Confidence to Low with justification: 'Training data may be outdated for this query.' "
-            "(5) List 2-3 authoritative sources where the user can verify the current answer. "
-            "CRITICAL: Adding 'as of [date]' does NOT make a stale claim acceptable as Observed. "
-            "It MUST go in Unknown(Actionable)."
-        )
-        gpt2_parts.append(
-            "FLAG — current_events: User asked about current/recent information. "
-            "T7 STRICTLY heightened — apply ALL of the following rules:\n"
-            "  FAIL criteria (HARD T7):\n"
-            "  - Any time-sensitive claim (who holds office, current prices, current status, "
-            "recent events) categorized as 'Observed' is a HARD T7 violation, EVEN IF the response "
-            "includes a knowledge-cutoff date like 'as of [date]'. A date qualifier does NOT satisfy T7.\n"
-            "  - If GPT-1 presents a time-sensitive fact as 'Observed' with a past date qualifier "
-            "(e.g., 'as of October 2023'), categorize that claim as 'Unsupported' and flag T7 hard.\n"
-            "  - Confidence of 'High' on a current-events query without verified sources is an "
-            "'Overconfidence' finding (soft).\n"
-            "  PASS criteria (no T7 violation):\n"
-            "  - If ALL time-sensitive claims are placed in Unknown(Actionable) or Unknown(Structural) "
-            "sections, AND Confidence is Low or Medium, then T7 IS SATISFIED — do NOT flag T7.\n"
-            "  - A response that correctly abstains from making current-state assertions and instead "
-            "frames them as Unknowns with a note to verify is PASSING behavior.\n"
-            "  - Claims grounded in verified web search sources provided to GPT-1 are also acceptable as Observed."
-        )
-        gpt3_parts.append(
-            "FLAG — current_events: Current-events context. "
-            "Time-sensitive claims presented as Observed without a verified current source "
-            "are T7 violations — a stale date qualifier is NOT sufficient. "
-            "BLOCK or ALLOW_AS_UNKNOWN_ONLY to force Unknown(Actionable) framing."
-        )
+        if search_performed:
+            # Web search provided real sources — GPT-1 can ground claims
+            gpt1_parts.append(
+                "FLAG — current_events: The user is asking about current/recent information. "
+                "Web search results are provided below. Ground your answer ENTIRELY in these sources. "
+                "Cite sources as [1], [2], etc. Do NOT add claims beyond what the sources support."
+            )
+            gpt2_parts.append(
+                "FLAG — current_events: User asked about current/recent information. "
+                "GPT-1 was given web search results. Claims that cite a provided source "
+                "(e.g., [1], [2]) and are supported by that source's content are acceptable as 'Observed'. "
+                "Only flag T7 if GPT-1 makes a time-sensitive claim WITHOUT citing any provided source."
+            )
+            gpt3_parts.append(
+                "FLAG — current_events: Current-events context with web search. "
+                "Claims grounded in provided search sources are acceptable. "
+                "Only BLOCK unsourced time-sensitive assertions."
+            )
+        else:
+            # No web search — GPT-1 only has stale training data
+            gpt1_parts.append(
+                "FLAG — current_events: The user is asking about current/recent information. "
+                "Your training data is LIKELY OUTDATED for this query. "
+                "No web search results are available. You MUST: "
+                "(1) Place ALL time-sensitive claims (who holds office, current prices, recent events, "
+                "current status) in the Unknown(Actionable) section — NOT in Analysis or Observed. "
+                "(2) State your knowledge cutoff date explicitly. "
+                "(3) Do NOT present any time-sensitive information as 'Observed' or as fact. "
+                "(4) Set Confidence to Low with justification: 'Training data may be outdated for this query.' "
+                "(5) List 2-3 authoritative sources where the user can verify the current answer. "
+                "CRITICAL: Adding 'as of [date]' does NOT make a stale claim acceptable as Observed. "
+                "It MUST go in Unknown(Actionable)."
+            )
+            gpt2_parts.append(
+                "FLAG — current_events: User asked about current/recent information. "
+                "No web search was available. T7 STRICTLY heightened:\n"
+                "  FAIL: Any time-sensitive claim categorized as 'Observed' is a HARD T7 violation, "
+                "even with a date qualifier like 'as of [date]'.\n"
+                "  PASS: If ALL time-sensitive claims are in Unknown(Actionable) or Unknown(Structural) "
+                "and Confidence is Low or Medium, T7 is satisfied."
+            )
+            gpt3_parts.append(
+                "FLAG — current_events: Current-events context without web search. "
+                "Time-sensitive claims presented as Observed without a verified current source "
+                "are T7 violations. BLOCK or ALLOW_AS_UNKNOWN_ONLY."
+            )
 
     gpt1_aug = ("\n\n" + "\n".join(gpt1_parts)) if gpt1_parts else ""
     gpt2_aug = ("\n\n" + "\n".join(gpt2_parts)) if gpt2_parts else ""

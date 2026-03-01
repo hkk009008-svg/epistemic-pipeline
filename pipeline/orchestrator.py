@@ -90,17 +90,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     # ---- Deterministic prompt routing ----
     flags = route_prompt(req.prompt)
 
-    gpt1_system = req.gpt1_system or DEFAULT_GPT1_SYSTEM
-    gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
-    gpt3_system = req.gpt3_system or DEFAULT_GPT3_SYSTEM
-
-    # Flag-driven augmentation for all 3 stages
-    gpt1_aug, gpt2_aug, gpt3_aug = build_augmentation(flags)
-    gpt1_system += gpt1_aug
-    gpt2_system += gpt2_aug
-    gpt3_system += gpt3_aug
-
-    # ---- Web Search Enrichment (before GPT-1) ----
+    # ---- Web Search Enrichment (before augmentation so flags are search-aware) ----
     search_sources: list[SearchSource] = []
     search_context = ""
     search_performed = False
@@ -108,6 +98,16 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     if should_search(flags):
         search_sources, search_context = perform_web_search(req.prompt)
         search_performed = len(search_sources) > 0
+
+    gpt1_system = req.gpt1_system or DEFAULT_GPT1_SYSTEM
+    gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
+    gpt3_system = req.gpt3_system or DEFAULT_GPT3_SYSTEM
+
+    # Flag-driven augmentation for all 3 stages (search-aware)
+    gpt1_aug, gpt2_aug, gpt3_aug = build_augmentation(flags, search_performed=search_performed)
+    gpt1_system += gpt1_aug
+    gpt2_system += gpt2_aug
+    gpt3_system += gpt3_aug
 
     gpt1_user_content = req.prompt
     if search_performed and search_context:
