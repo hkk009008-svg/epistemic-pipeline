@@ -78,18 +78,64 @@ def compute_pss_metrics(results: list) -> dict:
     }
 
 
+_HEARTBEAT_INTERVAL = 15  # seconds between keepalive heartbeats
+
+
+def _run_pipeline_with_heartbeat(prompt: str):
+    """Run a single pipeline call, yielding heartbeat lines while it executes.
+
+    Returns (response_obj, heartbeats_yielded) after the pipeline completes.
+    Uses a background thread so the generator can emit keepalive lines during
+    long-running LLM calls.
+    """
+    import threading
+
+    result_box: list = []
+    error_box: list = []
+
+    def _worker():
+        try:
+            pr = PipelineRequest(prompt=prompt)
+            result_box.append(run_pipeline(pr))
+        except Exception as e:
+            error_box.append(e)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    heartbeats = 0
+    while t.is_alive():
+        t.join(timeout=_HEARTBEAT_INTERVAL)
+        if t.is_alive():
+            heartbeats += 1
+            yield json.dumps({"type": "heartbeat"}) + "\n"
+
+    if error_box:
+        raise error_box[0]
+    return result_box[0]
+
+
 def generate_stress_results(tests: list):
     """Generator that yields NDJSON lines: progress events + final summary.
 
     Each test is run through the pipeline and results are streamed.
+    Emits periodic heartbeat lines to keep the connection alive during
+    long-running LLM calls.
     """
     results = []
 
     for i, t in enumerate(tests):
         start = time.time()
         try:
-            pr = PipelineRequest(prompt=t["prompt"])
-            resp_obj = run_pipeline(pr)
+            gen = _run_pipeline_with_heartbeat(t["prompt"])
+            resp_obj = None
+            # Yield heartbeat lines while pipeline runs
+            while True:
+                try:
+                    hb = next(gen)
+                    yield hb
+                except StopIteration as si:
+                    resp_obj = si.value
+                    break
             resp = resp_obj.dict() if hasattr(resp_obj, 'dict') else resp_obj.model_dump()
             duration = time.time() - start
 

@@ -1579,6 +1579,7 @@ async function runStress() {
       for (const line of lines) {
         if (!line.trim()) continue;
         const d = JSON.parse(line);
+        if (d.type === 'heartbeat') continue;
         if (d.type === 'progress') {
           let cls = d.verdict === 'PASS' ? 'pass' : 'fail';
           let extra = '';
@@ -1593,7 +1594,11 @@ async function runStress() {
       }
     }
   } catch(e) {
-    log.innerHTML += '<span class="fail">ERROR: ' + esc(e.message) + '</span>';
+    const msg = e.message || String(e);
+    const hint = msg.toLowerCase().includes('network') || msg.toLowerCase().includes('failed to fetch')
+      ? ' — connection lost. You can re-run to resume from where it stopped.'
+      : '';
+    log.innerHTML += '<span class="fail">ERROR: ' + esc(msg) + hint + '</span>';
   } finally {
     btn.disabled = false;
   }
