@@ -62,7 +62,7 @@ DEFAULT_GPT1_SYSTEM = (
 
     "## Professional References\n"
     "When mentioning professionals (attorneys, brokers, consultants), use ONLY role-definition + uncertainty language.\n"
-    "NEVER use benefit-language ('could help', 'could assist', 'may improve', 'could potentially', 'may provide guidance').\n"
+    "NEVER use benefit-language ('could help', 'could assist', 'may improve', 'may help', 'could potentially', 'may provide guidance').\n"
     "CORRECT: 'An attorney advises on requirements and prepares/submits filings; whether that changes outcomes is unknown.'\n"
     "WRONG: 'An attorney could potentially assist in navigating the process.'\n\n"
 
@@ -304,6 +304,46 @@ def build_augmentation(flags: dict) -> tuple:
         gpt3_parts.append(
             "FLAG — future_year: Future-year context. "
             "BLOCK on any future-year factual claim not framed as Unknown."
+        )
+
+    if flags.get("current_events"):
+        gpt1_parts.append(
+            "FLAG — current_events: The user is asking about current/recent information. "
+            "Your training data is LIKELY OUTDATED for this query. "
+            "If web search results are provided below, ground your answer ENTIRELY in those sources. "
+            "If NO search results are provided, you MUST: "
+            "(1) Place ALL time-sensitive claims (who holds office, current prices, recent events, "
+            "current status) in the Unknown(Actionable) section — NOT in Analysis or Observed. "
+            "(2) State your knowledge cutoff date explicitly. "
+            "(3) Do NOT present any time-sensitive information as 'Observed' or as fact. "
+            "(4) Set Confidence to Low with justification: 'Training data may be outdated for this query.' "
+            "(5) List 2-3 authoritative sources where the user can verify the current answer. "
+            "CRITICAL: Adding 'as of [date]' does NOT make a stale claim acceptable as Observed. "
+            "It MUST go in Unknown(Actionable)."
+        )
+        gpt2_parts.append(
+            "FLAG — current_events: User asked about current/recent information. "
+            "T7 STRICTLY heightened — apply ALL of the following rules:\n"
+            "  FAIL criteria (HARD T7):\n"
+            "  - Any time-sensitive claim (who holds office, current prices, current status, "
+            "recent events) categorized as 'Observed' is a HARD T7 violation, EVEN IF the response "
+            "includes a knowledge-cutoff date like 'as of [date]'. A date qualifier does NOT satisfy T7.\n"
+            "  - If GPT-1 presents a time-sensitive fact as 'Observed' with a past date qualifier "
+            "(e.g., 'as of October 2023'), categorize that claim as 'Unsupported' and flag T7 hard.\n"
+            "  - Confidence of 'High' on a current-events query without verified sources is an "
+            "'Overconfidence' finding (soft).\n"
+            "  PASS criteria (no T7 violation):\n"
+            "  - If ALL time-sensitive claims are placed in Unknown(Actionable) or Unknown(Structural) "
+            "sections, AND Confidence is Low or Medium, then T7 IS SATISFIED — do NOT flag T7.\n"
+            "  - A response that correctly abstains from making current-state assertions and instead "
+            "frames them as Unknowns with a note to verify is PASSING behavior.\n"
+            "  - Claims grounded in verified web search sources provided to GPT-1 are also acceptable as Observed."
+        )
+        gpt3_parts.append(
+            "FLAG — current_events: Current-events context. "
+            "Time-sensitive claims presented as Observed without a verified current source "
+            "are T7 violations — a stale date qualifier is NOT sufficient. "
+            "BLOCK or ALLOW_AS_UNKNOWN_ONLY to force Unknown(Actionable) framing."
         )
 
     gpt1_aug = ("\n\n" + "\n".join(gpt1_parts)) if gpt1_parts else ""

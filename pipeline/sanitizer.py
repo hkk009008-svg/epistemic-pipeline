@@ -33,7 +33,11 @@ _JURISDICTION_RE = re.compile(
     r"|Wyoming|Vermont|Maine|New Hampshire|Rhode Island"
     r"|South Dakota|North Dakota|Delaware|West Virginia|Alaska)\b"
 )
-_FUTURE_YEAR_RE = re.compile(r"\b(20[3-9]\d|2[1-9]\d{2}|[3-9]\d{3})\b")
+_FUTURE_YEAR_RE = re.compile(r"\b(202[5-9]|20[3-9]\d|2[1-9]\d{2}|[3-9]\d{3})\b")
+_CURRENT_EVENTS_RE = re.compile(
+    r"(?i)\b(?:current|latest|recent|right now|today|now|this year"
+    r"|as of|who is the|what is the current|new|newest|updated)\b"
+)
 
 
 def route_prompt(prompt: str) -> dict:
@@ -44,6 +48,7 @@ def route_prompt(prompt: str) -> dict:
         "legal_mode": bool(_LEGAL_RE.search(prompt)),
         "jurisdiction_present": bool(_JURISDICTION_RE.search(prompt)),
         "future_year": bool(_FUTURE_YEAR_RE.search(prompt)),
+        "current_events": bool(_CURRENT_EVENTS_RE.search(prompt)),
     }
 
 
@@ -76,6 +81,13 @@ _OUTCOME_PROMISE_RE = re.compile(
     r"|could help|could assist|may improve|may help|could potentially)\b"
 )
 
+# Stale date qualifier — "as of [Month] [Year]" where year is before current year
+# Used when current_events flag is set to catch stale time-sensitive claims
+_STALE_DATE_RE = re.compile(
+    r"(?i)\bas of\s+(?:January|February|March|April|May|June|July|August"
+    r"|September|October|November|December)?\s*(?:20[0-1]\d|202[0-4])\b"
+)
+
 
 def sanitize_output(text: str, flags: dict) -> str:
     """Pre-clean GPT-1 output deterministically before GPT-2 verification.
@@ -103,7 +115,13 @@ def sanitize_output(text: str, flags: dict) -> str:
     if not flags.get("advice_requested"):
         result = _OUTCOME_PROMISE_RE.sub("", result)
 
-    # 5. Legal mode: extra strict — flag any remaining vague legal language
+    # 5. Current-events mode: flag stale date-qualified claims
+    if flags.get("current_events"):
+        result = _STALE_DATE_RE.sub(
+            "[Stale — verify current status from an authoritative source]", result
+        )
+
+    # 6. Legal mode: extra strict — flag any remaining vague legal language
     if flags.get("legal_mode"):
         result = re.sub(
             r"(?i)\b(?:is (?:generally )?legal|is (?:generally )?illegal|is (?:generally )?allowed"

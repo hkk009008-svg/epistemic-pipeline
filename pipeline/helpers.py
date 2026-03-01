@@ -79,6 +79,7 @@ def call_openai(client, model: str, system: str, user_content: str, expect_json:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_content},
             ],
+            timeout=60,
         )
         result = resp.choices[0].message.content
 
@@ -101,10 +102,13 @@ def call_openai(client, model: str, system: str, user_content: str, expect_json:
                             ),
                         },
                     ],
+                    timeout=60,
                 )
                 result = retry_resp.choices[0].message.content
 
         return result
+    except openai.APITimeoutError:
+        raise PipelineError(504, "OpenAI request timed out after 60s. Try again or use a faster model.")
     except openai.AuthenticationError:
         raise PipelineError(401, "Invalid OpenAI API key. Please re-enter your key.")
     except openai.RateLimitError:

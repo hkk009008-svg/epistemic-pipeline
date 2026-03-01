@@ -32,6 +32,7 @@ def should_search(flags: dict) -> bool:
         flags.get("percent_requested", False)
         or flags.get("legal_mode", False)
         or flags.get("future_year", False)
+        or flags.get("current_events", False)
     )
 
 

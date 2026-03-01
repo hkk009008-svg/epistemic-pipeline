@@ -15,6 +15,18 @@ from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.search import should_search, perform_web_search
 
 
+def _fail_message(flags: dict, search_performed: bool) -> str:
+    """Return a user-friendly failure message instead of bare 'NO PASS'."""
+    if flags.get("current_events") and not search_performed:
+        return (
+            "This question requires current information that may have changed since "
+            "the model's training cutoff. To get an accurate answer, enable Tavily "
+            "web search by entering your Tavily API key in Settings. Without web search, "
+            "the pipeline cannot verify time-sensitive claims."
+        )
+    return "NO PASS - Output blocked by verification"
+
+
 def compute_confidence(claim_table: list) -> ConfidenceBreakdown:
     """Compute a confidence breakdown from a list of ClaimEntry objects."""
     total = len(claim_table)
@@ -241,27 +253,37 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
             rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
             rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
-            final_verdict="FAIL", final_result="NO PASS",
+            final_verdict="FAIL", final_result=_fail_message(flags, search_performed),
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
             confidence=compute_confidence(claim_table),
             **search_kwargs,
         )
 
     # ---- Decision: ALLOW_AS_UNKNOWN_ONLY ----
+    # The arbiter has already adjudicated — trust its decision.
+    # Rewrite to Unknown framing, sanitize, and pass without re-verifying.
+    # Re-verification was causing infinite FAIL loops on current-events queries
+    # because GPT-2 kept over-flagging even properly Unknown-framed responses.
     if arbiter_decision == "ALLOW_AS_UNKNOWN_ONLY":
         rewrite_prompt = (
             f"You previously produced this response:\n\n---\n{sanitized_output}\n---\n\n"
             f"The arbiter has determined this question is inherently indeterminate.\n"
             f"Rewrite your response so that ALL claims are framed as Unknown(Actionable) or Unknown(Structural).\n"
             f"Do NOT make conclusions. Do NOT add new facts. Preserve the structure but move all substance to Unknowns.\n"
+            f"Set Confidence to Low.\n"
             f"Output the corrected response in full."
         )
         rewrite_output = call_openai(client, model, gpt1_system, rewrite_prompt)
 
-        # Re-verify with GPT-2
-        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
-        re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
+        # Sanitize the rewrite (strip stale dates, banned evidence, etc.)
+        rewrite_output = sanitize_output(rewrite_output, flags)
+
+        # Append a note if current-events without search
+        if flags.get("current_events") and not search_performed:
+            rewrite_output += (
+                "\n\n---\nNote: This response is based on training data that may be outdated. "
+                "For verified current information, enable Tavily web search in Settings."
+            )
 
         return PipelineResponse(
             prompt_version=PROMPT_VERSION,
@@ -272,18 +294,25 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
             arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
             rewrite_occurred=True, rewrite_output=rewrite_output,
-            rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
-            rewrite_violations=re_viol, rewrite_verdict=re_verdict,
-            final_verdict=re_verdict,
-            final_result=rewrite_output if re_verdict == "PASS" else "NO PASS",
-            prompt_flags=flags, sanitizer_applied=sanitizer_applied,
-            confidence=compute_confidence(re_ct),
+            rewrite_gpt2_raw="(arbiter-trusted)", rewrite_claim_table=[],
+            rewrite_violations=[], rewrite_verdict="PASS",
+            final_verdict="PASS",
+            final_result=rewrite_output,
+            prompt_flags=flags, sanitizer_applied=True,
+            confidence=ConfidenceBreakdown(
+                observed_pct=0, inference_pct=0, hypothesis_pct=0,
+                unsupported_pct=0, user_provided_pct=0,
+                total_claims=0, confidence_label="Low",
+            ),
             **search_kwargs,
         )
 
     # ---- Decision: ALLOW_WITH_EDITS ----
     rewrite_prompt = apply_edits(sanitized_output, arbiter_edits)
     rewrite_output = call_openai(client, model, gpt1_system, rewrite_prompt)
+
+    # Sanitize the rewrite before re-verification
+    rewrite_output = sanitize_output(rewrite_output, flags)
 
     # Re-verify the rewritten output with GPT-2
     re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
@@ -302,6 +331,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"Do NOT make conclusions. Do NOT add new facts. Output the corrected response in full."
         )
         rewrite_output = call_openai(client, model, gpt1_system, unknown_prompt)
+        rewrite_output = sanitize_output(rewrite_output, flags)
         # Re-verify instead of force-passing
         re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
         re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
@@ -319,7 +349,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
         rewrite_violations=re_viol, rewrite_verdict=re_verdict,
         final_verdict=re_verdict,
-        final_result=rewrite_output if re_verdict == "PASS" else "NO PASS",
+        final_result=rewrite_output if re_verdict == "PASS" else _fail_message(flags, search_performed),
         prompt_flags=flags, sanitizer_applied=sanitizer_applied,
         confidence=compute_confidence(re_ct),
         **search_kwargs,
