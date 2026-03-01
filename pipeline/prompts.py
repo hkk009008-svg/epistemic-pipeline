@@ -196,6 +196,14 @@ DEFAULT_GPT3_SYSTEM = (
     '  "final_policy_notes": ["..."]\n'
     '}\n\n'
 
+    '## CRITICAL PRINCIPLE: BLOCK IS A LAST RESORT\n'
+    'BLOCK should be used ONLY when the ENTIRE response is unsalvageable fabrication '
+    'with NO truthful content worth preserving. This is extremely rare.\n'
+    'Almost every issue can be fixed with ALLOW_WITH_EDITS (delete/rewrite problematic claims) '
+    'or ALLOW_AS_UNKNOWN_ONLY (reframe everything as Unknown).\n'
+    'If even ONE part of the response is truthful and useful, do NOT BLOCK.\n'
+    'Your decision hierarchy: ALLOW_WITH_EDITS (preferred) > ALLOW_AS_UNKNOWN_ONLY > BLOCK (rare).\n\n'
+
     '## Priority Stack for Adjudication\n'
     'V1 Abstention > V2 Evidence > V3 Separation > V4 Falsifiability > V5 Consistency > V6 Usefulness\n'
     'A higher-priority value ALWAYS overrides a lower one.\n\n'
@@ -203,9 +211,9 @@ DEFAULT_GPT3_SYSTEM = (
     '## Decision Rules (apply in order):\n\n'
 
     '1) T1/T3/T7 violations (hard — evidence fabrication, causal claims as fact, unverified current facts):\n'
-    '   -> BLOCK unless the violating text can be DELETED without harming response coherence.\n'
-    '   -> If deletable: ALLOW_WITH_EDITS with DELETE action.\n'
-    '   -> V1 (Abstention) dominates: blocking is always preferable to passing fabricated content.\n\n'
+    '   -> ALLOW_WITH_EDITS: DELETE the violating claim, or MOVE_TO_UNKNOWN with a note.\n'
+    '   -> Any claim can be deleted or moved to Unknown — this always preserves coherence.\n'
+    '   -> BLOCK only if the ENTIRE response is fabricated with nothing to salvage.\n\n'
 
     '2) T2 violations (typicality language justifying claims):\n'
     '   -> ALLOW_WITH_EDITS: rewrite the claim to remove typicality language,\n'
@@ -233,6 +241,10 @@ DEFAULT_GPT3_SYSTEM = (
     '8) Overconfidence + Missing jurisdiction (soft violations):\n'
     '   -> ALLOW_WITH_EDITS if fixable by adjusting confidence level or adding jurisdiction qualifier.\n'
     '   -> If prompt_flags.jurisdiction_present is true, suppress Missing jurisdiction findings.\n\n'
+
+    '9) Multiple violations of different types:\n'
+    '   -> ALLOW_WITH_EDITS with multiple edit actions (one per violation).\n'
+    '   -> Do NOT BLOCK just because there are multiple violations — each can be fixed individually.\n\n'
 
     'Never request web browsing or external actions.\n'
     'Never introduce new facts or citations.'
