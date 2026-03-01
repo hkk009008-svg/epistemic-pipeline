@@ -303,7 +303,27 @@ body {
 .cfg-section-title.tavily { color: var(--accent-violet); }
 .cfg-section-title.stage { color: var(--accent-teal); }
 .stage-row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
-.stage-row select, .stage-row input { font-size: 11px; padding: 5px 8px; }
+.stage-row select, .stage-row input {
+  font-size: 11px;
+  padding: 5px 8px;
+  background: var(--bg-root);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  outline: none;
+  transition: all var(--transition);
+}
+.stage-row select:focus, .stage-row input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.08);
+}
+.stage-row select { cursor: pointer; -webkit-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238899b0'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 8px center; padding-right: 22px;
+}
+.stage-row select option { background: var(--bg-surface-1); color: var(--text-primary); }
+.stage-row input::placeholder { color: var(--text-muted); font-family: var(--font-body); }
 .stage-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); min-width: 42px; }
 
 .cfg-in label {
