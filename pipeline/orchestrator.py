@@ -130,17 +130,32 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         source_summary = "; ".join(
             f'[{i}] "{s.title}" ({s.url})' for i, s in enumerate(search_sources, 1)
         )
+        # Also pass source snippets so GPT-2 can verify claims against them
+        source_detail = "\n".join(
+            f'[{i}] "{s.title}" ({s.url})\n    Snippet: {s.snippet[:300]}'
+            for i, s in enumerate(search_sources, 1)
+        )
         gpt2_system += (
-            "\n\nIMPORTANT: GPT-1 was given web search results from the following sources:\n"
-            f"{source_summary}\n\n"
-            "When evaluating claims:\n"
-            "- If a claim cites one of these sources (e.g., [1], [2]) and the source snippet "
-            "supports the claim, categorize it as 'Supported' (not 'Unsupported').\n"
-            "- A statistic that is attributed to a provided source is NOT 'Fabricated' or "
-            "'Unverified' -- categorize it as 'Supported'.\n"
-            "- If GPT-1 cites a source number that does not exist in the list above, "
-            "flag it as 'Fabricated citation'.\n"
-            "- Claims NOT backed by any provided source should still be evaluated normally."
+            "\n\n=== CRITICAL: WEB SEARCH SOURCES (provided to GPT-1) ===\n"
+            f"{source_detail}\n"
+            "=== END SOURCES ===\n\n"
+            "MANDATORY RULES for evaluating claims when web search sources are provided:\n\n"
+            "1. THESE SOURCES ARE MORE CURRENT THAN YOUR TRAINING DATA. Your training data "
+            "may be outdated. Do NOT use your own training knowledge to contradict information "
+            "from the sources above. If your training data conflicts with the sources, "
+            "the sources are correct.\n\n"
+            "2. If GPT-1 cites a source (e.g., [1], [2]) and the source snippet above "
+            "supports the claim, you MUST categorize it as 'Observed' — NOT 'Unsupported', "
+            "NOT 'Fabricated'. A claim backed by a provided source is verified.\n\n"
+            "3. T1 (Evidence Instantiation) does NOT apply to claims supported by provided "
+            "search sources. A claim grounded in a real source is not fabricated, even if it "
+            "contradicts your training data.\n\n"
+            "4. T7 (Unverified Current Fact) does NOT apply to claims supported by provided "
+            "search sources. The search sources ARE the verification.\n\n"
+            "5. If GPT-1 cites a source number that does NOT exist in the list above, "
+            "flag it as 'Fabricated citation'.\n\n"
+            "6. Claims NOT backed by any provided source should be evaluated normally "
+            "using your standard tripwire rules."
         )
 
     search_kwargs = dict(
