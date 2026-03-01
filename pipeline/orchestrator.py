@@ -160,6 +160,33 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     # ---- Step 1: GPT-1 Generate ----
     gpt1_output = call_openai(client, model, gpt1_system, gpt1_user_content)
 
+    # ---- Current-events fast path (no Tavily) ----
+    # If the query is about current events and we have no web search to ground it,
+    # GPT-1 was already instructed to frame everything as Unknown(Actionable).
+    # Sanitize and return directly — skip GPT-2/GPT-3 (they would FAIL the stale
+    # data and the rewrite loop adds 3 more API calls for the same result).
+    if flags.get("current_events") and not search_performed:
+        fast_output = sanitize_output(gpt1_output, flags)
+        fast_output += (
+            "\n\n---\n"
+            "Note: This response is based on training data that may be outdated. "
+            "For verified current information, enable Tavily web search in Settings."
+        )
+        return PipelineResponse(
+            prompt_version=PROMPT_VERSION,
+            gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+            gpt2_raw="(current-events fast path — no web search available)",
+            claim_table=[], violations=[], gpt2_verdict="PASS",
+            final_verdict="PASS", final_result=fast_output,
+            prompt_flags=flags, sanitizer_applied=True,
+            confidence=ConfidenceBreakdown(
+                observed_pct=0, inference_pct=0, hypothesis_pct=0,
+                unsupported_pct=0, user_provided_pct=0,
+                total_claims=0, confidence_label="Low",
+            ),
+            **empty_response, **search_kwargs,
+        )
+
     # ---- Activation bypass ----
     if is_activation_phrase(gpt1_output):
         return PipelineResponse(
