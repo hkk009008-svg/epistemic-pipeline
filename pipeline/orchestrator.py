@@ -7,11 +7,12 @@ import openai
 
 import config
 from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown, SearchSource
-from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, PROMPT_VERSION, build_augmentation
+from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_openai, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft
 from pipeline.arbiter import parse_gpt3, apply_edits
+from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search
 
 
@@ -27,8 +28,13 @@ def _fail_message(flags: dict, search_performed: bool) -> str:
     return "NO PASS - Output blocked by verification"
 
 
-def compute_confidence(claim_table: list) -> ConfidenceBreakdown:
-    """Compute a confidence breakdown from a list of ClaimEntry objects."""
+def compute_confidence(claim_table: list, findings: list | None = None) -> ConfidenceBreakdown:
+    """Compute a confidence breakdown from a list of ClaimEntry objects.
+
+    When *findings* is provided, hard findings penalize the confidence label
+    (any hard finding drops the label one tier). This prevents a response with
+    70% Observed but a fabricated statistic from getting "High" confidence.
+    """
     total = len(claim_table)
     if total == 0:
         return ConfidenceBreakdown()
@@ -48,9 +54,15 @@ def compute_confidence(claim_table: list) -> ConfidenceBreakdown:
             user_provided += 1
 
     observed_pct = round((observed / total) * 100, 1)
-    if observed_pct >= 70:
+
+    # Hard findings penalty: each hard finding drops confidence one tier
+    hard_count = 0
+    if findings:
+        hard_count = sum(1 for f in findings if f.get("severity") == "hard")
+
+    if observed_pct >= 70 and hard_count == 0:
         label = "High"
-    elif observed_pct >= 40:
+    elif observed_pct >= 40 and hard_count <= 1:
         label = "Medium"
     elif observed_pct >= 20:
         label = "Low"
@@ -219,9 +231,15 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     sanitizer_applied = (sanitized_output != gpt1_output)
 
     # ---- Step 2: GPT-2 Verify (on sanitized output) ----
-    gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
+    # Tripwire reference placed at START of user content (lost-in-middle fix)
+    gpt2_user = (
+        f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+        f"=== TASK ===\n"
+        f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+        f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
+    )
     gpt2_raw = call_openai(client, model, gpt2_system, gpt2_user, expect_json=True)
-    claim_table, violations, gpt2_verdict, findings = parse_gpt2(gpt2_raw, flags=flags)
+    claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2(gpt2_raw, flags=flags)
 
     # ---- If GPT-2 PASS: done ----
     if gpt2_verdict == "PASS":
@@ -229,10 +247,10 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
-            gpt2_verdict="PASS",
+            gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
             final_verdict="PASS", final_result=sanitized_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
-            confidence=compute_confidence(claim_table),
+            confidence=compute_confidence(claim_table, findings),
             **empty_response, **search_kwargs,
         )
 
@@ -240,16 +258,21 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     max_rewrite_loops = getattr(config, "MAX_REWRITE_LOOPS", 1)
     if _all_soft(findings):
         # Re-verify with GPT-2 directly (sanitizer already ran on sanitized_output)
-        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
+        re_gpt2_user = (
+            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+            f"=== TASK ===\n"
+            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+            f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
+        )
         re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
 
         if re_verdict == "PASS":
             return PipelineResponse(
                 prompt_version=PROMPT_VERSION,
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
                 gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
-                gpt2_verdict=gpt2_verdict,
+                gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
                 rewrite_occurred=True, rewrite_output=sanitized_output,
                 rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
                 rewrite_violations=re_viol, rewrite_verdict=re_verdict,
@@ -257,7 +280,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
                 final_verdict="PASS", final_result=sanitized_output,
                 prompt_flags=flags, sanitizer_applied=True,
-                confidence=compute_confidence(re_ct),
+                confidence=compute_confidence(re_ct, re_findings),
                 **search_kwargs,
             )
         # Auto-repair didn't clear it -- fall through to arbiter below
@@ -289,7 +312,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
-            gpt2_verdict=gpt2_verdict,
+            gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
             arbiter_invoked=True, arbiter_decision="BLOCK",
             arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
             arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
@@ -297,7 +320,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
             final_verdict="FAIL", final_result=_fail_message(flags, search_performed),
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
-            confidence=compute_confidence(claim_table),
+            confidence=compute_confidence(claim_table, findings),
             **search_kwargs,
         )
 
@@ -331,7 +354,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
-            gpt2_verdict=gpt2_verdict,
+            gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
             arbiter_invoked=True, arbiter_decision="ALLOW_AS_UNKNOWN_ONLY",
             arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
             arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
@@ -357,15 +380,20 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     rewrite_output = sanitize_output(rewrite_output, flags)
 
     # Re-verify the rewritten output with GPT-2
-    re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+    re_gpt2_user = (
+            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+            f"=== TASK ===\n"
+            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+            f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+        )
     re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
-    re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
+    re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
 
     # If still failing on soft-only violations after arbiter rewrite, force Unknown-only
-    # and re-verify (up to max_rewrite_loops)
-    rewrite_count = 0
-    while re_verdict == "FAIL" and _all_soft(re_findings) and rewrite_count < max_rewrite_loops:
-        rewrite_count += 1
+    # and re-verify. Convergence detection decides whether to continue.
+    findings_history = [findings, re_findings]  # Initial GPT-2 findings + first re-verify
+
+    while re_verdict == "FAIL" and _all_soft(re_findings) and should_continue_rewrite(findings_history, max_loops=max_rewrite_loops):
         unknown_prompt = (
             f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
             f"Remaining soft violations could not be resolved. "
@@ -375,15 +403,21 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         rewrite_output = call_openai(client, model, gpt1_system, unknown_prompt)
         rewrite_output = sanitize_output(rewrite_output, flags)
         # Re-verify instead of force-passing
-        re_gpt2_user = f"ORIGINAL PROMPT:\n{req.prompt}\n\nGPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+        re_gpt2_user = (
+            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+            f"=== TASK ===\n"
+            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+            f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+        )
         re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+        findings_history.append(re_findings)
 
     return PipelineResponse(
         prompt_version=PROMPT_VERSION,
         gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
         gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
-        gpt2_verdict=gpt2_verdict,
+        gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
         arbiter_invoked=True, arbiter_decision="ALLOW_WITH_EDITS",
         arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
         arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
@@ -393,6 +427,6 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         final_verdict=re_verdict,
         final_result=rewrite_output if re_verdict == "PASS" else _fail_message(flags, search_performed),
         prompt_flags=flags, sanitizer_applied=sanitizer_applied,
-        confidence=compute_confidence(re_ct),
+        confidence=compute_confidence(re_ct, re_findings),
         **search_kwargs,
     )

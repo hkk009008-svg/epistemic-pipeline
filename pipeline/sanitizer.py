@@ -75,6 +75,35 @@ _BARE_PERCENT_RE = re.compile(
     r"\d+(?:\.\d+)?\s*(?:%(?=\s|$|[,;.\)])|percent\b)"
 )
 
+# Citation detection for nearby-citation checks
+_CITATION_RE = re.compile(
+    r"(?:\([^)]{3,50}\)|\[[^\]]{1,50}\])"  # (Source 2024) or [CDC 2023] etc.
+)
+
+
+def _has_nearby_citation(text: str, match_start: int, match_end: int,
+                         window: int = 80) -> bool:
+    """Check if there's a citation within `window` chars of the match."""
+    search_start = max(0, match_start - 20)  # Citations sometimes precede the stat
+    search_end = min(len(text), match_end + window)
+    context = text[search_start:search_end]
+    return bool(_CITATION_RE.search(context))
+
+
+def _replace_bare_percents(text: str) -> str:
+    """Replace bare percentages that lack nearby citations."""
+    matches = list(_BARE_PERCENT_RE.finditer(text))
+    if not matches:
+        return text
+    # Work backwards to preserve indices
+    result = text
+    for match in reversed(matches):
+        if not _has_nearby_citation(text, match.start(), match.end()):
+            result = (result[:match.start()] +
+                      "Unknown(Actionable): No authoritative dataset available for this figure" +
+                      result[match.end():])
+    return result
+
 # Outcome-promise phrases (G4 violation markers)
 _OUTCOME_PROMISE_RE = re.compile(
     r"(?i)\b(?:will improve|will reduce|will increase"
@@ -105,10 +134,8 @@ def sanitize_output(text: str, flags: dict) -> str:
     # 2. G2: Replace typicality language with abstention marker
     result = _TYPICALITY_RE.sub("[Typicality language removed]", result)
 
-    # 3. Convert bare % claims to Unknown(Actionable)
-    result = _BARE_PERCENT_RE.sub(
-        "Unknown(Actionable): No authoritative dataset available for this figure", result
-    )
+    # 3. Convert bare % claims to Unknown(Actionable) — skip if citation nearby
+    result = _replace_bare_percents(result)
 
     # 4. Strip outcome-promise phrases — but skip if advice was requested
     #    (let GPT-2 handle contextually for advice-requested prompts)

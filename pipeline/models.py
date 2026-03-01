@@ -61,6 +61,7 @@ class PipelineResponse(BaseModel):
     claim_table: List[ClaimEntry]
     violations: List[str]
     gpt2_verdict: str
+    gpt2_reasoning: List[str] = []  # GPT-2 chain-of-thought reasoning trace
     # GPT-3 arbiter results (only if GPT-2 FAIL)
     arbiter_invoked: bool
     arbiter_decision: str

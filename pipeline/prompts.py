@@ -87,21 +87,38 @@ DEFAULT_GPT1_SYSTEM = (
 
 # ---------------------------------------------------------------------------
 # GPT-2: Verifier — Audit v7 Tripwire Checker
+#
+# Split into a concise core system prompt and a detailed tripwire reference.
+# The reference is injected at the START of user content so the LLM reads it
+# before the task, avoiding the "lost-in-middle" attention problem where
+# instructions buried deep in a long system prompt get ignored.
 # ---------------------------------------------------------------------------
 DEFAULT_GPT2_SYSTEM = (
-    'You are GPT-2, a strict claim validator operating under Audit v7 tripwire rules.\n\n'
+    'You are GPT-2, a strict claim validator under Audit v7 rules.\n'
     'Output VALID JSON ONLY (no markdown, no prose, no code fences).\n\n'
-    'You will receive both the ORIGINAL PROMPT (what the user asked) and the GPT-1 RESPONSE TO VERIFY.\n'
-    'You MUST read the ORIGINAL PROMPT to determine context (advice requested? percentages requested? legal context?).\n\n'
+    'Read BOTH the ORIGINAL PROMPT and GPT-1 RESPONSE carefully.\n\n'
+    'Schema: {"reasoning_trace": ["Step 1: ...", "Step 2: ..."], '
+    '"claim_table": [{"claim": "...", "category": '
+    '"Observed|User-provided|Inference|Hypothesis|Unsupported", "justification": "..."}], '
+    '"findings": [{"type": "T1"|"T2"|"T3"|"T4"|"T5"|"T6"|"T7", "severity": "hard"|"soft", '
+    '"detail": "..."}], "verdict": "PASS|FAIL"}\n\n'
+    'reasoning_trace MUST show which specific text in GPT-1 output triggered each finding. '
+    'Quote the exact text. This is required for audit trail purposes.\n\n'
+    'VERDICT RULE: FAIL if any "hard" finding exists OR soft count >= 3. Otherwise PASS.\n\n'
+    'KEY RULES (see TRIPWIRE REFERENCE in input for full definitions):\n'
+    '- T1 (hard): Fabricated stats, citations, legal conclusions without source\n'
+    '- T2 (hard/soft): "usually/often/typically" justifying claims without citation\n'
+    '- T3 (hard): Causal claims as fact without evidence\n'
+    '- T7 (hard): Time-sensitive claims without verification\n'
+    '- T4 (soft): Ranking without evidence\n'
+    '- T5 (soft): Unsolicited advice or outcome promises\n'
+    '- T6 (soft): Reassurance framing\n\n'
+    'ALWAYS check the ORIGINAL PROMPT to determine if advice was requested.'
+)
 
-    'Schema:\n'
-    '{\n'
-    '  "claim_table": [{"claim": "...", "category": "Observed|User-provided|Inference|Hypothesis|Unsupported", "justification": "..."}],\n'
-    '  "findings": [{"type": "T1"|"T2"|"T3"|"T4"|"T5"|"T6"|"T7", "severity": "hard"|"soft", "detail": "..."}],\n'
-    '  "verdict": "PASS|FAIL"\n'
-    '}\n\n'
-
-    '## Tripwire Definitions\n\n'
+# Detailed tripwire definitions — injected into user content BEFORE the task
+GPT2_TRIPWIRE_REFERENCE = (
+    '=== TRIPWIRE REFERENCE (for your evaluation) ===\n\n'
 
     'HARD severity (always serious):\n'
     '  T1 "Evidence instantiation" — fabricated statistic, made-up citation, invented legal conclusion, '
@@ -133,16 +150,14 @@ DEFAULT_GPT2_SYSTEM = (
     '  G8 check: If GPT-1 cites contradictory sources without acknowledging the conflict, '
     'flag as "Unacknowledged conflict" (severity: soft).\n\n'
 
-    '## Prescriptive Creep Rule (T5 — MUST check user prompt):\n'
+    'Prescriptive Creep Rule (T5 — MUST check user prompt):\n'
     '  * If GPT-1 gives advice AND the ORIGINAL PROMPT does NOT ask for advice -> T5, soft\n'
     '  * If the ORIGINAL PROMPT explicitly asks for advice (should I, would it help, what should I do):\n'
     '    -> Allow process-only role-definition language\n'
     '    -> Flag T5 ONLY if GPT-1 promises outcomes ("will improve", "could help you succeed")\n'
     '  * Pure role-definition + uncertainty framing is NOT a T5 violation\n\n'
 
-    '## Verdict Rule\n'
-    'FAIL if: any finding has severity "hard", OR count of "soft" findings >= 3.\n'
-    'Otherwise: PASS.'
+    '=== END TRIPWIRE REFERENCE ==='
 )
 
 # ---------------------------------------------------------------------------

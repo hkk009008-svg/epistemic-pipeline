@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A FastAPI-based 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a Generator → Verifier → Arbiter architecture with the **Audit v7 epistemic framework** (priority stack V1-V7, global rules G1-G12, tripwire violations T1-T7). Includes Tavily web search integration, deterministic sanitization, and a comprehensive stress-testing framework.
+A FastAPI-based 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a Generator → Verifier → Arbiter architecture with the **Audit v7 epistemic framework** (priority stack V1-V7, global rules G1-G12, tripwire violations T1-T7). Includes Tavily web search integration, deterministic sanitization, convergence-aware rewrite loops, and a comprehensive stress-testing framework.
 
 **Version:** 2.0.0 | **Python:** 3.11.11 | **Prompt Version:** 7.1.0 (Audit v7)
 
@@ -28,19 +28,21 @@ pipeline/
   orchestrator.py       # Main pipeline logic: run_pipeline(), confidence scoring
   models.py             # Pydantic request/response models
   prompts.py            # GPT-1/2/3 system prompts, Audit v7 rules, build_augmentation()
-  sanitizer.py          # Deterministic routing (route_prompt) and output cleaning
-  verifier.py           # GPT-2 JSON parsing (parse_gpt2), verdict computation
+  sanitizer.py          # Deterministic routing (route_prompt) and citation-aware output cleaning
+  verifier.py           # GPT-2 JSON parsing (parse_gpt2), verdict computation, reasoning trace
   arbiter.py            # GPT-3 decision parsing (parse_gpt3), edit application
   helpers.py            # Shared utilities: extract_json(), call_openai(), PipelineError
   search.py             # Tavily web search (should_search, perform_web_search)
+  convergence.py        # Rewrite loop convergence detection (finding deltas, oscillation)
   stress.py             # Stress testing framework, PSS (Pipeline Stability Score)
 
 tests/
   conftest.py           # Pytest fixtures for GPT-2/3 JSON payloads, flags, edits
   test_helpers.py       # extract_json(), is_activation_phrase() tests (~51 tests)
-  test_sanitizer.py     # route_prompt(), sanitize_output() tests (~60+ tests)
-  test_verifier.py      # parse_gpt2() tests (~60+ tests)
+  test_sanitizer.py     # route_prompt(), sanitize_output() tests (~70+ tests)
+  test_verifier.py      # parse_gpt2() tests (~65+ tests)
   test_arbiter.py       # parse_gpt3(), apply_edits() tests
+  test_convergence.py   # compute_finding_delta(), should_continue_rewrite() tests
 
 n8n-workflows/          # n8n automation templates (verify, batch stress, health check)
 
@@ -74,16 +76,17 @@ User Prompt
   → perform_web_search()    # Tavily search if flags warrant it (optional)
   → GPT-1 (Generator)       # Produces response using Audit v7 + flag augmentation + search context
   → Activation bypass check  # Skip verification if output matches activation patterns
-  → sanitize_output()       # Strip banned evidence, typicality language, bare %, stale dates
-  → GPT-2 (Verifier)        # Parse claims into table, check T1-T7 violations, verdict PASS/FAIL
+  → sanitize_output()       # Citation-aware: strip bare %, banned evidence, typicality; preserve cited stats
+  → GPT-2 (Verifier)        # Tripwire reference + task in user content (lost-in-middle fix)
+                             # Chain-of-thought reasoning trace → claim table → T1-T7 findings → verdict
   → Decision tree:
       ├ PASS → return result
       ├ FAIL (soft-only) → auto-retry verification
       └ FAIL (hard/persistent) → GPT-3 (Arbiter)
           ├ BLOCK → return failure
-          ├ ALLOW_WITH_EDITS → rewrite, re-verify (max 1 loop)
+          ├ ALLOW_WITH_EDITS → rewrite, re-verify (convergence-aware, max 3 loops)
           └ ALLOW_AS_UNKNOWN_ONLY → reframe claims, Low confidence
-  → Final response with confidence scoring
+  → Final response with confidence scoring (hard-findings penalty)
 ```
 
 ## API Endpoints
@@ -114,12 +117,12 @@ User Prompt
 ## Running Tests
 
 ```bash
-python -m pytest tests/ -v          # Run all 198 tests
+python -m pytest tests/ -v          # Run all 227 tests
 python -m pytest tests/ -v -x       # Stop on first failure
 python -m pytest tests/test_sanitizer.py -v   # Run specific module
 ```
 
-All tests are deterministic (no LLM calls, no mocking needed). They verify business logic: routing, sanitization, JSON parsing, verdict computation, and arbiter decisions.
+All tests are deterministic (no LLM calls, no mocking needed). They verify business logic: routing, sanitization, JSON parsing, verdict computation, convergence detection, and arbiter decisions.
 
 **Test fixtures** are centralized in `tests/conftest.py`. Tests use `@pytest.mark.parametrize` extensively.
 
@@ -137,6 +140,10 @@ All tests are deterministic (no LLM calls, no mocking needed). They verify busin
 - **Deterministic routing**: All flag extraction and sanitization is regex-based, no randomness
 - **Hardened JSON parsing**: `extract_json()` in `helpers.py` handles markdown fences, prose preambles, and truncation recovery
 - **Flag-aware augmentation**: `build_augmentation()` in `prompts.py` modifies all 3 GPT system prompts based on routing flags
+- **Citation-aware sanitizer**: `sanitize_output()` checks for nearby citations before stripping percentages — cited statistics are preserved
+- **Split GPT-2 prompt**: Core instructions in system prompt, detailed tripwire reference injected at start of user content (avoids lost-in-middle attention problem)
+- **Reasoning trace**: GPT-2 outputs a `reasoning_trace` array showing which text triggered each finding (chain-of-thought for verification accuracy)
+- **Convergence detection**: `pipeline/convergence.py` monitors finding deltas across rewrite iterations, stopping on convergence/oscillation/regression
 - **Streaming stress tests**: `/api/stress` returns NDJSON for real-time progress
 
 ### When Adding Pipeline Logic
@@ -145,6 +152,8 @@ All tests are deterministic (no LLM calls, no mocking needed). They verify busin
 - New tripwire violations must follow the T-code pattern (T1-T7) with HARD/SOFT severity
 - Sanitizer rules are flag-aware — check `flags` dict before applying transforms
 - Search integration touches GPT-1 (source context) and GPT-2 (claim grounding) prompts
+- `parse_gpt2()` returns 5 values: `(claim_table, violations, verdict, findings, reasoning_trace)`
+- `compute_confidence()` accepts optional `findings` parameter for hard-findings penalty
 
 ### When Adding Tests
 - Add fixtures to `tests/conftest.py`
@@ -153,7 +162,7 @@ All tests are deterministic (no LLM calls, no mocking needed). They verify busin
 - Stress/integration tests use the `/api/stress` endpoint with `tests.json` test cases
 
 ### Hard-Coded Limits
-- `MAX_REWRITE_LOOPS = 1` — arbiter rewrite re-verification cap
+- `MAX_REWRITE_LOOPS = 3` — arbiter rewrite re-verification cap (convergence detection handles early stopping)
 - `MAX_PROMPT_LENGTH = 10000` — input prompt character limit
 - Rate limit window: 60 seconds sliding window per IP
 
@@ -180,3 +189,4 @@ GitHub Actions workflow (`.github/workflows/docker-image.yml`) builds a Docker i
 - The `ui.py` file contains a large embedded HTML string (~62KB) for the chat UI — avoid reformatting it.
 - The Audit v7 framework prompts in `prompts.py` are carefully tuned — changes to system prompts should be validated with stress tests.
 - Sanitizer rules and GPT-2 augmentation must stay in sync — if you change what the sanitizer strips, update GPT-2's awareness of those patterns.
+- The GPT-2 prompt is split: core in `DEFAULT_GPT2_SYSTEM`, detailed tripwire reference in `GPT2_TRIPWIRE_REFERENCE` (injected into user content). Keep both in sync.
