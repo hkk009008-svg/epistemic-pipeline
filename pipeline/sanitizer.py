@@ -127,6 +127,13 @@ _STALE_DATE_RE = re.compile(
     r"|September|October|November|December)?\s*(?:20[0-1]\d|202[0-4])\b"
 )
 
+# G1: Vague legal claims without statute/regulation citation (pre-compiled)
+_VAGUE_LEGAL_RE = re.compile(
+    r"(?i)\b(?:is (?:generally )?legal|is (?:generally )?illegal|is (?:generally )?allowed"
+    r"|is (?:generally )?prohibited)\b"
+    r"(?!\s*(?:under|per|pursuant to)\s+)"
+)
+
 
 def sanitize_output(text: str, flags: dict) -> str:
     """Pre-clean GPT-1 output deterministically before GPT-2 verification.
@@ -160,13 +167,7 @@ def sanitize_output(text: str, flags: dict) -> str:
 
     # 6. Legal mode: extra strict — flag any remaining vague legal language
     if flags.get("legal_mode"):
-        result = re.sub(
-            r"(?i)\b(?:is (?:generally )?legal|is (?:generally )?illegal|is (?:generally )?allowed"
-            r"|is (?:generally )?prohibited)\b"
-            r"(?!\s*(?:under|per|pursuant to)\s+)",
-            "[Legal claim requires citation]",
-            result,
-        )
+        result = _VAGUE_LEGAL_RE.sub("[Legal claim requires citation]", result)
 
     # Clean up residual double-spaces / trailing whitespace per line
     result = re.sub(r"  +", " ", result)
