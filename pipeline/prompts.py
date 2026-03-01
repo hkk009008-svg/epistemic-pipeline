@@ -382,6 +382,37 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
                 "are T7 violations. BLOCK or ALLOW_AS_UNKNOWN_ONLY."
             )
 
+    if flags.get("comparative"):
+        gpt1_parts.append(
+            "FLAG — comparative: The user is asking a comparative/indeterminate question "
+            "(e.g., 'Is X safer than Y?', 'Which is better?'). "
+            "This type of question is inherently structurally indeterminate — the answer depends on "
+            "context, individual factors, and criteria that vary. You MUST: "
+            "(1) Frame the core comparison as Unknown(Structural) — do NOT declare a winner. "
+            "(2) Present evidence FOR and AGAINST each option as labeled Inferences (if evidence exists). "
+            "(3) List Discriminators: factors that would change the answer (e.g., patient age, condition severity). "
+            "(4) Set Confidence to Low with justification: 'Comparative judgment depends on individual context.' "
+            "(5) Do NOT make causal claims as fact. Phrase as 'Evidence suggests X may...' with citations."
+        )
+        gpt2_parts.append(
+            "FLAG — comparative: User asked a comparative/indeterminate question. "
+            "This question is inherently structurally indeterminate. Adjust your evaluation: "
+            "- Claims framed as Unknown(Structural) are CORRECT for comparative judgments — do not flag. "
+            "- T3 (Causal claim as fact) should only trigger if GPT-1 states a definitive causal conclusion "
+            "WITHOUT labeling it as Inference. Comparative hedging ('X may be safer') is NOT T3. "
+            "- T1 should only trigger for fabricated evidence, NOT for discussing well-known trade-offs. "
+            "- If GPT-1 correctly frames the comparison as Unknown(Structural) with Discriminators, "
+            "this should PASS even if individual evidence points are inferences."
+        )
+        gpt3_parts.append(
+            "FLAG — comparative: User asked a comparative/indeterminate question. "
+            "This question is INHERENTLY INDETERMINATE — there is no single correct answer. "
+            "STRONGLY prefer ALLOW_AS_UNKNOWN_ONLY over BLOCK. "
+            "BLOCK only if GPT-1 fabricated evidence (T1) or made definitive false claims. "
+            "If GPT-1 attempted to answer the comparison with some imperfect framing, "
+            "ALLOW_AS_UNKNOWN_ONLY to reframe as Unknown(Structural) — do NOT BLOCK."
+        )
+
     gpt1_aug = ("\n\n" + "\n".join(gpt1_parts)) if gpt1_parts else ""
     gpt2_aug = ("\n\n" + "\n".join(gpt2_parts)) if gpt2_parts else ""
     gpt3_aug = ("\n\n" + "\n".join(gpt3_parts)) if gpt3_parts else ""

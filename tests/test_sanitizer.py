@@ -194,6 +194,7 @@ class TestRoutePromptCombined:
             "jurisdiction_present": False,
             "future_year": False,
             "current_events": False,
+            "comparative": False,
         }
 
 
@@ -378,3 +379,44 @@ class TestSanitizeOutputCitedPercent:
         assert "73%" in result
         # 50% has no citation — should be replaced
         assert "Unknown(Actionable)" in result
+
+
+# ===================================================================
+# route_prompt() -- comparative flag
+# ===================================================================
+
+
+class TestRoutePromptComparative:
+    """Comparative-question detection flag."""
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Is chemotherapy or immunotherapy safer for lung cancer?",
+            "Which is better, surgery or radiation?",
+            "Is drug A more effective than drug B?",
+            "Are generic drugs as effective as brand-name ones?",
+            "Which has fewer side effects, aspirin or ibuprofen?",
+            "Is living in the city versus the suburbs healthier?",
+            "Does vaccine X cause more harm than vaccine Y?",
+            "Which is the safest option for treatment?",
+            "Is homeopathy as reliable as conventional medicine?",
+            "Is option A or option B better for recovery?",
+        ],
+    )
+    def test_comparative_detected(self, prompt: str):
+        flags = route_prompt(prompt)
+        assert flags["comparative"] is True
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "What is the capital of France?",
+            "Explain quantum entanglement.",
+            "Define photosynthesis.",
+            "How does gravity work?",
+        ],
+    )
+    def test_comparative_not_detected(self, prompt: str):
+        flags = route_prompt(prompt)
+        assert flags["comparative"] is False

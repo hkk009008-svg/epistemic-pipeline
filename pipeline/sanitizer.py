@@ -38,6 +38,15 @@ _CURRENT_EVENTS_RE = re.compile(
     r"(?i)\b(?:current|latest|recent|right now|today|now|this year"
     r"|as of|who is the|what is the current|new|newest|updated)\b"
 )
+_COMPARATIVE_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:safer|better|worse|more effective|less effective|superior|inferior"
+    r"|as effective as|as reliable as|as good as|more harm|fewer side effects"
+    r"|worth the|reduce or increase|cause more|versus|vs\.?)\b"
+    r"|(?:which\s+(?:is|are|has|have)\s+(?:the\s+)?(?:best|worst|safest|most|least|fewer))"
+    r"|(?:is\s+\w+\s+(?:or)\s+\w+\s+(?:safer|better|worse|more|less))"
+    r")"
+)
 
 
 def route_prompt(prompt: str) -> dict:
@@ -49,6 +58,7 @@ def route_prompt(prompt: str) -> dict:
         "jurisdiction_present": bool(_JURISDICTION_RE.search(prompt)),
         "future_year": bool(_FUTURE_YEAR_RE.search(prompt)),
         "current_events": bool(_CURRENT_EVENTS_RE.search(prompt)),
+        "comparative": bool(_COMPARATIVE_RE.search(prompt)),
     }
 
 
