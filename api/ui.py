@@ -1329,11 +1329,11 @@ body {
     <span class="g1">GPT-1</span><span class="arr">&rarr;</span><span class="g2">GPT-2</span><span class="arr">&rarr;</span><span class="g3">GPT-3</span>
   </h1>
   <div class="pipeline-flow">
-    <div class="pf-node n1"><span>G1</span></div>
+    <div class="pf-node n1"><span>?</span></div>
     <div class="pf-line"><div class="pf-pulse"></div></div>
-    <div class="pf-node n2"><span>G2</span></div>
+    <div class="pf-node n2"><span>?</span></div>
     <div class="pf-line l2"><div class="pf-pulse"></div></div>
-    <div class="pf-node n3"><span>G3</span></div>
+    <div class="pf-node n3"><span>?</span></div>
   </div>
   <div class="right-controls">
     <button class="cfg-btn stress-btn" onclick="openStress()">
