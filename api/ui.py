@@ -1374,12 +1374,6 @@ body {
       <label>API Key</label>
       <div class="cfg-row">
         <input type="password" id="ak" placeholder="sk-...">
-        <select id="md" style="width:150px">
-          <option value="gpt-4o-mini">gpt-4o-mini</option>
-          <option value="gpt-4o">gpt-4o</option>
-          <option value="gpt-4-turbo">gpt-4-turbo</option>
-          <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
-        </select>
         <button class="btn-s" onclick="sav()">Save</button>
       </div>
       <div class="cfg-st" id="ks">No key set</div>
@@ -1667,7 +1661,7 @@ async function lc() {
     const st = document.getElementById('ks');
     if (d.key_set) {
       dot.className = 'kd on';
-      st.textContent = d.key_preview + ' | ' + d.model;
+      st.textContent = d.key_preview;
       st.className = 'cfg-st ok';
     } else {
       dot.className = 'kd off';
@@ -1683,7 +1677,7 @@ async function sav() {
   await fetch('/api/openai/config', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({api_key: k, model: document.getElementById('md').value})
+    body: JSON.stringify({api_key: k})
   });
   document.getElementById('ak').value = '';
   lc();
