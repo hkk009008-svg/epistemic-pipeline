@@ -116,6 +116,18 @@ _tavily_config: dict = {}  # {"api_key": "tvly-...", "enabled": True}
 _tavily_client: TavilyClient | None = None
 _tavily_client_key: str = ""
 
+# Bootstrap from environment variables (set once in Railway, persist across deploys)
+_env_openai_key = os.environ.get("OPENAI_API_KEY", "")
+_env_openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+if _env_openai_key:
+    _openai_config["api_key"] = _env_openai_key
+    _openai_config["model"] = _env_openai_model
+
+_env_tavily_key = os.environ.get("TAVILY_API_KEY", "")
+if _env_tavily_key:
+    _tavily_config["api_key"] = _env_tavily_key
+    _tavily_config["enabled"] = True
+
 MAX_REWRITE_LOOPS = 3  # max rewrite iterations before giving up
 
 # Activation phrases that bypass GPT-2 verification
