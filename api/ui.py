@@ -302,10 +302,13 @@ body {
 }
 .cfg-section-title.tavily { color: var(--accent-violet); }
 .cfg-section-title.stage { color: var(--accent-teal); }
-.stage-row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
-.stage-row select, .stage-row input {
+.stage-block { margin-bottom: 14px; padding: 10px 12px; background: var(--bg-surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.stage-block:last-of-type { margin-bottom: 0; }
+.stage-header { font-size: 10px; font-weight: 700; color: var(--accent-teal); letter-spacing: 0.06em; margin-bottom: 8px; text-transform: uppercase; }
+.stage-fields { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.stage-fields select, .stage-fields input {
   font-size: 11px;
-  padding: 5px 8px;
+  padding: 6px 8px;
   background: var(--bg-root);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
@@ -314,17 +317,20 @@ body {
   outline: none;
   transition: all var(--transition);
 }
-.stage-row select:focus, .stage-row input:focus {
+.stage-fields select:focus, .stage-fields input:focus {
   border-color: var(--border-focus);
   box-shadow: 0 0 0 3px rgba(56,189,248,0.08);
 }
-.stage-row select { cursor: pointer; -webkit-appearance: none; appearance: none;
+.stage-fields select {
+  cursor: pointer; -webkit-appearance: none; appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238899b0'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 8px center; padding-right: 22px;
+  flex: 0 0 auto;
 }
-.stage-row select option { background: var(--bg-surface-1); color: var(--text-primary); }
-.stage-row input::placeholder { color: var(--text-muted); font-family: var(--font-body); }
-.stage-label { font-size: 10px; font-weight: 600; color: var(--text-secondary); min-width: 42px; }
+.stage-fields select option { background: var(--bg-surface-1); color: var(--text-primary); }
+.stage-fields input { flex: 1; min-width: 0; }
+.stage-fields input::placeholder { color: var(--text-muted); font-family: var(--font-body); font-size: 10px; }
+.stage-fields .btn-s { padding: 6px 12px; font-size: 10px; flex-shrink: 0; }
 
 .cfg-in label {
   display: block;
@@ -1389,41 +1395,47 @@ body {
 
     <div class="cfg-section">
       <div class="cfg-section-title stage">Per-Stage Model Config</div>
-      <div class="stage-row">
-        <span class="stage-label">GPT-1</span>
-        <select id="g1p" style="width:100px">
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="ollama">Ollama</option>
-        </select>
-        <input id="g1m" placeholder="Model name" style="width:130px">
-        <input id="g1k" type="password" placeholder="API key (if different)" style="width:160px">
-        <button class="btn-s" onclick="savStage('gpt1','g1p','g1m','g1k')">Set</button>
+      <div class="stage-block">
+        <div class="stage-header">GPT-1 &mdash; Generator</div>
+        <div class="stage-fields">
+          <select id="g1p">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <input id="g1m" placeholder="Model name">
+          <input id="g1k" type="password" placeholder="API key">
+          <button class="btn-s" onclick="savStage('gpt1','g1p','g1m','g1k')">Set</button>
+        </div>
       </div>
-      <div class="stage-row">
-        <span class="stage-label">GPT-2</span>
-        <select id="g2p" style="width:100px">
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="ollama">Ollama</option>
-        </select>
-        <input id="g2m" placeholder="Model name" style="width:130px">
-        <input id="g2k" type="password" placeholder="API key (if different)" style="width:160px">
-        <button class="btn-s" onclick="savStage('gpt2','g2p','g2m','g2k')">Set</button>
+      <div class="stage-block">
+        <div class="stage-header">GPT-2 &mdash; Verifier</div>
+        <div class="stage-fields">
+          <select id="g2p">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <input id="g2m" placeholder="Model name">
+          <input id="g2k" type="password" placeholder="API key">
+          <button class="btn-s" onclick="savStage('gpt2','g2p','g2m','g2k')">Set</button>
+        </div>
       </div>
-      <div class="stage-row">
-        <span class="stage-label">GPT-3</span>
-        <select id="g3p" style="width:100px">
-          <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="ollama">Ollama</option>
-        </select>
-        <input id="g3m" placeholder="Model name" style="width:130px">
-        <input id="g3k" type="password" placeholder="API key (if different)" style="width:160px">
-        <button class="btn-s" onclick="savStage('gpt3','g3p','g3m','g3k')">Set</button>
+      <div class="stage-block">
+        <div class="stage-header">GPT-3 &mdash; Arbiter</div>
+        <div class="stage-fields">
+          <select id="g3p">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <input id="g3m" placeholder="Model name">
+          <input id="g3k" type="password" placeholder="API key">
+          <button class="btn-s" onclick="savStage('gpt3','g3p','g3m','g3k')">Set</button>
+        </div>
       </div>
       <div class="cfg-st" id="stg-st">Falls back to global OpenAI config if not set</div>
     </div>
