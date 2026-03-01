@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import openai
 
@@ -14,6 +15,16 @@ from pipeline.verifier import parse_gpt2, _all_soft
 from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search
+
+
+def _date_context() -> str:
+    """Return a date-awareness preamble for system prompts."""
+    today = date.today().isoformat()
+    return (
+        f"CURRENT DATE: {today}. Use this date when evaluating whether "
+        f"claims refer to the past, present, or future. Any date before "
+        f"{today} is in the PAST, not the future.\n\n"
+    )
 
 
 def _fail_message(flags: dict, search_performed: bool) -> str:
@@ -115,6 +126,12 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
     gpt3_system = req.gpt3_system or DEFAULT_GPT3_SYSTEM
 
+    # Inject current-date awareness so models don't misidentify past dates as future
+    date_ctx = _date_context()
+    gpt1_system = date_ctx + gpt1_system
+    gpt2_system = date_ctx + gpt2_system
+    gpt3_system = date_ctx + gpt3_system
+
     # Flag-driven augmentation for all 3 stages (search-aware)
     gpt1_aug, gpt2_aug, gpt3_aug = build_augmentation(flags, search_performed=search_performed)
     gpt1_system += gpt1_aug
@@ -151,23 +168,31 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             "\n\n=== CRITICAL: WEB SEARCH SOURCES (provided to GPT-1) ===\n"
             f"{source_detail}\n"
             "=== END SOURCES ===\n\n"
-            "MANDATORY RULES for evaluating claims when web search sources are provided:\n\n"
-            "1. THESE SOURCES ARE MORE CURRENT THAN YOUR TRAINING DATA. Your training data "
-            "may be outdated. Do NOT use your own training knowledge to contradict information "
-            "from the sources above. If your training data conflicts with the sources, "
-            "the sources are correct.\n\n"
-            "2. If GPT-1 cites a source (e.g., [1], [2]) and the source snippet above "
-            "supports the claim, you MUST categorize it as 'Observed' — NOT 'Unsupported', "
-            "NOT 'Fabricated'. A claim backed by a provided source is verified.\n\n"
-            "3. T1 (Evidence Instantiation) does NOT apply to claims supported by provided "
-            "search sources. A claim grounded in a real source is not fabricated, even if it "
+            "*** MANDATORY RULES — READ BEFORE EVALUATING ***\n"
+            "These rules OVERRIDE your default tripwire checks when web search sources are present.\n"
+            "Violating these rules is a verification error on YOUR part.\n\n"
+            "RULE 1: THESE SOURCES ARE MORE CURRENT THAN YOUR TRAINING DATA.\n"
+            "  Your training data may be outdated. Do NOT use your own training knowledge "
+            "to contradict information from the sources above. If your training data "
+            "says something different, THE SOURCES ARE CORRECT.\n\n"
+            "RULE 2: SOURCE-BACKED CLAIMS ARE 'Observed'.\n"
+            "  If GPT-1 cites a source (e.g., [1], [2]) and the source snippet above "
+            "supports the claim, you MUST categorize it as 'Observed'. It is NOT "
+            "'Unsupported', NOT 'Fabricated'. A claim backed by a provided source is VERIFIED.\n\n"
+            "RULE 3: T1 DOES NOT APPLY to source-backed claims.\n"
+            "  A claim grounded in a provided real source is not fabricated, even if it "
             "contradicts your training data.\n\n"
-            "4. T7 (Unverified Current Fact) does NOT apply to claims supported by provided "
-            "search sources. The search sources ARE the verification.\n\n"
-            "5. If GPT-1 cites a source number that does NOT exist in the list above, "
-            "flag it as 'Fabricated citation'.\n\n"
-            "6. Claims NOT backed by any provided source should be evaluated normally "
-            "using your standard tripwire rules."
+            "RULE 4: T7 DOES NOT APPLY to source-backed claims.\n"
+            "  The search sources ARE the verification. A time-sensitive claim supported by "
+            "a web search result is VERIFIED and CURRENT. Do NOT flag T7.\n\n"
+            "RULE 5: FABRICATED CITATIONS only.\n"
+            "  Only flag 'Fabricated citation' if GPT-1 cites a source number [N] "
+            "that does NOT exist in the sources list above.\n\n"
+            "RULE 6: UNSOURCED claims only.\n"
+            "  Claims NOT backed by any provided source should be evaluated normally "
+            "using standard tripwire rules. An unsourced INFERENCE based on sourced claims "
+            "(e.g., 'He succeeded X') is a minor issue — categorize as 'Inference', NOT "
+            "'Unsupported'. Only flag as 'Unsupported' if the claim is unrelated to the sources."
         )
 
     search_kwargs = dict(
@@ -296,11 +321,30 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     }, indent=2)
 
     flags_json = json.dumps(flags, indent=2)
+
+    # Include web search evidence for the arbiter if available
+    search_evidence = ""
+    if search_performed and search_sources:
+        source_lines = "\n".join(
+            f'[{i}] "{s.title}" ({s.url}) — {s.snippet[:200]}'
+            for i, s in enumerate(search_sources, 1)
+        )
+        search_evidence = (
+            f"\n\nweb_search_sources (provided to GPT-1 — these are VERIFIED current sources):\n"
+            f"{source_lines}\n\n"
+            f"IMPORTANT: Claims that GPT-1 grounded in these web search sources are VERIFIED "
+            f"and CURRENT. Do NOT BLOCK claims that are supported by the sources above. "
+            f"Your training data may be outdated — trust the web search results over your "
+            f"training knowledge. ALLOW_WITH_EDITS to fix minor issues is preferred over BLOCK "
+            f"when the core claims are source-backed."
+        )
+
     gpt3_user = (
         f"user_prompt:\n{req.prompt}\n\n"
         f"gpt1_output:\n{sanitized_output}\n\n"
         f"gpt2_result_json:\n{gpt2_json_for_arbiter}\n\n"
         f"prompt_flags:\n{flags_json}"
+        f"{search_evidence}"
     )
 
     gpt3_raw = call_openai(client, model, gpt3_system, gpt3_user, expect_json=True)
