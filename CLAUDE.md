@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-A FastAPI-based 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a Generator → Verifier → Arbiter architecture with the **Audit v7 epistemic framework** (priority stack V1-V7, global rules G1-G12, tripwire violations T1-T7). Includes Tavily web search integration, deterministic sanitization, convergence-aware rewrite loops, and a comprehensive stress-testing framework.
+A FastAPI-based 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a Generator → Verifier → Arbiter architecture with the **Audit v7 epistemic framework** (priority stack V1-V7, global rules G1-G12, tripwire violations T1-T7). Includes Tavily web search integration, deterministic sanitization, convergence-aware rewrite loops, multi-provider LLM support, atomic claim decomposition, optional NLI verification, and a comprehensive stress-testing framework.
 
-**Version:** 2.0.0 | **Python:** 3.11.11 | **Prompt Version:** 7.1.0 (Audit v7)
+**Version:** 3.0.0 | **Python:** 3.11.11 | **Prompt Version:** 7.1.0 (Audit v7)
 
 ## Repository Structure
 
@@ -31,9 +31,11 @@ pipeline/
   sanitizer.py          # Deterministic routing (route_prompt) and citation-aware output cleaning
   verifier.py           # GPT-2 JSON parsing (parse_gpt2), verdict computation, reasoning trace
   arbiter.py            # GPT-3 decision parsing (parse_gpt3), edit application
-  helpers.py            # Shared utilities: extract_json(), call_openai(), PipelineError
+  helpers.py            # Shared utilities: extract_json(), call_openai(), call_llm(), PipelineError
   search.py             # Tavily web search (should_search, perform_web_search)
   convergence.py        # Rewrite loop convergence detection (finding deltas, oscillation)
+  decomposer.py         # Atomic claim decomposition (pre-GPT-2 claim splitting)
+  nli.py                # Optional NLI verification layer (DeBERTa-v3 or remote service)
   stress.py             # Stress testing framework, PSS (Pipeline Stability Score)
 
 tests/
@@ -43,6 +45,9 @@ tests/
   test_verifier.py      # parse_gpt2() tests (~65+ tests)
   test_arbiter.py       # parse_gpt3(), apply_edits() tests
   test_convergence.py   # compute_finding_delta(), should_continue_rewrite() tests
+  test_decomposer.py    # decompose_claims() tests
+  test_multi_provider.py # Per-stage config, _make_client(), call_llm() dispatch tests
+  test_nli.py           # NLI verification layer tests
 
 n8n-workflows/          # n8n automation templates (verify, batch stress, health check)
 
@@ -77,6 +82,8 @@ User Prompt
   → GPT-1 (Generator)       # Produces response using Audit v7 + flag augmentation + search context
   → Activation bypass check  # Skip verification if output matches activation patterns
   → sanitize_output()       # Citation-aware: strip bare %, banned evidence, typicality; preserve cited stats
+  → decompose_claims()      # Atomic claim decomposition (pre-GPT-2, best-effort)
+  → verify_claims_with_nli() # Optional NLI pre-verification against evidence (if available)
   → GPT-2 (Verifier)        # Tripwire reference + task in user content (lost-in-middle fix)
                              # Chain-of-thought reasoning trace → claim table → T1-T7 findings → verdict
   → Decision tree:
@@ -102,6 +109,8 @@ User Prompt
 | POST | `/api/tavily/config` | Set Tavily API key at runtime |
 | GET | `/api/tavily/config` | Get current Tavily config |
 | POST | `/api/tavily/toggle` | Enable/disable web search |
+| POST | `/api/stage/config` | Set per-stage model config (provider/model/key) |
+| GET | `/api/stage/config/{stage}` | Get stage config (gpt1/gpt2/gpt3) |
 
 ## Environment Variables
 
@@ -113,11 +122,13 @@ User Prompt
 | `PORT` | No | `8000` | Server port |
 | `RATE_LIMIT_PER_MINUTE` | No | `20` | Per-IP request rate limit |
 | `PIPELINE_URL` | No | `http://localhost:8000` | Base URL for n8n workflows |
+| `NLI_SERVICE_URL` | No | — | Optional remote NLI service URL |
+| `ANTHROPIC_API_KEY` | No | — | Anthropic API key (if using Claude for any stage) |
 
 ## Running Tests
 
 ```bash
-python -m pytest tests/ -v          # Run all 227 tests
+python -m pytest tests/ -v          # Run all 279 tests
 python -m pytest tests/ -v -x       # Stop on first failure
 python -m pytest tests/test_sanitizer.py -v   # Run specific module
 ```

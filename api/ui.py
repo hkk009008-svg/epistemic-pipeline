@@ -301,6 +301,36 @@ body {
   margin-bottom: 14px;
 }
 .cfg-section-title.tavily { color: var(--accent-violet); }
+.cfg-section-title.stage { color: var(--accent-teal); }
+.stage-block { margin-bottom: 14px; padding: 10px 12px; background: var(--bg-surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.stage-block:last-of-type { margin-bottom: 0; }
+.stage-header { font-size: 10px; font-weight: 700; color: var(--accent-teal); letter-spacing: 0.06em; margin-bottom: 8px; text-transform: uppercase; }
+.stage-fields { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.stage-fields select, .stage-fields input {
+  font-size: 11px;
+  padding: 6px 8px;
+  background: var(--bg-root);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  outline: none;
+  transition: all var(--transition);
+}
+.stage-fields select:focus, .stage-fields input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(56,189,248,0.08);
+}
+.stage-fields select {
+  cursor: pointer; -webkit-appearance: none; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238899b0'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 8px center; padding-right: 22px;
+  flex: 0 0 auto;
+}
+.stage-fields select option { background: var(--bg-surface-1); color: var(--text-primary); }
+.stage-fields input { flex: 1; min-width: 0; }
+.stage-fields input::placeholder { color: var(--text-muted); font-family: var(--font-body); font-size: 10px; }
+.stage-fields .btn-s { padding: 6px 12px; font-size: 10px; flex-shrink: 0; }
 
 .cfg-in label {
   display: block;
@@ -1103,7 +1133,7 @@ body {
   line-height: 1.8;
   position: relative;
 }
-.stress-log::after {
+.stress-log::before {
   content: '';
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -1111,11 +1141,26 @@ body {
     0deg,
     transparent,
     transparent 2px,
-    rgba(56,189,248,0.008) 2px,
-    rgba(56,189,248,0.008) 4px
+    rgba(56,189,248,0.03) 2px,
+    rgba(56,189,248,0.03) 4px
   );
   pointer-events: none;
   border-radius: var(--radius-lg);
+  z-index: 1;
+}
+.stress-log::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  height: 6px;
+  background: linear-gradient(180deg, transparent, rgba(56,189,248,0.07), transparent);
+  pointer-events: none;
+  z-index: 2;
+  animation: scanline 4s linear infinite;
+}
+@keyframes scanline {
+  0% { top: 0; }
+  100% { top: 100%; }
 }
 .stress-log .pass { color: var(--accent-emerald); }
 .stress-log .fail { color: var(--accent-rose); }
@@ -1344,6 +1389,55 @@ body {
         <span>Enable web search enrichment</span>
       </label>
       <div class="cfg-st" id="ts">Loading...</div>
+    </div>
+
+    <div class="cfg-divider"></div>
+
+    <div class="cfg-section">
+      <div class="cfg-section-title stage">Per-Stage Model Config</div>
+      <div class="stage-block">
+        <div class="stage-header">GPT-1 &mdash; Generator</div>
+        <div class="stage-fields">
+          <select id="g1p">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <input id="g1m" placeholder="Model name">
+          <input id="g1k" type="password" placeholder="API key">
+          <button class="btn-s" onclick="savStage('gpt1','g1p','g1m','g1k')">Set</button>
+        </div>
+      </div>
+      <div class="stage-block">
+        <div class="stage-header">GPT-2 &mdash; Verifier</div>
+        <div class="stage-fields">
+          <select id="g2p">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <input id="g2m" placeholder="Model name">
+          <input id="g2k" type="password" placeholder="API key">
+          <button class="btn-s" onclick="savStage('gpt2','g2p','g2m','g2k')">Set</button>
+        </div>
+      </div>
+      <div class="stage-block">
+        <div class="stage-header">GPT-3 &mdash; Arbiter</div>
+        <div class="stage-fields">
+          <select id="g3p">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama</option>
+          </select>
+          <input id="g3m" placeholder="Model name">
+          <input id="g3k" type="password" placeholder="API key">
+          <button class="btn-s" onclick="savStage('gpt3','g3p','g3m','g3k')">Set</button>
+        </div>
+      </div>
+      <div class="cfg-st" id="stg-st">Falls back to global OpenAI config if not set</div>
     </div>
 
     <div class="cfg-divider"></div>
@@ -1605,6 +1699,27 @@ async function savTav() {
   });
   document.getElementById('tk').value = '';
   loadTav();
+}
+
+async function savStage(stage, selectId, modelId, keyId) {
+  const provider = document.getElementById(selectId).value;
+  const model = document.getElementById(modelId).value.trim();
+  const key = document.getElementById(keyId).value.trim();
+  if (!model && !key) return;
+  const st = document.getElementById('stg-st');
+  try {
+    await fetch('/api/stage/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({stage, provider, model, api_key: key || '', base_url: ''})
+    });
+    st.textContent = stage.toUpperCase() + ' set: ' + provider + '/' + (model || 'default');
+    st.className = 'cfg-st ok';
+    document.getElementById(keyId).value = '';
+  } catch(e) {
+    st.textContent = 'Error saving ' + stage;
+    st.className = 'cfg-st';
+  }
 }
 
 document.getElementById('te').addEventListener('change', async function() {

@@ -88,6 +88,17 @@ class PipelineResponse(BaseModel):
     search_sources: List[SearchSource] = []
     # Confidence scoring
     confidence: ConfidenceBreakdown = ConfidenceBreakdown()
+    # Atomic claim decomposition
+    atomic_claims: List[dict] = []
+    decomposition_ran: bool = False
+
+
+class StageConfig(BaseModel):
+    stage: str  # "gpt1", "gpt2", "gpt3"
+    provider: str = "openai"
+    api_key: str = ""
+    model: str = ""
+    base_url: str = ""
 
 
 class StressRequest(BaseModel):

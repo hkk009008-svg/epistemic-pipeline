@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from api.rate_limit import rate_limit_dependency
 
 import config
-from pipeline.models import OpenAIConfig, TavilyConfig, PipelineRequest, PipelineResponse, StressRequest
+from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, StressRequest
 from pipeline.helpers import PipelineError
 from pipeline.orchestrator import run_pipeline
 from pipeline.stress import generate_stress_results
@@ -88,6 +88,26 @@ def toggle_tavily(enabled: bool = True):
         raise HTTPException(status_code=400, detail="Set Tavily API key first.")
     config.set_tavily_enabled(enabled)
     return {"status": "ok", "enabled": enabled}
+
+
+# ---- Per-stage model config ----
+
+@router.post("/api/stage/config")
+def set_stage_config_endpoint(cfg: StageConfig):
+    clean_key = cfg.api_key.strip().encode("ascii", errors="ignore").decode("ascii").replace(" ", "")
+    config.set_stage_config(cfg.stage, cfg.provider, clean_key, cfg.model, cfg.base_url)
+    return {"status": "ok", "stage": cfg.stage, "provider": cfg.provider}
+
+
+@router.get("/api/stage/config/{stage}")
+def get_stage_config_endpoint(stage: str):
+    cfg = config.get_stage_config(stage)
+    return {
+        "stage": stage,
+        "provider": cfg["provider"],
+        "model": cfg["model"],
+        "key_set": bool(cfg["api_key"]),
+    }
 
 
 # ---- Pipeline ----

@@ -210,3 +210,45 @@ def sample_edits() -> list[EditEntry]:
         EditEntry(action="REWRITE", target="will improve your odds", replacement="may help with procedure; no guarantee"),
         EditEntry(action="MOVE_TO_UNKNOWN", target="73% success rate", replacement="Success rate is unknown."),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Atomic claim decomposition fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def decomposed_claims() -> list:
+    """Sample atomic claims from decomposer."""
+    return [
+        {"text": "Water boils at 100C at sea level.", "has_citation": False,
+         "is_unknown": False, "is_user_provided": False},
+        {"text": "The approval rate is 73%.", "has_citation": False,
+         "is_unknown": False, "is_user_provided": False},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# NLI result fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def nli_entailment_result() -> dict:
+    return {"label": "entailment", "scores": {"entailment": 0.92, "contradiction": 0.03, "neutral": 0.05}}
+
+
+@pytest.fixture
+def nli_contradiction_result() -> dict:
+    return {"label": "contradiction", "scores": {"entailment": 0.05, "contradiction": 0.88, "neutral": 0.07}}
+
+
+# ---------------------------------------------------------------------------
+# Convergence / findings history fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def findings_improving() -> list:
+    """Two sets of findings showing improvement."""
+    return [
+        [{"type": "T1", "severity": "hard"}, {"type": "T5", "severity": "soft"}],
+        [{"type": "T5", "severity": "soft"}],  # T1 resolved
+    ]
