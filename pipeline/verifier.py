@@ -48,15 +48,24 @@ def _all_soft(findings: List[dict]) -> bool:
 
 
 def parse_gpt2(raw: str, flags: Optional[dict] = None):
-    """Parse GPT-2 JSON output into claim_table, findings, violations, verdict.
+    """Parse GPT-2 JSON output into claim_table, findings, violations, verdict, reasoning.
 
     When *flags* is provided:
     - advice_requested=True: soft prescriptive findings without outcome-promise
       language are filtered out.
     - jurisdiction_present=True: "Missing jurisdiction" findings are filtered out.
+
+    Returns 5 values: (claim_table, violations, verdict, findings, reasoning_trace)
     """
     try:
         parsed = extract_json(raw)
+
+        # Extract reasoning trace (chain-of-thought)
+        reasoning_trace = parsed.get("reasoning_trace", [])
+        if not isinstance(reasoning_trace, list):
+            reasoning_trace = []
+        reasoning_trace = [str(s) for s in reasoning_trace]
+
         claim_table = [
             ClaimEntry(
                 claim=c.get("claim", ""),
@@ -119,11 +128,12 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None):
         else:
             verdict = "PASS"
 
-        return claim_table, violations, verdict, findings
+        return claim_table, violations, verdict, findings, reasoning_trace
     except Exception:
         return (
             [],
             ["GPT-2 parse error: could not extract valid JSON from response"],
             "FAIL",
             [{"type": "GPT-2 parse error", "severity": "hard", "detail": "could not extract valid JSON"}],
+            [],
         )

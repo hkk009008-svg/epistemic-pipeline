@@ -13,7 +13,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 PIPELINE_URL = os.getenv("PIPELINE_URL", "http://localhost:8000")
 PORT = int(os.getenv("PORT", "8000"))
-MAX_REWRITE_LOOPS = 1
+MAX_REWRITE_LOOPS = 3
 MAX_PROMPT_LENGTH = 10000
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
 

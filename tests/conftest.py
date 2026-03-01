@@ -24,6 +24,8 @@ def flags_advice_requested() -> dict:
         "legal_mode": False,
         "jurisdiction_present": False,
         "future_year": False,
+        "current_events": False,
+        "comparative": False,
     }
 
 
@@ -36,6 +38,8 @@ def flags_all_false() -> dict:
         "legal_mode": False,
         "jurisdiction_present": False,
         "future_year": False,
+        "current_events": False,
+        "comparative": False,
     }
 
 
@@ -48,6 +52,8 @@ def flags_legal_with_jurisdiction() -> dict:
         "legal_mode": True,
         "jurisdiction_present": True,
         "future_year": False,
+        "current_events": False,
+        "comparative": False,
     }
 
 

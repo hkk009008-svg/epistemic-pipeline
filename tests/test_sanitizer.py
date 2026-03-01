@@ -193,6 +193,8 @@ class TestRoutePromptCombined:
             "legal_mode": False,
             "jurisdiction_present": False,
             "future_year": False,
+            "current_events": False,
+            "comparative": False,
         }
 
 
@@ -329,3 +331,92 @@ class TestSanitizeOutputComposite:
         assert "Unknown(Actionable)" in result
         # Outcome promise removed
         assert "will improve" not in result.lower()
+
+
+class TestSanitizeOutputCitedPercent:
+    """Percentages with nearby citations should NOT be stripped (citation-aware sanitizer)."""
+
+    def test_percent_with_parenthetical_citation_kept(self, flags_all_false: dict):
+        text = "The approval rate is 73% (BLS 2024)."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable)" not in result
+        assert "73%" in result
+
+    def test_percent_with_bracket_citation_kept(self, flags_all_false: dict):
+        text = "About 60% of cases succeed [1]."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable)" not in result
+        assert "60%" in result
+
+    def test_percent_with_distant_citation_kept(self, flags_all_false: dict):
+        text = "The rate is approximately 45%, according to data from the Census Bureau (2023)."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable)" not in result
+
+    def test_percent_without_any_citation_stripped(self, flags_all_false: dict):
+        text = "About 80% of applicants qualify."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable)" in result
+
+    def test_percent_word_with_citation_kept(self, flags_all_false: dict):
+        text = "Roughly 60 percent of cases succeed (CDC 2023)."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable)" not in result
+
+    def test_percent_word_without_citation_stripped(self, flags_all_false: dict):
+        text = "Roughly 60 percent of cases succeed."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable)" in result
+
+    def test_mixed_cited_and_bare_percents(self, flags_all_false: dict):
+        """Only bare percents stripped; cited ones preserved."""
+        text = (
+            "The rate is 73% (BLS 2024). "
+            "Meanwhile, about 50% of other claims are unverified."
+        )
+        result = sanitize_output(text, flags_all_false)
+        # 73% has a citation — should survive
+        assert "73%" in result
+        # 50% has no citation — should be replaced
+        assert "Unknown(Actionable)" in result
+
+
+# ===================================================================
+# route_prompt() -- comparative flag
+# ===================================================================
+
+
+class TestRoutePromptComparative:
+    """Comparative-question detection flag."""
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Is chemotherapy or immunotherapy safer for lung cancer?",
+            "Which is better, surgery or radiation?",
+            "Is drug A more effective than drug B?",
+            "Are generic drugs as effective as brand-name ones?",
+            "Which has fewer side effects, aspirin or ibuprofen?",
+            "Is living in the city versus the suburbs healthier?",
+            "Does vaccine X cause more harm than vaccine Y?",
+            "Which is the safest option for treatment?",
+            "Is homeopathy as reliable as conventional medicine?",
+            "Is option A or option B better for recovery?",
+        ],
+    )
+    def test_comparative_detected(self, prompt: str):
+        flags = route_prompt(prompt)
+        assert flags["comparative"] is True
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "What is the capital of France?",
+            "Explain quantum entanglement.",
+            "Define photosynthesis.",
+            "How does gravity work?",
+        ],
+    )
+    def test_comparative_not_detected(self, prompt: str):
+        flags = route_prompt(prompt)
+        assert flags["comparative"] is False

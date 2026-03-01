@@ -54,7 +54,7 @@ class TestParseGpt2PassVerdict:
     """PASS verdicts with no findings."""
 
     def test_pass_verdict(self, gpt2_pass_json: str):
-        claim_table, violations, verdict, findings = parse_gpt2(gpt2_pass_json)
+        claim_table, violations, verdict, findings, reasoning = parse_gpt2(gpt2_pass_json)
         assert verdict == "PASS"
         assert violations == []
         assert findings == []
@@ -63,7 +63,7 @@ class TestParseGpt2PassVerdict:
         assert claim_table[0].category == "Supported"
 
     def test_pass_with_no_flags(self, gpt2_pass_json: str):
-        claim_table, violations, verdict, findings = parse_gpt2(gpt2_pass_json, flags=None)
+        claim_table, violations, verdict, findings, _ = parse_gpt2(gpt2_pass_json, flags=None)
         assert verdict == "PASS"
 
 
@@ -71,7 +71,7 @@ class TestParseGpt2HardFindings:
     """Hard findings always produce FAIL."""
 
     def test_single_hard_finding(self, gpt2_fail_hard_json: str):
-        claim_table, violations, verdict, findings = parse_gpt2(gpt2_fail_hard_json)
+        claim_table, violations, verdict, findings, _ = parse_gpt2(gpt2_fail_hard_json)
         assert verdict == "FAIL"
         assert len(findings) == 1
         assert findings[0]["severity"] == "hard"
@@ -80,7 +80,7 @@ class TestParseGpt2HardFindings:
 
     def test_hard_finding_with_any_flags(self, gpt2_fail_hard_json: str, flags_advice_requested: dict):
         """Hard findings cause FAIL regardless of flags."""
-        _, _, verdict, findings = parse_gpt2(gpt2_fail_hard_json, flags=flags_advice_requested)
+        _, _, verdict, findings, _ = parse_gpt2(gpt2_fail_hard_json, flags=flags_advice_requested)
         assert verdict == "FAIL"
         assert len(findings) == 1
 
@@ -89,7 +89,7 @@ class TestParseGpt2SoftAccumulation:
     """Three or more soft findings trigger FAIL."""
 
     def test_three_soft_findings_fail(self, gpt2_fail_soft_accumulation_json: str):
-        _, violations, verdict, findings = parse_gpt2(gpt2_fail_soft_accumulation_json)
+        _, violations, verdict, findings, _ = parse_gpt2(gpt2_fail_soft_accumulation_json)
         assert verdict == "FAIL"
         assert len(findings) == 3
         assert all(f["severity"] == "soft" for f in findings)
@@ -104,7 +104,7 @@ class TestParseGpt2SoftAccumulation:
             ],
             "verdict": "FAIL",  # GPT-2 may say FAIL, but we recompute
         })
-        _, _, verdict, findings = parse_gpt2(raw)
+        _, _, verdict, findings, _ = parse_gpt2(raw)
         assert verdict == "PASS"
         assert len(findings) == 2
 
@@ -117,7 +117,7 @@ class TestParseGpt2SoftAccumulation:
             ],
             "verdict": "FAIL",
         })
-        _, _, verdict, _ = parse_gpt2(raw)
+        _, _, verdict, _, _ = parse_gpt2(raw)
         assert verdict == "PASS"
 
 
@@ -135,7 +135,7 @@ class TestParseGpt2VerdictRecomputation:
             "findings": [],
             "verdict": "FAIL",
         })
-        _, _, verdict, _ = parse_gpt2(raw)
+        _, _, verdict, _, _ = parse_gpt2(raw)
         assert verdict == "PASS"
 
     def test_gpt2_says_pass_but_hard_finding_gives_fail(self):
@@ -146,7 +146,7 @@ class TestParseGpt2VerdictRecomputation:
             ],
             "verdict": "PASS",
         })
-        _, _, verdict, findings = parse_gpt2(raw)
+        _, _, verdict, findings, _ = parse_gpt2(raw)
         assert verdict == "FAIL"
         assert len(findings) == 1
 
@@ -159,7 +159,7 @@ class TestParseGpt2VerdictRecomputation:
             ],
             "verdict": "PASS",
         })
-        _, _, verdict, _ = parse_gpt2(raw)
+        _, _, verdict, _, _ = parse_gpt2(raw)
         assert verdict == "FAIL"
 
 
@@ -174,7 +174,7 @@ class TestParseGpt2PrescriptiveCreepFiltering:
     def test_prescriptive_creep_dropped_when_advice_requested(
         self, gpt2_prescriptive_creep_no_outcome_json: str, flags_advice_requested: dict
     ):
-        _, violations, verdict, findings = parse_gpt2(
+        _, violations, verdict, findings, _ = parse_gpt2(
             gpt2_prescriptive_creep_no_outcome_json, flags=flags_advice_requested
         )
         assert verdict == "PASS"
@@ -184,7 +184,7 @@ class TestParseGpt2PrescriptiveCreepFiltering:
     def test_prescriptive_creep_kept_when_no_advice_flag(
         self, gpt2_prescriptive_creep_no_outcome_json: str, flags_all_false: dict
     ):
-        _, violations, verdict, findings = parse_gpt2(
+        _, violations, verdict, findings, _ = parse_gpt2(
             gpt2_prescriptive_creep_no_outcome_json, flags=flags_all_false
         )
         assert verdict == "PASS"  # 1 soft < 3 threshold
@@ -195,14 +195,14 @@ class TestParseGpt2PrescriptiveCreepFiltering:
         self, gpt2_prescriptive_creep_no_outcome_json: str
     ):
         """No flags at all -- prescriptive creep is NOT filtered."""
-        _, _, verdict, findings = parse_gpt2(gpt2_prescriptive_creep_no_outcome_json)
+        _, _, verdict, findings, _ = parse_gpt2(gpt2_prescriptive_creep_no_outcome_json)
         assert len(findings) == 1
 
     def test_prescriptive_creep_with_outcome_kept_even_with_advice_flag(
         self, gpt2_prescriptive_creep_with_outcome_json: str, flags_advice_requested: dict
     ):
         """Outcome-promise language means the finding is kept even when advice is requested."""
-        _, violations, verdict, findings = parse_gpt2(
+        _, violations, verdict, findings, _ = parse_gpt2(
             gpt2_prescriptive_creep_with_outcome_json, flags=flags_advice_requested
         )
         assert len(findings) == 1
@@ -222,7 +222,7 @@ class TestParseGpt2PrescriptiveCreepFiltering:
             ],
             "verdict": "FAIL",
         })
-        _, _, verdict, findings = parse_gpt2(raw, flags=flags_advice_requested)
+        _, _, verdict, findings, _ = parse_gpt2(raw, flags=flags_advice_requested)
         assert verdict == "FAIL"
         assert len(findings) == 1
 
@@ -237,7 +237,7 @@ class TestParseGpt2PrescriptiveCreepFiltering:
             ],
             "verdict": "FAIL",
         })
-        _, _, verdict, findings = parse_gpt2(raw, flags=flags_advice_requested)
+        _, _, verdict, findings, _ = parse_gpt2(raw, flags=flags_advice_requested)
         # Two prescriptive creep entries filtered, leaving 1 soft -> PASS
         assert verdict == "PASS"
         assert len(findings) == 1
@@ -260,7 +260,7 @@ class TestParseGpt2BackwardCompat:
             "violations": ["Unsupported evidence reference", "Overconfidence"],
             "verdict": "FAIL",
         })
-        claim_table, violations, verdict, findings = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
         assert len(findings) == 2
         assert all(f["severity"] == "soft" for f in findings)
         assert findings[0]["type"] == "Unsupported evidence reference"
@@ -274,7 +274,7 @@ class TestParseGpt2BackwardCompat:
             "violations": ["A", "B", "C"],
             "verdict": "FAIL",
         })
-        _, _, verdict, findings = parse_gpt2(raw)
+        _, _, verdict, findings, _ = parse_gpt2(raw)
         assert verdict == "FAIL"
         assert len(findings) == 3
 
@@ -288,21 +288,21 @@ class TestParseGpt2MalformedInput:
     """Malformed or unparseable input should produce a hard parse error."""
 
     def test_garbage_string(self):
-        claim_table, violations, verdict, findings = parse_gpt2("not json at all !!!")
+        claim_table, violations, verdict, findings, _ = parse_gpt2("not json at all !!!")
         assert verdict == "FAIL"
         assert claim_table == []
         assert any("parse error" in v.lower() for v in violations)
         assert findings[0]["severity"] == "hard"
 
     def test_empty_string(self):
-        _, violations, verdict, findings = parse_gpt2("")
+        _, violations, verdict, findings, _ = parse_gpt2("")
         assert verdict == "FAIL"
         assert len(findings) == 1
         assert findings[0]["severity"] == "hard"
 
     def test_valid_json_but_wrong_schema(self):
         raw = json.dumps({"foo": "bar"})
-        claim_table, violations, verdict, findings = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
         # No claim_table, no findings -> should PASS (no hard/soft findings)
         assert verdict == "PASS"
         assert claim_table == []
@@ -312,7 +312,7 @@ class TestParseGpt2MalformedInput:
         """Truncated JSON that extract_json cannot fix."""
         raw = '{"claim_table": [{"claim": "test"'
         # extract_json might fix this or not -- either way parse_gpt2 should not crash
-        claim_table, violations, verdict, findings = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
         # Result depends on whether extract_json can recover; just check no exception
         assert verdict in ("PASS", "FAIL")
 
@@ -335,7 +335,7 @@ class TestParseGpt2ClaimTable:
             "findings": [],
             "verdict": "PASS",
         })
-        claim_table, _, _, _ = parse_gpt2(raw)
+        claim_table, _, _, _, _ = parse_gpt2(raw)
         assert len(claim_table) == 3
         assert claim_table[0].claim == "Claim A"
         assert claim_table[1].category == "Inference"
@@ -350,7 +350,7 @@ class TestParseGpt2ClaimTable:
             "findings": [],
             "verdict": "PASS",
         })
-        claim_table, _, _, _ = parse_gpt2(raw)
+        claim_table, _, _, _, _ = parse_gpt2(raw)
         assert len(claim_table) == 1
         assert claim_table[0].claim == "Only claim field."
         assert claim_table[0].category == "Unknown"
@@ -362,7 +362,7 @@ class TestParseGpt2ClaimTable:
             "findings": [],
             "verdict": "PASS",
         })
-        claim_table, _, _, _ = parse_gpt2(raw)
+        claim_table, _, _, _, _ = parse_gpt2(raw)
         assert claim_table == []
 
 
@@ -381,7 +381,7 @@ class TestParseGpt2MarkdownWrapped:
             "verdict": "PASS",
         })
         raw = f"```json\n{inner}\n```"
-        claim_table, violations, verdict, findings = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
         assert verdict == "PASS"
         assert len(claim_table) == 1
 
@@ -392,6 +392,58 @@ class TestParseGpt2MarkdownWrapped:
             "verdict": "FAIL",
         })
         raw = f"Here is the verification result:\n```json\n{inner}\n```"
-        _, _, verdict, findings = parse_gpt2(raw)
+        _, _, verdict, findings, _ = parse_gpt2(raw)
         assert len(findings) == 1
         assert verdict == "PASS"  # Only 1 soft -> PASS
+
+
+# ===================================================================
+# parse_gpt2() -- reasoning trace extraction
+# ===================================================================
+
+
+class TestParseGpt2ReasoningTrace:
+    """parse_gpt2 extracts reasoning_trace from GPT-2 JSON output."""
+
+    def test_reasoning_trace_extracted(self):
+        raw = json.dumps({
+            "reasoning_trace": [
+                "Step 1: Checking claim about boiling point...",
+                "Step 2: No findings detected.",
+            ],
+            "claim_table": [
+                {"claim": "Water boils at 100C.", "category": "Observed", "justification": "Physics."}
+            ],
+            "findings": [],
+            "verdict": "PASS",
+        })
+        _, _, verdict, _, reasoning = parse_gpt2(raw)
+        assert verdict == "PASS"
+        assert len(reasoning) == 2
+        assert "boiling point" in reasoning[0]
+
+    def test_reasoning_trace_missing_returns_empty_list(self):
+        """If reasoning_trace is not in JSON, return empty list."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [],
+            "verdict": "PASS",
+        })
+        _, _, _, _, reasoning = parse_gpt2(raw)
+        assert reasoning == []
+
+    def test_reasoning_trace_non_list_returns_empty(self):
+        """If reasoning_trace is not a list, return empty list."""
+        raw = json.dumps({
+            "reasoning_trace": "not a list",
+            "claim_table": [],
+            "findings": [],
+            "verdict": "PASS",
+        })
+        _, _, _, _, reasoning = parse_gpt2(raw)
+        assert reasoning == []
+
+    def test_malformed_input_returns_empty_reasoning(self):
+        """Malformed input should produce empty reasoning."""
+        _, _, _, _, reasoning = parse_gpt2("garbage")
+        assert reasoning == []

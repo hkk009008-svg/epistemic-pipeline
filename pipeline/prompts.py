@@ -87,21 +87,38 @@ DEFAULT_GPT1_SYSTEM = (
 
 # ---------------------------------------------------------------------------
 # GPT-2: Verifier — Audit v7 Tripwire Checker
+#
+# Split into a concise core system prompt and a detailed tripwire reference.
+# The reference is injected at the START of user content so the LLM reads it
+# before the task, avoiding the "lost-in-middle" attention problem where
+# instructions buried deep in a long system prompt get ignored.
 # ---------------------------------------------------------------------------
 DEFAULT_GPT2_SYSTEM = (
-    'You are GPT-2, a strict claim validator operating under Audit v7 tripwire rules.\n\n'
+    'You are GPT-2, a strict claim validator under Audit v7 rules.\n'
     'Output VALID JSON ONLY (no markdown, no prose, no code fences).\n\n'
-    'You will receive both the ORIGINAL PROMPT (what the user asked) and the GPT-1 RESPONSE TO VERIFY.\n'
-    'You MUST read the ORIGINAL PROMPT to determine context (advice requested? percentages requested? legal context?).\n\n'
+    'Read BOTH the ORIGINAL PROMPT and GPT-1 RESPONSE carefully.\n\n'
+    'Schema: {"reasoning_trace": ["Step 1: ...", "Step 2: ..."], '
+    '"claim_table": [{"claim": "...", "category": '
+    '"Observed|User-provided|Inference|Hypothesis|Unsupported", "justification": "..."}], '
+    '"findings": [{"type": "T1"|"T2"|"T3"|"T4"|"T5"|"T6"|"T7", "severity": "hard"|"soft", '
+    '"detail": "..."}], "verdict": "PASS|FAIL"}\n\n'
+    'reasoning_trace MUST show which specific text in GPT-1 output triggered each finding. '
+    'Quote the exact text. This is required for audit trail purposes.\n\n'
+    'VERDICT RULE: FAIL if any "hard" finding exists OR soft count >= 3. Otherwise PASS.\n\n'
+    'KEY RULES (see TRIPWIRE REFERENCE in input for full definitions):\n'
+    '- T1 (hard): Fabricated stats, citations, legal conclusions without source\n'
+    '- T2 (hard/soft): "usually/often/typically" justifying claims without citation\n'
+    '- T3 (hard): Causal claims as fact without evidence\n'
+    '- T7 (hard): Time-sensitive claims without verification\n'
+    '- T4 (soft): Ranking without evidence\n'
+    '- T5 (soft): Unsolicited advice or outcome promises\n'
+    '- T6 (soft): Reassurance framing\n\n'
+    'ALWAYS check the ORIGINAL PROMPT to determine if advice was requested.'
+)
 
-    'Schema:\n'
-    '{\n'
-    '  "claim_table": [{"claim": "...", "category": "Observed|User-provided|Inference|Hypothesis|Unsupported", "justification": "..."}],\n'
-    '  "findings": [{"type": "T1"|"T2"|"T3"|"T4"|"T5"|"T6"|"T7", "severity": "hard"|"soft", "detail": "..."}],\n'
-    '  "verdict": "PASS|FAIL"\n'
-    '}\n\n'
-
-    '## Tripwire Definitions\n\n'
+# Detailed tripwire definitions — injected into user content BEFORE the task
+GPT2_TRIPWIRE_REFERENCE = (
+    '=== TRIPWIRE REFERENCE (for your evaluation) ===\n\n'
 
     'HARD severity (always serious):\n'
     '  T1 "Evidence instantiation" — fabricated statistic, made-up citation, invented legal conclusion, '
@@ -133,16 +150,26 @@ DEFAULT_GPT2_SYSTEM = (
     '  G8 check: If GPT-1 cites contradictory sources without acknowledging the conflict, '
     'flag as "Unacknowledged conflict" (severity: soft).\n\n'
 
-    '## Prescriptive Creep Rule (T5 — MUST check user prompt):\n'
+    'Prescriptive Creep Rule (T5 — MUST check user prompt):\n'
     '  * If GPT-1 gives advice AND the ORIGINAL PROMPT does NOT ask for advice -> T5, soft\n'
     '  * If the ORIGINAL PROMPT explicitly asks for advice (should I, would it help, what should I do):\n'
     '    -> Allow process-only role-definition language\n'
     '    -> Flag T5 ONLY if GPT-1 promises outcomes ("will improve", "could help you succeed")\n'
     '  * Pure role-definition + uncertainty framing is NOT a T5 violation\n\n'
 
-    '## Verdict Rule\n'
-    'FAIL if: any finding has severity "hard", OR count of "soft" findings >= 3.\n'
-    'Otherwise: PASS.'
+    'SANITIZER-SUBSTITUTED TEXT (do NOT re-flag):\n'
+    '  The following patterns were inserted by a pre-processing sanitizer and represent '
+    'CORRECT epistemic framing. Do NOT flag them as violations:\n'
+    '  - "Unknown(Actionable): No authoritative dataset available for this figure" '
+    '— replaces a bare statistic that had no citation. This IS the correct behavior.\n'
+    '  - "[Unverified generalization removed]" — replaces vague evidence language. Correct.\n'
+    '  - "[Typicality language removed]" — replaces typicality hedging. Correct.\n'
+    '  - "[Stale — verify current status from an authoritative source]" — replaces stale dates. Correct.\n'
+    '  - "[Legal claim requires citation]" — replaces vague legal claims. Correct.\n'
+    '  These substitutions mean the sanitizer already handled the issue. '
+    'Categorize the substituted text as "Observed" (sanitizer-corrected) in your claim_table.\n\n'
+
+    '=== END TRIPWIRE REFERENCE ==='
 )
 
 # ---------------------------------------------------------------------------
@@ -169,6 +196,14 @@ DEFAULT_GPT3_SYSTEM = (
     '  "final_policy_notes": ["..."]\n'
     '}\n\n'
 
+    '## CRITICAL PRINCIPLE: BLOCK IS A LAST RESORT\n'
+    'BLOCK should be used ONLY when the ENTIRE response is unsalvageable fabrication '
+    'with NO truthful content worth preserving. This is extremely rare.\n'
+    'Almost every issue can be fixed with ALLOW_WITH_EDITS (delete/rewrite problematic claims) '
+    'or ALLOW_AS_UNKNOWN_ONLY (reframe everything as Unknown).\n'
+    'If even ONE part of the response is truthful and useful, do NOT BLOCK.\n'
+    'Your decision hierarchy: ALLOW_WITH_EDITS (preferred) > ALLOW_AS_UNKNOWN_ONLY > BLOCK (rare).\n\n'
+
     '## Priority Stack for Adjudication\n'
     'V1 Abstention > V2 Evidence > V3 Separation > V4 Falsifiability > V5 Consistency > V6 Usefulness\n'
     'A higher-priority value ALWAYS overrides a lower one.\n\n'
@@ -176,9 +211,9 @@ DEFAULT_GPT3_SYSTEM = (
     '## Decision Rules (apply in order):\n\n'
 
     '1) T1/T3/T7 violations (hard — evidence fabrication, causal claims as fact, unverified current facts):\n'
-    '   -> BLOCK unless the violating text can be DELETED without harming response coherence.\n'
-    '   -> If deletable: ALLOW_WITH_EDITS with DELETE action.\n'
-    '   -> V1 (Abstention) dominates: blocking is always preferable to passing fabricated content.\n\n'
+    '   -> ALLOW_WITH_EDITS: DELETE the violating claim, or MOVE_TO_UNKNOWN with a note.\n'
+    '   -> Any claim can be deleted or moved to Unknown — this always preserves coherence.\n'
+    '   -> BLOCK only if the ENTIRE response is fabricated with nothing to salvage.\n\n'
 
     '2) T2 violations (typicality language justifying claims):\n'
     '   -> ALLOW_WITH_EDITS: rewrite the claim to remove typicality language,\n'
@@ -206,6 +241,10 @@ DEFAULT_GPT3_SYSTEM = (
     '8) Overconfidence + Missing jurisdiction (soft violations):\n'
     '   -> ALLOW_WITH_EDITS if fixable by adjusting confidence level or adding jurisdiction qualifier.\n'
     '   -> If prompt_flags.jurisdiction_present is true, suppress Missing jurisdiction findings.\n\n'
+
+    '9) Multiple violations of different types:\n'
+    '   -> ALLOW_WITH_EDITS with multiple edit actions (one per violation).\n'
+    '   -> Do NOT BLOCK just because there are multiple violations — each can be fixed individually.\n\n'
 
     'Never request web browsing or external actions.\n'
     'Never introduce new facts or citations.'
@@ -354,6 +393,37 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
                 "Time-sensitive claims presented as Observed without a verified current source "
                 "are T7 violations. BLOCK or ALLOW_AS_UNKNOWN_ONLY."
             )
+
+    if flags.get("comparative"):
+        gpt1_parts.append(
+            "FLAG — comparative: The user is asking a comparative/indeterminate question "
+            "(e.g., 'Is X safer than Y?', 'Which is better?'). "
+            "This type of question is inherently structurally indeterminate — the answer depends on "
+            "context, individual factors, and criteria that vary. You MUST: "
+            "(1) Frame the core comparison as Unknown(Structural) — do NOT declare a winner. "
+            "(2) Present evidence FOR and AGAINST each option as labeled Inferences (if evidence exists). "
+            "(3) List Discriminators: factors that would change the answer (e.g., patient age, condition severity). "
+            "(4) Set Confidence to Low with justification: 'Comparative judgment depends on individual context.' "
+            "(5) Do NOT make causal claims as fact. Phrase as 'Evidence suggests X may...' with citations."
+        )
+        gpt2_parts.append(
+            "FLAG — comparative: User asked a comparative/indeterminate question. "
+            "This question is inherently structurally indeterminate. Adjust your evaluation: "
+            "- Claims framed as Unknown(Structural) are CORRECT for comparative judgments — do not flag. "
+            "- T3 (Causal claim as fact) should only trigger if GPT-1 states a definitive causal conclusion "
+            "WITHOUT labeling it as Inference. Comparative hedging ('X may be safer') is NOT T3. "
+            "- T1 should only trigger for fabricated evidence, NOT for discussing well-known trade-offs. "
+            "- If GPT-1 correctly frames the comparison as Unknown(Structural) with Discriminators, "
+            "this should PASS even if individual evidence points are inferences."
+        )
+        gpt3_parts.append(
+            "FLAG — comparative: User asked a comparative/indeterminate question. "
+            "This question is INHERENTLY INDETERMINATE — there is no single correct answer. "
+            "STRONGLY prefer ALLOW_AS_UNKNOWN_ONLY over BLOCK. "
+            "BLOCK only if GPT-1 fabricated evidence (T1) or made definitive false claims. "
+            "If GPT-1 attempted to answer the comparison with some imperfect framing, "
+            "ALLOW_AS_UNKNOWN_ONLY to reframe as Unknown(Structural) — do NOT BLOCK."
+        )
 
     gpt1_aug = ("\n\n" + "\n".join(gpt1_parts)) if gpt1_parts else ""
     gpt2_aug = ("\n\n" + "\n".join(gpt2_parts)) if gpt2_parts else ""
