@@ -389,20 +389,39 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     re_gpt2_raw = call_openai(client, model, gpt2_system, re_gpt2_user, expect_json=True)
     re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
 
-    # If still failing on soft-only violations after arbiter rewrite, force Unknown-only
-    # and re-verify. Convergence detection decides whether to continue.
+    # If still failing after arbiter rewrite, continue rewriting.
+    # The arbiter decided ALLOW_WITH_EDITS (not BLOCK), meaning it believes
+    # the issues are fixable. Trust that decision and iterate on both hard
+    # and soft findings. Convergence detection stops on oscillation/regression.
     findings_history = [findings, re_findings]  # Initial GPT-2 findings + first re-verify
 
-    while re_verdict == "FAIL" and _all_soft(re_findings) and should_continue_rewrite(findings_history, max_loops=max_rewrite_loops):
-        unknown_prompt = (
-            f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
-            f"Remaining soft violations could not be resolved. "
-            f"Rewrite your response so that ALL claims are framed as Unknown(Actionable) or Unknown(Structural).\n"
-            f"Do NOT make conclusions. Do NOT add new facts. Output the corrected response in full."
-        )
-        rewrite_output = call_openai(client, model, gpt1_system, unknown_prompt)
+    while re_verdict == "FAIL" and should_continue_rewrite(findings_history, max_loops=max_rewrite_loops):
+        # Tailor the rewrite instruction based on finding severity
+        if _all_soft(re_findings):
+            rewrite_instruction = (
+                f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
+                f"Remaining soft violations could not be resolved. "
+                f"Rewrite your response so that ALL claims are framed as Unknown(Actionable) or Unknown(Structural).\n"
+                f"Do NOT make conclusions. Do NOT add new facts. Output the corrected response in full."
+            )
+        else:
+            # Hard findings remain — instruct specific fixes
+            hard_details = "; ".join(
+                f'{f["type"]}: {f["detail"]}'
+                for f in re_findings if f.get("severity") == "hard"
+            )
+            rewrite_instruction = (
+                f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
+                f"The following HARD violations were detected and must be fixed:\n{hard_details}\n\n"
+                f"For each violation: either DELETE the problematic claim entirely, "
+                f"or MOVE it to Unknown(Actionable) with a note that verification is needed.\n"
+                f"Do NOT fabricate citations. Do NOT invent statistics.\n"
+                f"Set Confidence to Low if you remove core claims.\n"
+                f"Output the corrected response in full."
+            )
+        rewrite_output = call_openai(client, model, gpt1_system, rewrite_instruction)
         rewrite_output = sanitize_output(rewrite_output, flags)
-        # Re-verify instead of force-passing
+        # Re-verify
         re_gpt2_user = (
             f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
             f"=== TASK ===\n"

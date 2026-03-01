@@ -157,6 +157,18 @@ GPT2_TRIPWIRE_REFERENCE = (
     '    -> Flag T5 ONLY if GPT-1 promises outcomes ("will improve", "could help you succeed")\n'
     '  * Pure role-definition + uncertainty framing is NOT a T5 violation\n\n'
 
+    'SANITIZER-SUBSTITUTED TEXT (do NOT re-flag):\n'
+    '  The following patterns were inserted by a pre-processing sanitizer and represent '
+    'CORRECT epistemic framing. Do NOT flag them as violations:\n'
+    '  - "Unknown(Actionable): No authoritative dataset available for this figure" '
+    '— replaces a bare statistic that had no citation. This IS the correct behavior.\n'
+    '  - "[Unverified generalization removed]" — replaces vague evidence language. Correct.\n'
+    '  - "[Typicality language removed]" — replaces typicality hedging. Correct.\n'
+    '  - "[Stale — verify current status from an authoritative source]" — replaces stale dates. Correct.\n'
+    '  - "[Legal claim requires citation]" — replaces vague legal claims. Correct.\n'
+    '  These substitutions mean the sanitizer already handled the issue. '
+    'Categorize the substituted text as "Observed" (sanitizer-corrected) in your claim_table.\n\n'
+
     '=== END TRIPWIRE REFERENCE ==='
 )
 
