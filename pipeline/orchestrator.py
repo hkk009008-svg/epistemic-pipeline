@@ -6,12 +6,13 @@ import json
 import openai
 
 import config
-from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown
+from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown, SearchSource
 from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_openai, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft
 from pipeline.arbiter import parse_gpt3, apply_edits
+from pipeline.search import should_search, perform_web_search
 
 
 def compute_confidence(claim_table: list) -> ConfidenceBreakdown:
@@ -87,6 +88,55 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt2_system += gpt2_aug
     gpt3_system += gpt3_aug
 
+    # ---- Web Search Enrichment (before GPT-1) ----
+    search_sources: list[SearchSource] = []
+    search_context = ""
+    search_performed = False
+
+    if should_search(flags):
+        search_sources, search_context = perform_web_search(req.prompt)
+        search_performed = len(search_sources) > 0
+
+    gpt1_user_content = req.prompt
+    if search_performed and search_context:
+        gpt1_system += (
+            "\n\nWEB SEARCH RESULTS are provided below the user's question. "
+            "You MUST ground your response in these sources. "
+            "When citing a fact from a source, reference it as [1], [2], etc. "
+            "If a source provides a specific statistic, you may quote it with the citation. "
+            "Do NOT fabricate additional sources beyond what is provided. "
+            "If the sources do not contain the answer, state Unknown (Actionable)."
+        )
+        gpt1_user_content = (
+            f"{req.prompt}\n\n"
+            f"--- WEB SEARCH RESULTS ---\n"
+            f"{search_context}\n"
+            f"--- END SEARCH RESULTS ---"
+        )
+
+        # Augment GPT-2 to recognize the provided sources
+        source_summary = "; ".join(
+            f'[{i}] "{s.title}" ({s.url})' for i, s in enumerate(search_sources, 1)
+        )
+        gpt2_system += (
+            "\n\nIMPORTANT: GPT-1 was given web search results from the following sources:\n"
+            f"{source_summary}\n\n"
+            "When evaluating claims:\n"
+            "- If a claim cites one of these sources (e.g., [1], [2]) and the source snippet "
+            "supports the claim, categorize it as 'Supported' (not 'Unsupported').\n"
+            "- A statistic that is attributed to a provided source is NOT 'Fabricated' or "
+            "'Unverified' -- categorize it as 'Supported'.\n"
+            "- If GPT-1 cites a source number that does not exist in the list above, "
+            "flag it as 'Fabricated citation'.\n"
+            "- Claims NOT backed by any provided source should still be evaluated normally."
+        )
+
+    search_kwargs = dict(
+        search_performed=search_performed,
+        search_query=req.prompt if search_performed else "",
+        search_sources=search_sources,
+    )
+
     # Empty defaults for response
     empty_response = dict(
         arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
@@ -96,7 +146,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     )
 
     # ---- Step 1: GPT-1 Generate ----
-    gpt1_output = call_openai(client, model, gpt1_system, req.prompt)
+    gpt1_output = call_openai(client, model, gpt1_system, gpt1_user_content)
 
     # ---- Activation bypass ----
     if is_activation_phrase(gpt1_output):
@@ -107,7 +157,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             final_verdict="PASS", final_result=gpt1_output,
             prompt_flags=flags, sanitizer_applied=False,
             confidence=compute_confidence([]),
-            **empty_response,
+            **empty_response, **search_kwargs,
         )
 
     # ---- Deterministic sanitizer (pre-clean before GPT-2) ----
@@ -129,7 +179,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             final_verdict="PASS", final_result=sanitized_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
             confidence=compute_confidence(claim_table),
-            **empty_response,
+            **empty_response, **search_kwargs,
         )
 
     # ---- GPT-2 FAIL: soft-only auto-repair path ----
@@ -154,6 +204,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 final_verdict="PASS", final_result=sanitized_output,
                 prompt_flags=flags, sanitizer_applied=True,
                 confidence=compute_confidence(re_ct),
+                **search_kwargs,
             )
         # Auto-repair didn't clear it -- fall through to arbiter below
 
@@ -193,6 +244,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             final_verdict="FAIL", final_result="NO PASS",
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
             confidence=compute_confidence(claim_table),
+            **search_kwargs,
         )
 
     # ---- Decision: ALLOW_AS_UNKNOWN_ONLY ----
@@ -226,6 +278,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             final_result=rewrite_output if re_verdict == "PASS" else "NO PASS",
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
             confidence=compute_confidence(re_ct),
+            **search_kwargs,
         )
 
     # ---- Decision: ALLOW_WITH_EDITS ----
@@ -269,4 +322,5 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         final_result=rewrite_output if re_verdict == "PASS" else "NO PASS",
         prompt_flags=flags, sanitizer_applied=sanitizer_applied,
         confidence=compute_confidence(re_ct),
+        **search_kwargs,
     )

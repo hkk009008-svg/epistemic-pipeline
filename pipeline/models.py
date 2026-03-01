@@ -10,6 +10,18 @@ class OpenAIConfig(BaseModel):
     model: str = "gpt-4o-mini"
 
 
+class TavilyConfig(BaseModel):
+    api_key: str
+    enabled: bool = True
+
+
+class SearchSource(BaseModel):
+    title: str
+    url: str
+    snippet: str
+    score: float = 0.0
+
+
 class ClaimEntry(BaseModel):
     claim: str
     category: str
@@ -69,6 +81,10 @@ class PipelineResponse(BaseModel):
     # Prompt routing / sanitizer metadata
     prompt_flags: Optional[dict] = None
     sanitizer_applied: bool = False
+    # Web search enrichment
+    search_performed: bool = False
+    search_query: str = ""
+    search_sources: List[SearchSource] = []
     # Confidence scoring
     confidence: ConfidenceBreakdown = ConfidenceBreakdown()
 

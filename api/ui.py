@@ -51,6 +51,12 @@ UI_HTML = """
   .b.g2 .w { color: #ff8a65; }
   .b.g3 { align-self: flex-start; background: #1a0a1a; border: 1px solid #3a1540; color: #dcc; font-size: 13px; white-space: normal; }
   .b.g3 .w { color: #ce93d8; }
+  .b.sr { align-self: flex-start; background: #140a2a; border: 1px solid #2a1560; color: #c8b8e8; font-size: 13px; white-space: normal; }
+  .b.sr .w { color: #b39ddb; }
+  .b.sr a { color: #9575cd; text-decoration: underline; }
+  .b.sr .src-tbl { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+  .b.sr .src-tbl th { text-align: left; padding: 4px 8px; color: #888; border-bottom: 1px solid #2a2a2a; font-size: 10px; text-transform: uppercase; }
+  .b.sr .src-tbl td { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
   .b.rw { align-self: flex-start; background: #0a1a1a; border: 1px solid #154040; color: #8dd; font-size: 13px; white-space: pre-wrap; }
   .b.rw .w { color: #4db6ac; }
   .b.rv { align-self: flex-start; background: #1a1a0a; border: 1px solid #3a3515; color: #bba; font-size: 13px; white-space: normal; }
@@ -195,6 +201,18 @@ UI_HTML = """
       <button class="btn-s" onclick="sav()">Save</button>
     </div>
     <div class="cfg-st" id="ks">No key set</div>
+
+    <div style="border-top:1px solid #222;margin:14px 0 10px;"></div>
+    <label style="font-size:12px;color:#b39ddb;font-weight:700;">Web Search (Tavily)</label>
+    <div class="cfg-row">
+      <input id="tk" type="password" placeholder="tvly-...">
+      <button class="btn-s" onclick="savTav()">Save</button>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:6px;">
+      <input id="te" type="checkbox" style="width:auto;">
+      <span style="font-size:12px;color:#999;">Enable web search enrichment</span>
+    </label>
+    <div class="cfg-st" id="ts">Loading...</div>
 
     <label>GPT-1 System Prompt (Generator)</label>
     <textarea id="g1s" rows="4">You are GPT-1, a structured reasoning and synthesis engine.
@@ -412,6 +430,59 @@ async function sav() {
   lc();
 }
 
+async function loadTav() {
+  const st = document.getElementById('ts');
+  try {
+    const r = await fetch('/api/tavily/config');
+    const d = await r.json();
+    if (d.key_set) {
+      document.getElementById('te').checked = d.enabled;
+      st.textContent = d.enabled ? 'Search enabled' : 'Search disabled';
+      st.className = d.enabled ? 'cfg-st ok' : 'cfg-st';
+    } else {
+      document.getElementById('te').checked = false;
+      st.textContent = 'No Tavily key set';
+      st.className = 'cfg-st';
+    }
+  } catch(e) { st.textContent = 'Error loading config'; }
+}
+
+async function savTav() {
+  const k = document.getElementById('tk').value.trim();
+  if (!k) return;
+  const en = document.getElementById('te').checked;
+  await fetch('/api/tavily/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({api_key: k, enabled: en})
+  });
+  document.getElementById('tk').value = '';
+  loadTav();
+}
+
+document.getElementById('te').addEventListener('change', async function() {
+  const en = this.checked;
+  try {
+    await fetch('/api/tavily/toggle?enabled=' + en, {method: 'POST'});
+    document.getElementById('ts').textContent = en ? 'Search enabled' : 'Search disabled';
+    document.getElementById('ts').className = en ? 'cfg-st ok' : 'cfg-st';
+  } catch(e) {
+    this.checked = !en;
+  }
+});
+
+function renderSearchSources(sources) {
+  if (!sources || !sources.length) return '';
+  let h = '<table class="src-tbl"><thead><tr><th>#</th><th>Title</th><th>Snippet</th></tr></thead><tbody>';
+  sources.forEach(function(s, i) {
+    h += '<tr><td>[' + (i+1) + ']</td>';
+    h += '<td><a href="' + esc(s.url) + '" target="_blank">' + esc(s.title) + '</a></td>';
+    h += '<td>' + esc(s.snippet ? s.snippet.slice(0, 180) : '') + '</td></tr>';
+  });
+  h += '</tbody></table>';
+  return h;
+}
+
 function ab(cls, who, body) {
   const c = document.getElementById('ch');
   const d = document.createElement('div');
@@ -545,6 +616,11 @@ async function go(e) {
 
     const d = await r.json();
 
+    // ---- Web Search ----
+    if (d.search_performed && d.search_sources && d.search_sources.length) {
+      ab('sr', 'Web Search (' + d.search_sources.length + ' sources)', renderSearchSources(d.search_sources));
+    }
+
     // ---- GPT-1 output ----
     ab('g1', 'GPT-1 (Generator)', esc(d.gpt1_output));
 
@@ -650,6 +726,7 @@ async function go(e) {
 }
 
 lc();
+loadTav();
 document.getElementById('ui').focus();
 </script>
 </body>

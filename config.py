@@ -48,3 +48,45 @@ def get_key_preview() -> str:
     if not key:
         return ""
     return key[:8] + "..." + key[-4:]
+
+
+# ---- Tavily (web search) ----
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+
+_tavily_runtime: dict = {}
+_tavily_lock = threading.Lock()
+
+
+def set_tavily_config(api_key: str, enabled: bool = True):
+    with _tavily_lock:
+        _tavily_runtime["api_key"] = api_key
+        _tavily_runtime["enabled"] = enabled
+
+
+def get_tavily_key() -> str:
+    with _tavily_lock:
+        return _tavily_runtime.get("api_key") or TAVILY_API_KEY
+
+
+def is_tavily_enabled() -> bool:
+    with _tavily_lock:
+        # Enabled if there's a key and not explicitly disabled
+        if "enabled" in _tavily_runtime:
+            return _tavily_runtime["enabled"] and bool(get_tavily_key())
+        return bool(TAVILY_API_KEY)
+
+
+def set_tavily_enabled(enabled: bool):
+    with _tavily_lock:
+        _tavily_runtime["enabled"] = enabled
+
+
+def has_tavily_key() -> bool:
+    return bool(get_tavily_key())
+
+
+def get_tavily_key_preview() -> str:
+    key = get_tavily_key()
+    if not key:
+        return ""
+    return key[:8] + "..." + key[-4:]

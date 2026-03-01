@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from api.rate_limit import rate_limit_dependency
 
 import config
-from pipeline.models import OpenAIConfig, PipelineRequest, PipelineResponse, StressRequest
+from pipeline.models import OpenAIConfig, TavilyConfig, PipelineRequest, PipelineResponse, StressRequest
 from pipeline.helpers import PipelineError
 from pipeline.orchestrator import run_pipeline
 from pipeline.stress import generate_stress_results
@@ -56,6 +56,38 @@ def get_openai_config():
         "model": config.get_model(),
         "key_preview": config.get_key_preview(),
     }
+
+
+# ---- Tavily (web search) config ----
+
+@router.post("/api/tavily/config")
+def set_tavily_config(cfg: TavilyConfig):
+    clean_key = cfg.api_key.strip()
+    clean_key = clean_key.encode("ascii", errors="ignore").decode("ascii")
+    clean_key = clean_key.replace(" ", "")
+    if not clean_key:
+        raise HTTPException(status_code=400, detail="Invalid Tavily API key.")
+    config.set_tavily_config(clean_key, cfg.enabled)
+    return {"status": "ok", "enabled": cfg.enabled, "key_set": True}
+
+
+@router.get("/api/tavily/config")
+def get_tavily_config():
+    if not config.has_tavily_key():
+        return {"key_set": False, "enabled": False}
+    return {
+        "key_set": True,
+        "enabled": config.is_tavily_enabled(),
+        "key_preview": config.get_tavily_key_preview(),
+    }
+
+
+@router.post("/api/tavily/toggle")
+def toggle_tavily(enabled: bool = True):
+    if not config.has_tavily_key():
+        raise HTTPException(status_code=400, detail="Set Tavily API key first.")
+    config.set_tavily_enabled(enabled)
+    return {"status": "ok", "enabled": enabled}
 
 
 # ---- Pipeline ----
