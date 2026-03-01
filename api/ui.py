@@ -789,6 +789,7 @@ body {
   display: flex;
   gap: 10px;
   align-items: flex-start;
+  flex-wrap: wrap;
   font-size: 11.5px;
   color: var(--accent-rose);
   margin-bottom: 6px;
@@ -798,6 +799,15 @@ body {
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   font-family: var(--font-mono);
   font-size: 10.5px;
+}
+.viol-desc {
+  display: block;
+  width: 100%;
+  font-size: 9.5px;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  margin-top: 2px;
+  padding-left: 14px;
 }
 .viol-dot {
   width: 4px;
@@ -1329,11 +1339,11 @@ body {
     <span class="g1">GPT-1</span><span class="arr">&rarr;</span><span class="g2">GPT-2</span><span class="arr">&rarr;</span><span class="g3">GPT-3</span>
   </h1>
   <div class="pipeline-flow">
-    <div class="pf-node n1"><span>G1</span></div>
+    <div class="pf-node n1"><span>?</span></div>
     <div class="pf-line"><div class="pf-pulse"></div></div>
-    <div class="pf-node n2"><span>G2</span></div>
+    <div class="pf-node n2"><span>?</span></div>
     <div class="pf-line l2"><div class="pf-pulse"></div></div>
-    <div class="pf-node n3"><span>G3</span></div>
+    <div class="pf-node n3"><span>?</span></div>
   </div>
   <div class="right-controls">
     <button class="cfg-btn stress-btn" onclick="openStress()">
@@ -1634,7 +1644,10 @@ function renderStressSummary(d, el) {
   if (Object.keys(viols).length > 0) {
     h += '<div style="margin-top:16px;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;font-weight:600;">Top Violation Reasons</div>';
     for (const v in viols) {
-      h += '<div style="font-size:12px;color:var(--accent-rose);margin:4px 0;padding:4px 8px;background:rgba(248,113,113,0.04);border-radius:4px;">' + esc(v) + ': ' + viols[v] + '</div>';
+      var vdesc = TRIPWIRE_DESC[v] || '';
+      h += '<div style="font-size:12px;color:var(--accent-rose);margin:4px 0;padding:4px 8px;background:rgba(248,113,113,0.04);border-radius:4px;">' + esc(v) + ': ' + viols[v]
+         + (vdesc ? '<div style="font-size:9.5px;color:var(--text-secondary);margin-top:2px;">' + esc(vdesc) + '</div>' : '')
+         + '</div>';
     }
   }
 
@@ -1811,11 +1824,25 @@ function renderConfidence(conf) {
   return h;
 }
 
+var TRIPWIRE_DESC = {
+  'T1': 'Evidence instantiation — fabricated stats, citations, or legal conclusions without source',
+  'T2': 'Typicality violation — "usually/often/typically" justifying claims without citation',
+  'T3': 'Causal claim as fact — causal mechanism presented as established without evidence',
+  'T4': 'Ranking violation — ranking or comparing options without evidence-backed discriminators',
+  'T5': 'Prescriptive violation — unsolicited advice, action plans, or outcome promises',
+  'T6': 'Reassurance framing — praise, superiority framing, or false comfort',
+  'T7': 'Unverified current fact — time-sensitive claim without verification'
+};
+
 function renderViolations(viols) {
   if (!viols || viols.length === 0) return '<div class="no-viol">No violations detected</div>';
   let h = '<div class="viol">';
   viols.forEach(v => {
-    h += '<div class="viol-item"><span class="viol-dot"></span>' + esc(v) + '</div>';
+    var code = (v.match(/^(T[1-7])/)||[])[1];
+    var desc = code ? TRIPWIRE_DESC[code] : '';
+    h += '<div class="viol-item"><span class="viol-dot"></span><span>' + esc(v) + '</span>'
+       + (desc ? '<span class="viol-desc">' + esc(desc) + '</span>' : '')
+       + '</div>';
   });
   return h + '</div>';
 }
