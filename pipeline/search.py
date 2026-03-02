@@ -133,6 +133,27 @@ def compute_search_quality(sources: list[SearchSource]) -> dict:
     }
 
 
+def refine_search_query(original_query: str, unsupported_claims: list[str]) -> str:
+    """Build a refined search query from unsupported claims.
+
+    Takes the original query and specific unsupported claim texts,
+    combining them into a more targeted search query.
+    """
+    # Take up to 3 unsupported claims for the refined query
+    claim_keywords = []
+    for claim in unsupported_claims[:3]:
+        # Extract key phrases (skip very short or generic words)
+        words = [w for w in claim.split() if len(w) > 4]
+        claim_keywords.extend(words[:5])
+
+    if not claim_keywords:
+        return original_query
+
+    # Combine original query context with claim-specific keywords
+    refined = original_query + " " + " ".join(claim_keywords[:10])
+    return refined[:500]  # Cap to avoid overly long queries
+
+
 def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:
     """Call Tavily search API. Returns (sources, raw_context_string).
 

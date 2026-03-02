@@ -14,7 +14,7 @@ from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
 from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
-from pipeline.search import should_search, perform_web_search
+from pipeline.search import should_search, perform_web_search, refine_search_query
 from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
 from pipeline.decomposer import decompose_claims, check_decomposition_quality
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
@@ -557,6 +557,35 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     metrics.total_claims = len(claim_table)
     metrics.hard_findings = sum(1 for f in findings if f.get("severity") == "hard")
     metrics.soft_findings = sum(1 for f in findings if f.get("severity") == "soft")
+
+    # ---- Iterative retrieval: if >30% unsupported and search was available ----
+    if search_performed and claim_table:
+        unsupported_ct = sum(
+            1 for ct in claim_table
+            if (ct.category if isinstance(ct.category, str) else "").lower().strip() == "unsupported"
+        )
+        unsupported_ratio = unsupported_ct / len(claim_table)
+        if unsupported_ratio > 0.3:
+            # Build refined query from unsupported claim texts
+            unsupported_texts = [
+                ct.claim for ct in claim_table
+                if (ct.category if isinstance(ct.category, str) else "").lower().strip() == "unsupported"
+            ]
+            refined_query = refine_search_query(req.prompt, unsupported_texts)
+            retry_sources, retry_context = perform_web_search(refined_query, max_results=3)
+            if retry_sources:
+                # Merge new sources (deduplicate by URL)
+                existing_urls = {s.url for s in search_sources}
+                new_sources = [s for s in retry_sources if s.url not in existing_urls]
+                if new_sources:
+                    search_sources = search_sources + new_sources
+                    _src_kw_sets = build_source_keyword_sets(search_sources)
+                    # Re-run source-match correction with expanded evidence
+                    claim_table = recategorize_with_sources(claim_table, search_sources, _src_kw_sets)
+                    findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets)
+                    violations = [f["type"] for f in findings]
+                    gpt2_verdict = recompute_verdict(findings, tier=tier)
+                    search_kwargs["search_sources"] = search_sources
 
     # ---- If GPT-2 PASS: done ----
     if gpt2_verdict == "PASS":
