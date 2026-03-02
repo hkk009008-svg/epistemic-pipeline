@@ -65,21 +65,33 @@ def _is_source_backed(text: str, source_keyword_sets: list[set[str]]) -> bool:
     return False
 
 
+def build_source_keyword_sets(sources: List[SearchSource]) -> list[set[str]]:
+    """Pre-compute keyword sets from sources (call once, pass to both functions).
+
+    When using both recategorize_with_sources and filter_findings_with_sources,
+    call this once and pass the result to avoid redundant keyword extraction.
+    """
+    return [_extract_keywords(f"{s.title} {s.snippet}") for s in sources]
+
+
 def recategorize_with_sources(
     claim_table: List[ClaimEntry],
     sources: List[SearchSource],
+    source_keyword_sets: list[set[str]] | None = None,
 ) -> List[ClaimEntry]:
     """Re-categorize Unsupported claims that are supported by search source snippets.
 
     Returns a new list of ClaimEntry objects (leaves originals unchanged).
     Only upgrades "Unsupported" → "Observed".  Never downgrades.
+
+    Pass pre-computed *source_keyword_sets* to avoid redundant extraction
+    when calling both recategorize_with_sources and filter_findings_with_sources.
     """
     if not sources or not claim_table:
         return claim_table
 
-    source_keyword_sets = [
-        _extract_keywords(f"{s.title} {s.snippet}") for s in sources
-    ]
+    if source_keyword_sets is None:
+        source_keyword_sets = build_source_keyword_sets(sources)
 
     result = []
     for entry in claim_table:
@@ -117,18 +129,21 @@ def recategorize_with_sources(
 def filter_findings_with_sources(
     findings: List[dict],
     sources: List[SearchSource],
+    source_keyword_sets: list[set[str]] | None = None,
 ) -> List[dict]:
     """Remove T1/T7 findings whose detail text is supported by search sources.
 
     Returns a new list of findings (leaves originals unchanged).
     Only removes findings of overridable types (T1, T7, etc.).
+
+    Pass pre-computed *source_keyword_sets* to avoid redundant extraction
+    when calling both recategorize_with_sources and filter_findings_with_sources.
     """
     if not sources or not findings:
         return findings
 
-    source_keyword_sets = [
-        _extract_keywords(f"{s.title} {s.snippet}") for s in sources
-    ]
+    if source_keyword_sets is None:
+        source_keyword_sets = build_source_keyword_sets(sources)
 
     result = []
     for f in findings:

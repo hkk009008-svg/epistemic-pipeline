@@ -31,6 +31,12 @@ def set_runtime_config(api_key: str, model: str | None = None):
         _runtime["api_key"] = api_key
         if model:
             _runtime["model"] = model
+    # Invalidate cached LLM clients so they pick up the new key
+    try:
+        from pipeline.helpers import invalidate_client_cache
+        invalidate_client_cache()
+    except ImportError:
+        pass
 
 
 def get_api_key() -> str:
@@ -125,6 +131,12 @@ def set_stage_config(stage: str, provider: str = "openai", api_key: str = "",
             "model": model,
             "base_url": base_url,
         }
+    # Invalidate cached LLM clients so they pick up the new stage config
+    try:
+        from pipeline.helpers import invalidate_client_cache
+        invalidate_client_cache()
+    except ImportError:
+        pass
 
 
 def get_stage_config(stage: str) -> dict:

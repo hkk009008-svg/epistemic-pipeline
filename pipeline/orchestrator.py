@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import date
 
@@ -14,7 +15,7 @@ from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
 from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search
-from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources
+from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
 from pipeline.decomposer import decompose_claims
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
 from pipeline.meta_verify import meta_verify_pass
@@ -39,22 +40,25 @@ def _resolve_output_format(tier: str, output_format: str) -> str:
     return {"strict": "structured", "standard": "annotated", "light": "concise"}.get(tier, "structured")
 
 
+# Pre-compiled patterns for clean_for_display (avoid recompilation per call)
+_DISPLAY_PATTERNS = [
+    (re.compile(r"\[verified\]\s*"), ""),
+    (re.compile(r"\[inference\]\s*"), ""),
+    (re.compile(r"\[unverified\]\s*"), ""),
+    (re.compile(r"\[user-provided\]\s*"), ""),
+    (re.compile(r"\[Typicality language removed\]"), ""),
+    (re.compile(r"\[Unverified generalization removed\]"), ""),
+    (re.compile(r"\[Stale [^\]]*\]"), ""),
+    (re.compile(r"\[Legal claim requires citation\]"), ""),
+    (re.compile(r"  +"), " "),
+    (re.compile(r"\n{3,}"), "\n\n"),
+]
+
+
 def clean_for_display(text: str) -> str:
     """Strip internal sanitizer/epistemic markers for display."""
-    import re
-    # Annotated-format inline markers
-    text = re.sub(r"\[verified\]\s*", "", text)
-    text = re.sub(r"\[inference\]\s*", "", text)
-    text = re.sub(r"\[unverified\]\s*", "", text)
-    text = re.sub(r"\[user-provided\]\s*", "", text)
-    # Sanitizer substitution markers
-    text = re.sub(r"\[Typicality language removed\]", "", text)
-    text = re.sub(r"\[Unverified generalization removed\]", "", text)
-    text = re.sub(r"\[Stale [^\]]*\]", "", text)
-    text = re.sub(r"\[Legal claim requires citation\]", "", text)
-    # Collapse double spaces and excess blank lines
-    text = re.sub(r"  +", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    for pattern, replacement in _DISPLAY_PATTERNS:
+        text = pattern.sub(replacement, text)
     return text.strip()
 
 
@@ -297,6 +301,9 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         search_sources=search_sources,
     )
 
+    # Pre-compute source keyword sets once for all source-match operations
+    _src_kw_sets = build_source_keyword_sets(search_sources) if search_sources else None
+
     # Empty defaults for response
     empty_response = dict(
         arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
@@ -445,8 +452,8 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     # ---- Source-match correction: fix GPT-2's over-strict categorization ----
     if search_sources:
-        claim_table = recategorize_with_sources(claim_table, search_sources)
-        findings = filter_findings_with_sources(findings, search_sources)
+        claim_table = recategorize_with_sources(claim_table, search_sources, _src_kw_sets)
+        findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets)
         violations = [f["type"] for f in findings]
         gpt2_verdict = recompute_verdict(findings, tier=tier)
 
@@ -493,8 +500,8 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
         if search_sources:
-            re_ct = recategorize_with_sources(re_ct, search_sources)
-            re_findings = filter_findings_with_sources(re_findings, search_sources)
+            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
+            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
             re_viol = [f["type"] for f in re_findings]
             re_verdict = recompute_verdict(re_findings, tier=tier)
 
@@ -651,8 +658,8 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
     re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
     if search_sources:
-        re_ct = recategorize_with_sources(re_ct, search_sources)
-        re_findings = filter_findings_with_sources(re_findings, search_sources)
+        re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
+        re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
         re_viol = [f["type"] for f in re_findings]
         re_verdict = recompute_verdict(re_findings, tier=tier)
 
@@ -698,8 +705,8 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
         if search_sources:
-            re_ct = recategorize_with_sources(re_ct, search_sources)
-            re_findings = filter_findings_with_sources(re_findings, search_sources)
+            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
+            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
             re_viol = [f["type"] for f in re_findings]
             re_verdict = recompute_verdict(re_findings, tier=tier)
         findings_history.append(re_findings)

@@ -44,12 +44,8 @@ def rate_limit_dependency(request: Request) -> None:
     cutoff = now - window
 
     # Resolve client IP (respect X-Forwarded-For behind a reverse proxy).
-    ip = (
-        request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        or request.client.host
-        if request.client
-        else "unknown"
-    )
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    ip = forwarded or (request.client.host if request.client else "unknown")
 
     with _lock:
         # Prune timestamps outside the current window for this IP.
