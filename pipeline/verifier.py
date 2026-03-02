@@ -88,6 +88,16 @@ def _all_soft(findings: List[dict]) -> bool:
     return len(findings) > 0 and all(f.get("severity") == "soft" for f in findings)
 
 
+def recompute_verdict(findings: List[dict], tier: str = "strict") -> str:
+    """Recompute PASS/FAIL verdict from findings using tier-specific thresholds."""
+    hard_count = sum(1 for f in findings if f.get("severity") == "hard")
+    soft_count = sum(1 for f in findings if f.get("severity") == "soft")
+    soft_threshold = _SOFT_THRESHOLD.get(tier, 3)
+    if hard_count > 0 or soft_count >= soft_threshold:
+        return "FAIL"
+    return "PASS"
+
+
 def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
     """Parse GPT-2 JSON output into claim_table, findings, violations, verdict, reasoning.
 

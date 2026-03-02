@@ -10,10 +10,11 @@ from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdo
 from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
-from pipeline.verifier import parse_gpt2, _all_soft
+from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
 from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search
+from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources
 from pipeline.decomposer import decompose_claims
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
 from pipeline.meta_verify import meta_verify_pass
@@ -441,6 +442,14 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt2_raw = call_llm(gpt2_cfg, gpt2_system, gpt2_user, expect_json=True)
     metrics.end_stage(gpt2_sm)
     claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2(gpt2_raw, flags=flags, tier=tier)
+
+    # ---- Source-match correction: fix GPT-2's over-strict categorization ----
+    if search_sources:
+        claim_table = recategorize_with_sources(claim_table, search_sources)
+        findings = filter_findings_with_sources(findings, search_sources)
+        violations = [f["type"] for f in findings]
+        gpt2_verdict = recompute_verdict(findings, tier=tier)
+
     metrics.gpt2_verdict = gpt2_verdict
     metrics.total_claims = len(claim_table)
     metrics.hard_findings = sum(1 for f in findings if f.get("severity") == "hard")
@@ -483,6 +492,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
+        if search_sources:
+            re_ct = recategorize_with_sources(re_ct, search_sources)
+            re_findings = filter_findings_with_sources(re_findings, search_sources)
+            re_viol = [f["type"] for f in re_findings]
+            re_verdict = recompute_verdict(re_findings, tier=tier)
 
         if re_verdict == "PASS":
             conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
@@ -636,6 +650,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         )
     re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
     re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
+    if search_sources:
+        re_ct = recategorize_with_sources(re_ct, search_sources)
+        re_findings = filter_findings_with_sources(re_findings, search_sources)
+        re_viol = [f["type"] for f in re_findings]
+        re_verdict = recompute_verdict(re_findings, tier=tier)
 
     # If still failing after arbiter rewrite, continue rewriting.
     # The arbiter decided ALLOW_WITH_EDITS (not BLOCK), meaning it believes
@@ -678,6 +697,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
+        if search_sources:
+            re_ct = recategorize_with_sources(re_ct, search_sources)
+            re_findings = filter_findings_with_sources(re_findings, search_sources)
+            re_viol = [f["type"] for f in re_findings]
+            re_verdict = recompute_verdict(re_findings, tier=tier)
         findings_history.append(re_findings)
 
     metrics.rewrite_loops = len(findings_history) - 1  # subtract initial
