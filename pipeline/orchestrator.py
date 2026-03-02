@@ -7,11 +7,11 @@ from datetime import date
 
 import config
 from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown, SearchSource, GroundingInfo, UnsupportedSpan
-from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
+from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft
-from pipeline.arbiter import parse_gpt3, apply_edits
+from pipeline.arbiter import apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search
 from pipeline.decomposer import decompose_claims
@@ -170,7 +170,6 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     gpt1_cfg = config.get_stage_config("gpt1")
     gpt2_cfg = config.get_stage_config("gpt2")
-    gpt3_cfg = config.get_stage_config("gpt3")
 
     # ---- Deterministic prompt routing ----
     flags = route_prompt(req.prompt)
@@ -191,19 +190,16 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     gpt1_system = req.gpt1_system or DEFAULT_GPT1_SYSTEM
     gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
-    gpt3_system = req.gpt3_system or DEFAULT_GPT3_SYSTEM
 
     # Inject current-date awareness so models don't misidentify past dates as future
     date_ctx = _date_context()
     gpt1_system = date_ctx + gpt1_system
     gpt2_system = date_ctx + gpt2_system
-    gpt3_system = date_ctx + gpt3_system
 
-    # Flag-driven augmentation for all 3 stages (search-aware)
-    gpt1_aug, gpt2_aug, gpt3_aug = build_augmentation(flags, search_performed=search_performed)
+    # Flag-driven augmentation for both stages (search-aware)
+    gpt1_aug, gpt2_aug = build_augmentation(flags, search_performed=search_performed)
     gpt1_system += gpt1_aug
     gpt2_system += gpt2_aug
-    gpt3_system += gpt3_aug
 
     gpt1_user_content = req.prompt
     if search_performed and search_context:
@@ -409,7 +405,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt2_sm = metrics.start_stage("gpt2", gpt2_cfg.get("provider", ""), gpt2_cfg.get("model", ""))
     gpt2_raw = call_llm(gpt2_cfg, gpt2_system, gpt2_user, expect_json=True)
     metrics.end_stage(gpt2_sm)
-    claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2(gpt2_raw, flags=flags)
+    claim_table, violations, gpt2_verdict, findings, gpt2_reasoning, arbiter_result = parse_gpt2(gpt2_raw, flags=flags)
     metrics.gpt2_verdict = gpt2_verdict
     metrics.total_claims = len(claim_table)
     metrics.hard_findings = sum(1 for f in findings if f.get("severity") == "hard")
@@ -451,7 +447,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning, _ = parse_gpt2(re_gpt2_raw, flags=flags)
 
         if re_verdict == "PASS":
             conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
@@ -469,6 +465,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 rewrite_occurred=True, rewrite_output=sanitized_output,
                 rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
                 rewrite_violations=re_viol, rewrite_verdict=re_verdict,
+                rewrite_reasoning=re_reasoning,
                 arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
                 arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
                 final_verdict="PASS", final_result=sanitized_output,
@@ -478,47 +475,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             )
         # Auto-repair didn't clear it -- fall through to arbiter below
 
-    # ---- Step 3: GPT-2 FAIL -> invoke GPT-3 Arbiter ----
-    gpt2_json_for_arbiter = json.dumps({
-        "claim_table": [
-            {"claim": c.claim, "category": c.category, "justification": c.justification}
-            for c in claim_table
-        ],
-        "violations": violations,
-        "verdict": gpt2_verdict,
-    }, indent=2)
-
-    flags_json = json.dumps(flags, indent=2)
-
-    # Include web search evidence for the arbiter if available
-    search_evidence = ""
-    if search_performed and search_sources:
-        source_lines = "\n".join(
-            f'[{i}] "{s.title}" ({s.url}) — {s.snippet[:200]}'
-            for i, s in enumerate(search_sources, 1)
-        )
-        search_evidence = (
-            f"\n\nweb_search_sources (provided to GPT-1 — these are VERIFIED current sources):\n"
-            f"{source_lines}\n\n"
-            f"IMPORTANT: Claims that GPT-1 grounded in these web search sources are VERIFIED "
-            f"and CURRENT. Do NOT BLOCK claims that are supported by the sources above. "
-            f"Your training data may be outdated — trust the web search results over your "
-            f"training knowledge. ALLOW_WITH_EDITS to fix minor issues is preferred over BLOCK "
-            f"when the core claims are source-backed."
-        )
-
-    gpt3_user = (
-        f"user_prompt:\n{req.prompt}\n\n"
-        f"gpt1_output:\n{sanitized_output}\n\n"
-        f"gpt2_result_json:\n{gpt2_json_for_arbiter}\n\n"
-        f"prompt_flags:\n{flags_json}"
-        f"{search_evidence}"
-    )
-
-    gpt3_sm = metrics.start_stage("gpt3", gpt3_cfg.get("provider", ""), gpt3_cfg.get("model", ""))
-    gpt3_raw = call_llm(gpt3_cfg, gpt3_system, gpt3_user, expect_json=True)
-    metrics.end_stage(gpt3_sm)
-    arbiter_decision, arbiter_rationale, arbiter_edits, arbiter_policy_notes = parse_gpt3(gpt3_raw)
+    # ---- Step 3: GPT-2 FAIL — use merged arbiter decision from GPT-2 ----
+    arbiter_decision = arbiter_result["decision"]
+    arbiter_rationale = arbiter_result["rationale"]
+    arbiter_edits = arbiter_result["edits"]
+    arbiter_policy_notes = arbiter_result["policy_notes"]
     metrics.arbiter_decision = arbiter_decision
 
     # ---- Decision: BLOCK ----
@@ -535,7 +496,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
             arbiter_invoked=True, arbiter_decision="BLOCK",
             arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
-            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw="",
             rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
             rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
             final_verdict="FAIL", final_result=_fail_message(flags, search_performed),
@@ -585,7 +546,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
             arbiter_invoked=True, arbiter_decision="ALLOW_AS_UNKNOWN_ONLY",
             arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
-            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw="",
             rewrite_occurred=True, rewrite_output=rewrite_output,
             rewrite_gpt2_raw="(arbiter-trusted)", rewrite_claim_table=[],
             rewrite_violations=[], rewrite_verdict="PASS",
@@ -615,7 +576,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
         )
     re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-    re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+    re_ct, re_viol, re_verdict, re_findings, _, _ = parse_gpt2(re_gpt2_raw, flags=flags)
 
     # If still failing after arbiter rewrite, continue rewriting.
     # The arbiter decided ALLOW_WITH_EDITS (not BLOCK), meaning it believes
@@ -657,7 +618,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning, _ = parse_gpt2(re_gpt2_raw, flags=flags)
         findings_history.append(re_findings)
 
     metrics.rewrite_loops = len(findings_history) - 1  # subtract initial
@@ -677,10 +638,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
             arbiter_invoked=True, arbiter_decision="ALLOW_WITH_EDITS",
             arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
-            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw="",
             rewrite_occurred=True, rewrite_output=rewrite_output,
             rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
             rewrite_violations=re_viol, rewrite_verdict=re_verdict,
+            rewrite_reasoning=re_reasoning,
             final_verdict="PASS",
             final_result=rewrite_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
@@ -717,10 +679,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
         arbiter_invoked=True, arbiter_decision="ALLOW_WITH_EDITS",
         arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
-        arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+        arbiter_policy_notes=arbiter_policy_notes, arbiter_raw="",
         rewrite_occurred=True, rewrite_output=fallback_output,
         rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
         rewrite_violations=re_viol, rewrite_verdict="PASS",
+        rewrite_reasoning=re_reasoning,
         final_verdict="PASS",
         final_result=fallback_output,
         prompt_flags=flags, sanitizer_applied=True,

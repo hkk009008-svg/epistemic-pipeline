@@ -96,80 +96,37 @@ body {
   align-items: center;
   gap: 0;
 }
-.top-bar h1 .g1 { color: var(--accent-blue); }
-.top-bar h1 .arr {
-  color: var(--text-muted);
-  margin: 0 6px;
-  font-size: 10px;
-  opacity: 0.5;
-}
-.top-bar h1 .g2 { color: var(--accent-amber); }
-.top-bar h1 .g3 { color: var(--accent-violet); }
+.top-bar h1 .title-text { color: var(--accent-blue); }
 
-/* Pipeline flow animation */
-.pipeline-flow {
-  display: flex;
-  align-items: center;
-  gap: 0;
+/* Pipeline icon */
+.pipeline-icon {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-}
-.pf-node {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  position: relative;
-  z-index: 2;
+  background: rgba(56,189,248,0.06);
+  border: 1.5px solid rgba(56,189,248,0.25);
+  box-shadow: 0 0 16px rgba(56,189,248,0.1);
+  animation: iconPulse 3s ease-in-out infinite;
 }
-.pf-node.n1 {
-  background: rgba(56,189,248,0.08);
-  border: 1.5px solid rgba(56,189,248,0.3);
-  color: var(--accent-blue);
-  box-shadow: 0 0 12px rgba(56,189,248,0.1);
+.pipeline-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke: var(--accent-blue);
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.pf-node.n2 {
-  background: rgba(251,191,36,0.08);
-  border: 1.5px solid rgba(251,191,36,0.3);
-  color: var(--accent-amber);
-  box-shadow: 0 0 12px rgba(251,191,36,0.1);
+@keyframes iconPulse {
+  0%, 100% { box-shadow: 0 0 16px rgba(56,189,248,0.1); }
+  50% { box-shadow: 0 0 24px rgba(56,189,248,0.2); }
 }
-.pf-node.n3 {
-  background: rgba(167,139,250,0.08);
-  border: 1.5px solid rgba(167,139,250,0.3);
-  color: var(--accent-violet);
-  box-shadow: 0 0 12px rgba(167,139,250,0.1);
-}
-.pf-line {
-  width: 48px;
-  height: 1.5px;
-  background: var(--border-subtle);
-  position: relative;
-  overflow: hidden;
-}
-.pf-line::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, var(--accent-blue), transparent);
-  background-size: 200% 100%;
-  animation: flowPulse 2.5s ease-in-out infinite;
-}
-.pf-line.l2::after {
-  background: linear-gradient(90deg, transparent, var(--accent-amber), transparent);
-  background-size: 200% 100%;
-  animation: flowPulse 2.5s ease-in-out 0.6s infinite;
-}
-
 .right-controls { display: flex; align-items: center; gap: 6px; }
 
 .cfg-btn {
@@ -484,19 +441,6 @@ body {
 }
 .b.g2 .w { color: var(--accent-amber); }
 .b.g2 .w::before { background: var(--accent-amber); box-shadow: 0 0 6px rgba(251,191,36,0.4); }
-
-/* GPT-3 Arbiter */
-.b.g3 {
-  align-self: flex-start;
-  background: var(--bg-surface-1);
-  border: 1px solid var(--border-subtle);
-  border-top: 2.5px solid rgba(167,139,250,0.4);
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  white-space: normal;
-}
-.b.g3 .w { color: var(--accent-violet); }
-.b.g3 .w::before { background: var(--accent-violet); box-shadow: 0 0 6px rgba(167,139,250,0.4); }
 
 /* Search Results */
 .b.sr {
@@ -1128,20 +1072,6 @@ body {
   border-radius: var(--radius-lg);
   z-index: 1;
 }
-.stress-log::after {
-  content: '';
-  position: absolute;
-  left: 0; right: 0;
-  height: 6px;
-  background: linear-gradient(180deg, transparent, rgba(56,189,248,0.07), transparent);
-  pointer-events: none;
-  z-index: 2;
-  animation: scanline 4s linear infinite;
-}
-@keyframes scanline {
-  0% { top: 0; }
-  100% { top: 100%; }
-}
 .stress-log .pass { color: var(--accent-emerald); }
 .stress-log .fail { color: var(--accent-rose); }
 .stress-log .arb { color: var(--accent-violet); }
@@ -1278,14 +1208,6 @@ body {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-@keyframes flowPulse {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
-@keyframes nodeBreath {
-  0%, 100% { box-shadow: 0 0 8px currentColor; opacity: 0.7; }
-  50% { box-shadow: 0 0 16px currentColor; opacity: 1; }
-}
 
 /* ═══ VERIFICATION DETAILS PANEL ═══ */
 .vd-panel { margin-top: 12px; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
@@ -1324,7 +1246,7 @@ body {
   .cfg-drawer { width: 100%; max-width: 100%; }
   .b { max-width: 98%; }
   .top-bar { padding: 0 16px; height: 56px; }
-  .pipeline-flow { display: none; }
+  .pipeline-icon { display: none; }
   .chat { padding: 16px; }
   .ibar { padding: 12px 16px 16px; }
   .stress-panel.open { padding: 24px 16px; }
@@ -1336,14 +1258,10 @@ body {
 
 <div class="top-bar">
   <h1>
-    <span class="g1">GPT-1</span><span class="arr">&rarr;</span><span class="g2">GPT-2</span><span class="arr">&rarr;</span><span class="g3">GPT-3</span>
+    <span class="title-text">Epistemic Pipeline</span>
   </h1>
-  <div class="pipeline-flow">
-    <div class="pf-node n1"><span>?</span></div>
-    <div class="pf-line"><div class="pf-pulse"></div></div>
-    <div class="pf-node n2"><span>?</span></div>
-    <div class="pf-line l2"><div class="pf-pulse"></div></div>
-    <div class="pf-node n3"><span>?</span></div>
+  <div class="pipeline-icon">
+    <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
   </div>
   <div class="right-controls">
     <button class="cfg-btn stress-btn" onclick="openStress()">
@@ -1428,11 +1346,8 @@ Default format:
 
 Only include "Options" if user asked for actions/choices.</textarea>
 
-      <label>GPT-2 System Prompt Override (leave blank for strict verifier)</label>
-      <textarea id="g2s" rows="2" placeholder="Leave blank for default claim validator..."></textarea>
-
-      <label>GPT-3 System Prompt Override (leave blank for default arbiter)</label>
-      <textarea id="g3s" rows="2" placeholder="Leave blank for default arbiter/adjudicator..."></textarea>
+      <label>GPT-2 System Prompt Override (leave blank for default verifier+arbiter)</label>
+      <textarea id="g2s" rows="2" placeholder="Leave blank for default claim validator + arbiter..."></textarea>
     </div>
   </div>
 </div>
@@ -1784,13 +1699,14 @@ function renderViolations(viols) {
   return h + '</div>';
 }
 
-function renderVerificationDetails(d) {
+function renderVerificationDetails(d, reasoningOverride) {
   var parts = [];
 
-  // Reasoning trace
-  if (d.gpt2_reasoning && d.gpt2_reasoning.length > 0) {
+  // Reasoning trace (use override if provided, e.g. rewrite_reasoning for re-verify)
+  var reasoning = reasoningOverride || d.gpt2_reasoning;
+  if (reasoning && reasoning.length > 0) {
     var rh = '<div class="vd-section"><div class="vd-title">Reasoning Trace</div><ol class="vd-trace">';
-    d.gpt2_reasoning.forEach(function(step) { rh += '<li>' + esc(step) + '</li>'; });
+    reasoning.forEach(function(step) { rh += '<li>' + esc(step) + '</li>'; });
     rh += '</ol></div>';
     parts.push(rh);
   }
@@ -1878,8 +1794,7 @@ async function go(e) {
 
   const steps = [
     {t: 3000, msg: 'GPT-2 verifying...', cls: 's2'},
-    {t: 8000, msg: 'GPT-3 arbitrating...', cls: 's3'},
-    {t: 14000, msg: 'Rewriting & re-verifying...', cls: ''},
+    {t: 8000, msg: 'Rewriting & re-verifying...', cls: ''},
   ];
   const timers = steps.map(s => setTimeout(() => {
     if (ld.parentNode) ld.innerHTML = makeLoader(s.cls, s.msg);
@@ -1893,7 +1808,6 @@ async function go(e) {
         prompt: prompt,
         gpt1_system: document.getElementById('g1s').value,
         gpt2_system: document.getElementById('g2s').value.trim(),
-        gpt3_system: document.getElementById('g3s').value.trim(),
       })
     });
 
@@ -1934,53 +1848,51 @@ async function go(e) {
       return;
     }
 
-    // ---- GPT-2 FAIL: show verdict ----
-    ab('vf', '', '&#10007; GPT-2 FAIL &mdash; escalating to Arbiter');
+    // ---- GPT-2 FAIL: show arbiter decision (inline from GPT-2) ----
+    ab('vf', '', '&#10007; GPT-2 FAIL');
     addDivider();
-
-    // ---- GPT-3 Arbiter ----
     if (d.arbiter_invoked) {
-      let g3body = '';
+      let arbBody = '';
 
       // Decision badge
       const decLower = (d.arbiter_decision || '').toLowerCase().replace(/_/g, '');
       let decCls = 'blk';
       if (decLower === 'allowwithedits') decCls = 'awe';
       if (decLower === 'allowasunknownonly') decCls = 'auo';
-      g3body += '<div class="arb-decision ' + decCls + '">' + esc(d.arbiter_decision) + '</div>';
+      arbBody += '<div class="arb-decision ' + decCls + '">' + esc(d.arbiter_decision) + '</div>';
 
       // Rationale
       if (d.arbiter_rationale && d.arbiter_rationale.length > 0) {
-        g3body += '<div class="arb-rationale">';
+        arbBody += '<div class="arb-rationale">';
         d.arbiter_rationale.forEach(r => {
-          g3body += '<div class="arb-item"><span class="arb-dot"></span>' + esc(r) + '</div>';
+          arbBody += '<div class="arb-item"><span class="arb-dot"></span>' + esc(r) + '</div>';
         });
-        g3body += '</div>';
+        arbBody += '</div>';
       }
 
       // Edits
       if (d.arbiter_edits && d.arbiter_edits.length > 0) {
-        g3body += '<div class="edit-list">';
+        arbBody += '<div class="edit-list">';
         d.arbiter_edits.forEach(e => {
-          g3body += '<div class="edit-item">';
-          g3body += '<div class="edit-action ' + editActionCls(e.action) + '">' + esc(e.action) + '</div>';
-          g3body += '<div class="edit-target">' + esc(e.target) + '</div>';
-          if (e.replacement) g3body += '<div class="edit-repl">&rarr; ' + esc(e.replacement) + '</div>';
-          g3body += '</div>';
+          arbBody += '<div class="edit-item">';
+          arbBody += '<div class="edit-action ' + editActionCls(e.action) + '">' + esc(e.action) + '</div>';
+          arbBody += '<div class="edit-target">' + esc(e.target) + '</div>';
+          if (e.replacement) arbBody += '<div class="edit-repl">&rarr; ' + esc(e.replacement) + '</div>';
+          arbBody += '</div>';
         });
-        g3body += '</div>';
+        arbBody += '</div>';
       }
 
       // Policy notes
       if (d.arbiter_policy_notes && d.arbiter_policy_notes.length > 0) {
-        g3body += '<div class="policy-notes">';
+        arbBody += '<div class="policy-notes">';
         d.arbiter_policy_notes.forEach(n => {
-          g3body += '<div>' + esc(n) + '</div>';
+          arbBody += '<div>' + esc(n) + '</div>';
         });
-        g3body += '</div>';
+        arbBody += '</div>';
       }
 
-      ab('g3', 'GPT-3 (Arbiter)', g3body);
+      ab('g2', 'GPT-2 (Arbiter Decision)', arbBody);
     }
 
     // ---- Rewrite loop ----
@@ -1989,7 +1901,7 @@ async function go(e) {
       ab('rw', 'GPT-1 (Rewrite)', esc(d.rewrite_output));
 
       // Re-verification
-      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderConfidence(d.confidence) + renderViolations(d.rewrite_violations) + renderVerificationDetails(d);
+      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderConfidence(d.confidence) + renderViolations(d.rewrite_violations) + renderVerificationDetails(d, d.rewrite_reasoning);
       ab('rv', 'GPT-2 (Re-verify) &mdash; ' + d.rewrite_verdict, rvBody);
     }
 

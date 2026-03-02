@@ -1,4 +1,4 @@
-"""System prompts for GPT-1 (Generator), GPT-2 (Verifier), GPT-3 (Arbiter).
+"""System prompts for GPT-1 (Generator) and GPT-2 (Verifier + Arbiter).
 
 Encodes the Audit v7 epistemic framework:
   - Priority stack: V1 Abstention > V2 Evidence > V3 Separation > V4 Falsifiability > V5 Consistency > V6 Usefulness > V7 Style
@@ -6,8 +6,11 @@ Encodes the Audit v7 epistemic framework:
   - Tripwires T1-T7
   - Structured output format (Observed / Unknown / Discriminators / Boundary)
 
+GPT-2 handles both verification and arbitration in a single call,
+reducing the pipeline from 3 stages to 2.
+
 Also contains activation patterns for bypass detection and the
-build_augmentation() function that adapts all three prompts based on
+build_augmentation() function that adapts both prompts based on
 prompt-routing flags.
 """
 
@@ -86,7 +89,10 @@ DEFAULT_GPT1_SYSTEM = (
 )
 
 # ---------------------------------------------------------------------------
-# GPT-2: Verifier — Audit v7 Tripwire Checker
+# GPT-2: Verifier + Arbiter — Audit v7 Tripwire Checker & Adjudicator
+#
+# GPT-2 now handles both verification and arbitration in a single call.
+# When verdict=FAIL, GPT-2 also outputs arbiter decision fields.
 #
 # Split into a concise core system prompt and a detailed tripwire reference.
 # The reference is injected at the START of user content so the LLM reads it
@@ -94,14 +100,24 @@ DEFAULT_GPT1_SYSTEM = (
 # instructions buried deep in a long system prompt get ignored.
 # ---------------------------------------------------------------------------
 DEFAULT_GPT2_SYSTEM = (
-    'You are GPT-2, a strict claim validator under Audit v7 rules.\n'
+    'You are GPT-2, a strict claim validator AND arbiter under Audit v7 rules.\n'
+    'You both VERIFY claims and DECIDE what to do when violations are found.\n'
     'Output VALID JSON ONLY (no markdown, no prose, no code fences).\n\n'
     'Read BOTH the ORIGINAL PROMPT and GPT-1 RESPONSE carefully.\n\n'
-    'Schema: {"reasoning_trace": ["Step 1: ...", "Step 2: ..."], '
+    '## Output Schema\n'
+    'When verdict is PASS:\n'
+    '{"reasoning_trace": ["Step 1: ...", "Step 2: ..."], '
     '"claim_table": [{"claim": "...", "category": '
     '"Observed|User-provided|Inference|Hypothesis|Unsupported", "justification": "..."}], '
-    '"findings": [{"type": "T1"|"T2"|"T3"|"T4"|"T5"|"T6"|"T7", "severity": "hard"|"soft", '
-    '"detail": "..."}], "verdict": "PASS|FAIL"}\n\n'
+    '"findings": [], "verdict": "PASS"}\n\n'
+    'When verdict is FAIL, you MUST also include arbiter fields:\n'
+    '{"reasoning_trace": ["Step 1: ...", "Step 2: ..."], '
+    '"claim_table": [...], "findings": [...], "verdict": "FAIL", '
+    '"arbiter_decision": "BLOCK"|"ALLOW_WITH_EDITS"|"ALLOW_AS_UNKNOWN_ONLY", '
+    '"rationale": ["reason 1", "reason 2"], '
+    '"edits_for_gpt1": [{"action": "DELETE"|"REWRITE"|"MOVE_TO_UNKNOWN", '
+    '"target": "quoted text from gpt1", "replacement": "..."}], '
+    '"final_policy_notes": ["..."]}\n\n'
     'reasoning_trace MUST show which specific text in GPT-1 output triggered each finding. '
     'Quote the exact text. This is required for audit trail purposes.\n\n'
     'VERDICT RULE: FAIL if any "hard" finding exists OR soft count >= 3. Otherwise PASS.\n\n'
@@ -114,6 +130,26 @@ DEFAULT_GPT2_SYSTEM = (
     '- T5 (soft): Unsolicited advice or outcome promises\n'
     '- T6 (soft): Reassurance framing\n\n'
     'ALWAYS check the ORIGINAL PROMPT to determine if advice was requested.\n\n'
+    '## Arbiter Decision Rules (apply when verdict is FAIL)\n'
+    'You do NOT answer the user\'s question. You do NOT add any new facts.\n'
+    'You ONLY decide what action to take on the violations you found.\n\n'
+    'CRITICAL PRINCIPLE: BLOCK IS A LAST RESORT.\n'
+    'BLOCK only when the ENTIRE response is unsalvageable fabrication with NO truthful content.\n'
+    'Almost every issue can be fixed with ALLOW_WITH_EDITS or ALLOW_AS_UNKNOWN_ONLY.\n'
+    'If even ONE part of the response is truthful and useful, do NOT BLOCK.\n'
+    'Decision hierarchy: ALLOW_WITH_EDITS (preferred) > ALLOW_AS_UNKNOWN_ONLY > BLOCK (rare).\n\n'
+    'Priority Stack: V1 Abstention > V2 Evidence > V3 Separation > V4 Falsifiability > V5 Consistency > V6 Usefulness\n\n'
+    'Decision Rules:\n'
+    '1) T1/T3/T7 (hard): ALLOW_WITH_EDITS — DELETE or MOVE_TO_UNKNOWN the violating claim.\n'
+    '   BLOCK only if the ENTIRE response is fabricated.\n'
+    '2) T2 (typicality): ALLOW_WITH_EDITS — rewrite to remove typicality language.\n'
+    '3) T4 (ranking): ALLOW_WITH_EDITS — remove ranking or add Unknown qualifier.\n'
+    '4) T5 (prescriptive): If advice_requested and no outcome promises, do not penalize.\n'
+    '   If outcome promises: ALLOW_WITH_EDITS — rewrite to role-definition + uncertainty.\n'
+    '5) T6 (reassurance): ALLOW_WITH_EDITS — delete praise/reassurance.\n'
+    '6) Inherently indeterminate questions: ALLOW_AS_UNKNOWN_ONLY.\n'
+    '7) Multiple violations: ALLOW_WITH_EDITS with multiple edit actions.\n'
+    '   Do NOT BLOCK just because there are multiple violations.\n\n'
     '## Pre-Decomposed Claims\n'
     'If PRE-DECOMPOSED ATOMIC CLAIMS are provided in the input, use them as your '
     'claim_table basis. Verify each atomic claim individually. '
@@ -266,17 +302,20 @@ DEFAULT_GPT3_SYSTEM = (
 
 
 # ---------------------------------------------------------------------------
-# build_augmentation — flag-driven prompt shaping for all 3 stages
+# build_augmentation — flag-driven prompt shaping for both stages
 # ---------------------------------------------------------------------------
 _augmentation_cache: dict = {}
 
 
 def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
-    """Return (gpt1_aug, gpt2_aug, gpt3_aug) strings based on prompt-routing flags.
+    """Return (gpt1_aug, gpt2_aug) strings based on prompt-routing flags.
 
     Each string is appended to the respective system prompt to adapt behavior
     for the specific prompt context.  When search_performed is True, current-events
     augmentation is relaxed because GPT-1 has verified web sources to ground its claims.
+
+    GPT-2 now handles both verification and arbitration, so arbiter-specific
+    augmentation is merged into gpt2_aug.
 
     Results are cached by flags+search_performed to avoid rebuilding identical
     augmentation strings across stress-test runs with similar prompt types.
@@ -288,7 +327,6 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
 
     gpt1_parts = []
     gpt2_parts = []
-    gpt3_parts = []
 
     if flags.get("advice_requested"):
         gpt1_parts.append(
@@ -300,11 +338,8 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
             "FLAG — advice_requested: User explicitly asked for advice. "
             "T5 threshold change: flag Prescriptive violation ONLY if GPT-1 makes outcome promises "
             "(e.g., 'will improve', 'could help succeed'). "
-            "Process-only role-definition language is allowed."
-        )
-        gpt3_parts.append(
-            "FLAG — advice_requested: User explicitly asked for advice. "
-            "Allow conditional process guidance. Block only outcome promises."
+            "Process-only role-definition language is allowed. "
+            "Arbiter: Allow conditional process guidance. Block only outcome promises."
         )
 
     if flags.get("percent_requested"):
@@ -317,12 +352,9 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
         gpt2_parts.append(
             "FLAG — percent_requested: User requested statistics. "
             "T1 and T7 are heightened: any bare statistic or percentage without an authoritative citation "
-            "is a HARD violation. Absence of a statistic framed as Unknown(Actionable) is acceptable."
-        )
-        gpt3_parts.append(
-            "FLAG — percent_requested: User requested statistics. "
-            "Do NOT block for absence of stats if GPT-1 frames them as Unknown(Actionable). "
-            "BLOCK if GPT-1 invented numbers."
+            "is a HARD violation. Absence of a statistic framed as Unknown(Actionable) is acceptable. "
+            "Arbiter: Do NOT BLOCK for absence of stats if framed as Unknown(Actionable). "
+            "BLOCK only if GPT-1 invented numbers."
         )
 
     if flags.get("legal_mode"):
@@ -334,11 +366,8 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
         gpt2_parts.append(
             "FLAG — legal_mode: Legal context detected. "
             "T1 heightened: any uncited legal claim (legality, illegality, regulatory status) "
-            "without verified statute or authority is a HARD violation."
-        )
-        gpt3_parts.append(
-            "FLAG — legal_mode: Legal context detected. "
-            "BLOCK on any uncited legal conclusion. V1 (Abstention) dominates."
+            "without verified statute or authority is a HARD violation. "
+            "Arbiter: BLOCK on any uncited legal conclusion. V1 (Abstention) dominates."
         )
 
     if flags.get("jurisdiction_present"):
@@ -349,11 +378,8 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
         )
         gpt2_parts.append(
             "FLAG — jurisdiction_present: Jurisdiction specified by user. "
-            "Suppress 'Missing jurisdiction' findings if GPT-1's claims match the identified jurisdiction."
-        )
-        gpt3_parts.append(
-            "FLAG — jurisdiction_present: Jurisdiction was specified. "
-            "Do not penalize for 'Missing jurisdiction' if scope matches user's stated jurisdiction."
+            "Suppress 'Missing jurisdiction' findings if GPT-1's claims match the identified jurisdiction. "
+            "Arbiter: Do not penalize for 'Missing jurisdiction' if scope matches user's stated jurisdiction."
         )
 
     if flags.get("future_year"):
@@ -364,11 +390,8 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
         )
         gpt2_parts.append(
             "FLAG — future_year: Future-year detected. "
-            "T7 heightened: any future-year factual claim presented as current/certain is a HARD violation."
-        )
-        gpt3_parts.append(
-            "FLAG — future_year: Future-year context. "
-            "BLOCK on any future-year factual claim not framed as Unknown."
+            "T7 heightened: any future-year factual claim presented as current/certain is a HARD violation. "
+            "Arbiter: BLOCK on any future-year factual claim not framed as Unknown."
         )
 
     if flags.get("current_events"):
@@ -383,11 +406,8 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
                 "FLAG — current_events: User asked about current/recent information. "
                 "GPT-1 was given web search results. Claims that cite a provided source "
                 "(e.g., [1], [2]) and are supported by that source's content are acceptable as 'Observed'. "
-                "Only flag T7 if GPT-1 makes a time-sensitive claim WITHOUT citing any provided source."
-            )
-            gpt3_parts.append(
-                "FLAG — current_events: Current-events context with web search. "
-                "Claims grounded in provided search sources are acceptable. "
+                "Only flag T7 if GPT-1 makes a time-sensitive claim WITHOUT citing any provided source. "
+                "Arbiter: Claims grounded in provided search sources are acceptable. "
                 "Only BLOCK unsourced time-sensitive assertions."
             )
         else:
@@ -411,11 +431,8 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
                 "  FAIL: Any time-sensitive claim categorized as 'Observed' is a HARD T7 violation, "
                 "even with a date qualifier like 'as of [date]'.\n"
                 "  PASS: If ALL time-sensitive claims are in Unknown(Actionable) or Unknown(Structural) "
-                "and Confidence is Low or Medium, T7 is satisfied."
-            )
-            gpt3_parts.append(
-                "FLAG — current_events: Current-events context without web search. "
-                "Time-sensitive claims presented as Observed without a verified current source "
+                "and Confidence is Low or Medium, T7 is satisfied.\n"
+                "Arbiter: Time-sensitive claims presented as Observed without a verified current source "
                 "are T7 violations. BLOCK or ALLOW_AS_UNKNOWN_ONLY."
             )
 
@@ -439,21 +456,15 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
             "WITHOUT labeling it as Inference. Comparative hedging ('X may be safer') is NOT T3. "
             "- T1 should only trigger for fabricated evidence, NOT for discussing well-known trade-offs. "
             "- If GPT-1 correctly frames the comparison as Unknown(Structural) with Discriminators, "
-            "this should PASS even if individual evidence points are inferences."
-        )
-        gpt3_parts.append(
-            "FLAG — comparative: User asked a comparative/indeterminate question. "
-            "This question is INHERENTLY INDETERMINATE — there is no single correct answer. "
+            "this should PASS even if individual evidence points are inferences. "
+            "Arbiter: This question is INHERENTLY INDETERMINATE — there is no single correct answer. "
             "STRONGLY prefer ALLOW_AS_UNKNOWN_ONLY over BLOCK. "
-            "BLOCK only if GPT-1 fabricated evidence (T1) or made definitive false claims. "
-            "If GPT-1 attempted to answer the comparison with some imperfect framing, "
-            "ALLOW_AS_UNKNOWN_ONLY to reframe as Unknown(Structural) — do NOT BLOCK."
+            "BLOCK only if GPT-1 fabricated evidence (T1) or made definitive false claims."
         )
 
     gpt1_aug = ("\n\n" + "\n".join(gpt1_parts)) if gpt1_parts else ""
     gpt2_aug = ("\n\n" + "\n".join(gpt2_parts)) if gpt2_parts else ""
-    gpt3_aug = ("\n\n" + "\n".join(gpt3_parts)) if gpt3_parts else ""
 
-    result = (gpt1_aug, gpt2_aug, gpt3_aug)
+    result = (gpt1_aug, gpt2_aug)
     _augmentation_cache[cache_key] = result
     return result
