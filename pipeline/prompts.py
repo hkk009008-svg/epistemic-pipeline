@@ -295,7 +295,9 @@ _FORMAT_INSTRUCTIONS = {
         "Provide a single-paragraph or few-paragraph natural answer. "
         "Do NOT use section headers, epistemic markers, or structured format. "
         "Write as a clear, direct response. "
-        "At the very end, append a brief confidence note (e.g., 'Confidence: Medium — based on ...') "
+        "IMPORTANT: If web search results are provided, you MUST still cite sources as [1], [2], etc. "
+        "Source citations are NOT epistemic markers — they are required for grounding. "
+        "At the very end, append a brief confidence note (e.g., 'Confidence: High — based on [1], [2]') "
         "and any source links if available. Keep total length under 300 words."
     ),
 }
@@ -313,7 +315,11 @@ _GPT2_FORMAT_INSTRUCTIONS = {
         "headers, no epistemic markers in body). Do NOT flag the absence of structured format "
         "or epistemic markers as a violation. Focus verification ONLY on: "
         "(1) fabricated claims (T1), (2) unverified current facts (T7 if applicable). "
-        "T4/T5/T6 findings should be skipped for concise format."
+        "T4/T5/T6 findings should be skipped for concise format.\n"
+        "IMPORTANT: If web search sources are provided, GPT-1 may not use explicit [1], [2] "
+        "citations in concise mode. You MUST still check each claim against the SOURCE CONTENT "
+        "provided above. If a claim is factually consistent with any provided source snippet, "
+        "categorize it as 'Observed' — do NOT mark it 'Unsupported' just because it lacks a [N] marker."
     ),
 }
 
