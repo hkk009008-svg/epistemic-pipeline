@@ -10,7 +10,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from api.rate_limit import rate_limit_dependency
+from api.rate_limit import rate_limit_dependency, get_rate_limit_info
 
 import config
 from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, StressRequest, FeedbackRequest
@@ -172,7 +172,7 @@ _PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "55"))
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
-async def pipeline_endpoint(req: PipelineRequest):
+async def pipeline_endpoint(req: PipelineRequest, request: Request):
     loop = asyncio.get_event_loop()
     try:
         result = await asyncio.wait_for(
@@ -187,6 +187,12 @@ async def pipeline_endpoint(req: PipelineRequest):
         )
     except PipelineError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.get("/api/rate-limit")
+def rate_limit_info(request: Request):
+    """Return current rate limit usage for the caller's IP."""
+    return get_rate_limit_info(request)
 
 
 # ---- Stress test ----

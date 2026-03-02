@@ -4,8 +4,6 @@ All functions under test are fully deterministic (no LLM calls).
 """
 from __future__ import annotations
 
-import pytest
-
 from pipeline.convergence import compute_finding_delta, should_continue_rewrite
 
 

@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from pipeline.verifier import parse_gpt2, _all_soft
 
 

@@ -16,7 +16,7 @@ from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search
 from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
-from pipeline.decomposer import decompose_claims
+from pipeline.decomposer import decompose_claims, check_decomposition_quality
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
 from pipeline.meta_verify import meta_verify_pass
 from pipeline.metrics import PipelineMetrics, record_run
@@ -95,7 +95,10 @@ def compute_confidence(
         grounding_info = None
         if nli_grounding and nli_grounding.get("total_evaluated", 0) > 0:
             grounding_info = GroundingInfo(**nli_grounding)
-        return ConfidenceBreakdown(grounding=grounding_info)
+        return ConfidenceBreakdown(
+            grounding=grounding_info,
+            confidence_reasoning=["No claims to evaluate."],
+        )
 
     # Category counts (uniform weight — position bias removed)
     observed = inference = hypothesis = unsupported = user_provided = 0
@@ -119,10 +122,28 @@ def compute_confidence(
     unsupported_pct = round((unsupported / total) * 100, 1)
     user_provided_pct = round((user_provided / total) * 100, 1)
 
+    # Build confidence reasoning as we go
+    reasoning: list[str] = []
+    reasoning.append(f"{observed}/{total} claims verified as Observed ({observed_pct}%)")
+    if unsupported > 0:
+        reasoning.append(f"{unsupported}/{total} claims marked Unsupported ({unsupported_pct}%)")
+    if inference > 0:
+        reasoning.append(f"{inference}/{total} claims are inferences ({inference_pct}%)")
+
     # Hard findings penalty: any hard finding drops confidence one tier
     hard_count = 0
+    soft_count = 0
     if findings:
         hard_count = sum(1 for f in findings if f.get("severity") == "hard")
+        soft_count = sum(1 for f in findings if f.get("severity") == "soft")
+    if hard_count > 0:
+        hard_types = ", ".join(sorted({f["type"] for f in findings if f.get("severity") == "hard"}))
+        reasoning.append(f"{hard_count} hard violation(s) detected ({hard_types})")
+    if soft_count > 0:
+        soft_types = ", ".join(sorted({f["type"] for f in findings if f.get("severity") == "soft"}))
+        reasoning.append(f"{soft_count} soft violation(s) detected ({soft_types})")
+    if hard_count == 0 and soft_count == 0:
+        reasoning.append("No violations detected")
 
     # Base label from GPT-2 categories
     if observed_pct >= 70 and hard_count == 0:
@@ -141,8 +162,11 @@ def compute_confidence(
         gr = nli_grounding["grounding_rate"]
         contradicted = nli_grounding.get("contradicted_count", 0)
 
+        reasoning.append(f"NLI grounding rate: {gr:.0%} ({nli_grounding['grounded_count']}/{nli_grounding['total_evaluated']} claims grounded)")
+
         # Contradicted claims should downgrade confidence
         if contradicted > 0:
+            reasoning.append(f"{contradicted} claim(s) contradicted by evidence — downgrading confidence")
             if label == "High":
                 label = "Medium"
             elif label == "Medium":
@@ -150,9 +174,11 @@ def compute_confidence(
 
         # Low grounding rate with evidence available means claims are unverifiable
         if gr < 0.3 and label in ("High", "Medium"):
+            reasoning.append("Low grounding rate with evidence available — downgrading to Low")
             label = "Low"
         elif gr >= 0.7 and label == "Low" and hard_count == 0:
             # High grounding can rescue Low if no hard findings
+            reasoning.append("High grounding rate with no hard findings — upgrading to Medium")
             label = "Medium"
 
     # Build unsupported span models
@@ -175,6 +201,7 @@ def compute_confidence(
         user_provided_pct=user_provided_pct,
         total_claims=total,
         confidence_label=label,
+        confidence_reasoning=reasoning,
         grounding=grounding_info,
         unsupported_spans=span_models,
     )
@@ -216,13 +243,19 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     search_context = ""
     search_performed = False
 
+    search_attempted = False
+    search_note = ""
+
     if should_search(flags):
+        search_attempted = True
         sm = metrics.start_stage("search")
         search_sources, search_context = perform_web_search(req.prompt)
         search_performed = len(search_sources) > 0
         metrics.end_stage(sm)
         metrics.search_performed = search_performed
         metrics.search_sources_count = len(search_sources)
+        if not search_performed:
+            search_note = "Web search was enabled but returned no relevant sources for this query."
 
     gpt1_system = req.gpt1_system or DEFAULT_GPT1_SYSTEM
     gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
@@ -297,6 +330,8 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     search_kwargs = dict(
         search_performed=search_performed,
+        search_attempted=search_attempted,
+        search_note=search_note,
         search_query=req.prompt if search_performed else "",
         search_sources=search_sources,
     )
@@ -381,6 +416,17 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     metrics.end_stage(decomp_sm)
     metrics.decomposition_ran = len(atomic_claims) > 0
     metrics.atomic_claims_count = len(atomic_claims)
+
+    # Quality gate: if decomposition quality is poor, re-decompose once
+    if atomic_claims:
+        decomp_quality = check_decomposition_quality(sanitized_output, atomic_claims)
+        if decomp_quality["quality_tier"] == "poor":
+            retry_claims = decompose_claims(gpt2_cfg, sanitized_output, req.prompt)
+            if retry_claims:
+                retry_quality = check_decomposition_quality(sanitized_output, retry_claims)
+                if retry_quality["quality_tier"] != "poor":
+                    atomic_claims = retry_claims
+                    metrics.atomic_claims_count = len(atomic_claims)
 
     # ---- NLI Pre-Verification (optional layer) ----
     nli_grounding = {}

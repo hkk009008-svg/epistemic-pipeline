@@ -1288,6 +1288,30 @@ UI_HTML = """
     100% { background-position: 200% 0; }
   }
 
+  /* ---- Feedback Buttons ---- */
+  .fb-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
+  .fb-label { font-size: 11px; color: var(--text-muted); letter-spacing: 0.03em; }
+  .fb-btn { background: none; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 3px 8px; cursor: pointer; font-size: 13px; transition: var(--transition); }
+  .fb-btn:hover { border-color: var(--border-hover); background: var(--bg-surface-1); }
+  .fb-btn:disabled { opacity: 0.5; cursor: default; }
+  .fb-btn.fb-active { border-color: var(--accent-emerald); background: rgba(110,231,183,0.1); }
+  .fb-thanks { font-size: 11px; color: var(--accent-emerald); }
+
+  /* ---- Confidence Reasoning ---- */
+  .conf-reasoning { margin-top: 8px; }
+  .conf-reasoning summary { font-size: 11px; color: var(--text-tertiary); cursor: pointer; letter-spacing: 0.03em; }
+  .conf-reasoning summary:hover { color: var(--text-secondary); }
+  .conf-reasoning ul { margin: 6px 0 0 16px; list-style: disc; }
+  .conf-reasoning li { font-size: 11px; color: var(--text-secondary); line-height: 1.6; }
+
+  /* ---- Rate Limit Counter ---- */
+  .rl-counter { font-size: 10px; color: var(--text-muted); letter-spacing: 0.04em; padding: 2px 6px; border-radius: var(--radius-sm); background: var(--bg-surface-1); }
+  .rl-counter:empty { display: none; }
+  .rl-warn { color: var(--accent-rose); background: rgba(252,165,165,0.1); }
+
+  /* ---- Search Note ---- */
+  .search-note { font-size: 12px; color: var(--text-tertiary); font-style: italic; padding: 8px 0; }
+
   /* ---- Responsive ---- */
   @media (max-width: 640px) {
     .metrics-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1301,6 +1325,10 @@ UI_HTML = """
     .welcome-tiers { grid-template-columns: 1fr; }
     .welcome-title { font-size: 22px; }
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
 </style>
 </head>
 <body>
@@ -1310,14 +1338,15 @@ UI_HTML = """
     <span class="g1" id="stg1">GPT-1</span><span class="arr">&rarr;</span><span class="g2" id="stg2">GPT-2</span><span class="arr">&rarr;</span><span class="g3" id="stg3">GPT-3</span>
   </h1>
   <div class="right-controls">
-    <button class="new-chat-btn" id="newChatBtn" onclick="clearChat()" title="New conversation">
+    <span class="rl-counter" id="rl-counter" title="Rate limit remaining" aria-label="Rate limit status"></span>
+    <button class="new-chat-btn" id="newChatBtn" onclick="clearChat()" title="New conversation" aria-label="Start new conversation">
       <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
     </button>
     <button class="cfg-btn stress-btn" onclick="openStress()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
       Stress Test
     </button>
-    <button class="cfg-btn" onclick="tog()">
+    <button class="cfg-btn" onclick="tog()" aria-label="Open settings">
       <span class="kd off" id="kd"></span>
       <svg class="gear-icon" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
     </button>
@@ -1403,7 +1432,7 @@ Only include "Options" if user asked for actions/choices.</textarea>
   </div>
 </div>
 
-<div class="chat" id="ch">
+<div class="chat" id="ch" role="log" aria-live="polite" aria-relevant="additions" aria-label="Verification results">
   <div class="welcome" id="welcome">
     <div class="welcome-title">Epistemic Verification Pipeline</div>
     <div class="welcome-sub">
@@ -1523,9 +1552,9 @@ Only include "Options" if user asked for actions/choices.</textarea>
     </div>
   </div>
   <div class="tier-desc" id="tier-desc">Full Audit v7 rules &mdash; all claims verified, typicality stripped, bare stats require citations</div>
-  <form onsubmit="go(event)">
-    <input type="text" id="ui" placeholder="Ask anything..." autocomplete="off">
-    <button type="submit" id="sb">
+  <form onsubmit="go(event)" role="search" aria-label="Submit a claim for verification">
+    <input type="text" id="ui" placeholder="Ask anything..." autocomplete="off" aria-label="Enter text to verify">
+    <button type="submit" id="sb" aria-label="Submit for verification">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
     </button>
   </form>
@@ -1533,6 +1562,41 @@ Only include "Options" if user asked for actions/choices.</textarea>
 
 <script>
 let currentTier = 'strict';
+
+// ---- Feedback ----
+async function sendFeedback(btn, rating, prompt) {
+  const row = btn.parentElement;
+  row.querySelectorAll('.fb-btn').forEach(function(b) { b.disabled = true; });
+  btn.classList.add('fb-active');
+  try {
+    await fetch('/api/feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rating: rating, prompt: prompt})
+    });
+    row.innerHTML = '<span class="fb-thanks">Thanks for your feedback!</span>';
+  } catch(e) {
+    row.innerHTML = '<span class="fb-thanks">Could not send feedback.</span>';
+  }
+}
+
+// ---- Rate Limit Counter ----
+async function updateRateLimit() {
+  try {
+    const r = await fetch('/api/rate-limit');
+    if (r.ok) {
+      const d = await r.json();
+      const el = document.getElementById('rl-counter');
+      if (el) {
+        el.textContent = d.remaining + '/' + d.limit;
+        el.title = d.remaining + ' requests remaining this minute';
+        el.className = 'rl-counter' + (d.remaining <= 3 ? ' rl-warn' : '');
+      }
+    }
+  } catch(e) { /* best effort */ }
+}
+setInterval(updateRateLimit, 10000);
+
 const tierDescs = {
   strict: 'Full Audit v7 rules \u2014 all claims verified, typicality stripped, bare stats require citations',
   standard: 'Balanced verification \u2014 evidence rules applied, softer thresholds for natural prose',
@@ -1914,6 +1978,11 @@ function renderConfidence(conf) {
   h += '</div>';
   const lblCls = (conf.confidence_label || 'unknown').toLowerCase();
   h += '<div class="conf-badge ' + lblCls + '">Confidence: ' + esc(conf.confidence_label) + '</div>';
+  if (conf.confidence_reasoning && conf.confidence_reasoning.length > 0) {
+    h += '<details class="conf-reasoning"><summary>Why this confidence?</summary><ul>';
+    conf.confidence_reasoning.forEach(function(r) { h += '<li>' + esc(r) + '</li>'; });
+    h += '</ul></details>';
+  }
   h += '</div>';
   return h;
 }
@@ -2102,15 +2171,20 @@ async function go(e) {
     if (d.confidence && d.confidence.confidence_label) metaParts.push('<span>confidence: ' + esc(d.confidence.confidence_label) + '</span>');
     const metaHtml = '<div class="fo-meta">' + metaParts.join('<span class="fo-meta-sep">&middot;</span>') + '</div>';
 
-    // ---- Hero: Final Output with integrated metadata ----
+    // ---- Hero: Final Output with integrated metadata + feedback ----
+    const fbHtml = '<div class="fb-row" aria-label="Was this verification correct?">' +
+      '<span class="fb-label">Was this helpful?</span>' +
+      '<button class="fb-btn fb-up" onclick="sendFeedback(this,\\'accurate\\',\\''+esc(d.gpt1_input).replace(/'/g,"\\\\'")+'\\')" aria-label="Mark as accurate" title="Accurate">&#x1F44D;</button>' +
+      '<button class="fb-btn fb-down" onclick="sendFeedback(this,\\'inaccurate\\',\\''+esc(d.gpt1_input).replace(/'/g,"\\\\'")+'\\')" aria-label="Mark as inaccurate" title="Inaccurate">&#x1F44E;</button>' +
+      '</div>';
     if (d.final_verdict === 'PASS') {
-      ab('fo', 'Final Output', formatOutput(d.final_result) + metaHtml);
+      ab('fo', 'Final Output', formatOutput(d.final_result) + metaHtml + fbHtml);
     } else {
       let blockMsg = 'Output blocked by verification pipeline';
       if (d.arbiter_invoked && d.arbiter_decision === 'BLOCK' && d.arbiter_rationale && d.arbiter_rationale.length > 0) {
         blockMsg += '\\n\\nArbiter rationale:\\n' + d.arbiter_rationale.map(r => '\\u2022 ' + r).join('\\n');
       }
-      ab('fo blk', 'Blocked', esc(blockMsg) + metaHtml);
+      ab('fo blk', 'Blocked', esc(blockMsg) + metaHtml + fbHtml);
     }
 
     // ---- Collapsible Pipeline Details ----
@@ -2144,6 +2218,8 @@ async function go(e) {
     // ---- Web Search ----
     if (d.search_performed && d.search_sources && d.search_sources.length) {
       pab('sr', 'Web Search (' + d.search_sources.length + ' sources)', renderSearchSources(d.search_sources));
+    } else if (d.search_attempted && d.search_note) {
+      pab('sr', 'Web Search', '<div class="search-note">' + esc(d.search_note) + '</div>');
     }
 
     // ---- GPT-1 output ----
@@ -2222,11 +2298,13 @@ async function go(e) {
   } finally {
     btn.disabled = false;
     inp.focus();
+    updateRateLimit();
   }
 }
 
 lc();
 loadTav();
+updateRateLimit();
 document.getElementById('ui').focus();
 </script>
 </body>

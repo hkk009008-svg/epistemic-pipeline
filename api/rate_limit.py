@@ -32,6 +32,22 @@ def _cleanup_expired(now: float, window: float) -> None:
         del _requests[ip]
 
 
+def get_rate_limit_info(request: Request) -> dict:
+    """Return current rate limit usage for the request IP without consuming a slot."""
+    limit = config.RATE_LIMIT_PER_MINUTE
+    window = 60.0
+    now = time.time()
+    cutoff = now - window
+
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    ip = forwarded or (request.client.host if request.client else "unknown")
+
+    with _lock:
+        timestamps = _requests.get(ip, [])
+        current = [t for t in timestamps if t > cutoff]
+        return {"limit": limit, "remaining": max(0, limit - len(current)), "used": len(current)}
+
+
 def rate_limit_dependency(request: Request) -> None:
     """FastAPI dependency that enforces the per-IP rate limit.
 

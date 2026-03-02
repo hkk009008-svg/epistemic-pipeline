@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from pipeline.models import EditEntry, ClaimEntry
+from pipeline.models import EditEntry
 
 
 # ---------------------------------------------------------------------------
