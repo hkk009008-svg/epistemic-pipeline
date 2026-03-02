@@ -89,7 +89,7 @@ def _all_soft(findings: List[dict]) -> bool:
 
 
 def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
-    """Parse GPT-2 JSON output into claim_table, findings, violations, verdict, reasoning, arbiter.
+    """Parse GPT-2 JSON output into claim_table, findings, violations, verdict, reasoning.
 
     When *flags* is provided:
     - advice_requested=True: soft prescriptive findings without outcome-promise
@@ -101,11 +101,9 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
     - standard: T3 soft, T2 soft always, threshold 4+
     - light: only T1 hard, T5/T6 skipped, threshold 5+
 
-    Returns 6 values: (claim_table, violations, verdict, findings, reasoning_trace, arbiter_result)
+    Returns 5 values: (claim_table, violations, verdict, findings, reasoning_trace)
 
-    arbiter_result is None when verdict=PASS, or a dict with keys:
-      decision, rationale, edits, policy_notes
-    when verdict=FAIL and GPT-2 included arbiter fields.
+    Arbiter logic is handled separately by GPT-3 via pipeline.arbiter.parse_gpt3().
     """
     try:
         parsed = extract_json(raw)
@@ -188,37 +186,7 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
         else:
             verdict = "PASS"
 
-        # ---------- arbiter fields (merged into GPT-2 output) ----------
-        arbiter_result = None
-        if verdict == "FAIL":
-            arbiter_decision = parsed.get("arbiter_decision", "").upper()
-            if arbiter_decision in ("BLOCK", "ALLOW_WITH_EDITS", "ALLOW_AS_UNKNOWN_ONLY"):
-                from pipeline.models import EditEntry
-                edits_raw = parsed.get("edits_for_gpt1", [])
-                edits = [
-                    EditEntry(
-                        action=e.get("action", ""),
-                        target=e.get("target", ""),
-                        replacement=e.get("replacement", ""),
-                    )
-                    for e in edits_raw
-                ]
-                arbiter_result = {
-                    "decision": arbiter_decision,
-                    "rationale": parsed.get("rationale", []),
-                    "edits": edits,
-                    "policy_notes": parsed.get("final_policy_notes", []),
-                }
-            else:
-                # GPT-2 didn't include arbiter fields — default to ALLOW_WITH_EDITS
-                arbiter_result = {
-                    "decision": "ALLOW_WITH_EDITS",
-                    "rationale": ["GPT-2 found violations; attempting auto-repair."],
-                    "edits": [],
-                    "policy_notes": [],
-                }
-
-        return claim_table, violations, verdict, findings, reasoning_trace, arbiter_result
+        return claim_table, violations, verdict, findings, reasoning_trace
     except Exception:
         return (
             [],
@@ -226,5 +194,4 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
             "FAIL",
             [{"type": "GPT-2 parse error", "severity": "hard", "detail": "could not extract valid JSON"}],
             [],
-            {"decision": "ALLOW_WITH_EDITS", "rationale": ["GPT-2 output could not be parsed; attempting auto-repair."], "edits": [], "policy_notes": []},
         )
