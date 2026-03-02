@@ -96,66 +96,36 @@ body {
   align-items: center;
   gap: 0;
 }
-.top-bar h1 .g1 { color: var(--accent-blue); }
-.top-bar h1 .arr {
-  color: var(--text-muted);
-  margin: 0 6px;
-  font-size: 10px;
-  opacity: 0.5;
-}
-.top-bar h1 .g2 { color: var(--accent-amber); }
+.top-bar h1 .title-text { color: var(--accent-blue); }
 
-/* Pipeline flow animation */
-.pipeline-flow {
-  display: flex;
-  align-items: center;
-  gap: 0;
+/* Pipeline icon */
+.pipeline-icon {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
-}
-.pf-node {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  position: relative;
-  z-index: 2;
+  background: rgba(56,189,248,0.06);
+  border: 1.5px solid rgba(56,189,248,0.25);
+  box-shadow: 0 0 16px rgba(56,189,248,0.1);
+  animation: iconPulse 3s ease-in-out infinite;
 }
-.pf-node.n1 {
-  background: rgba(56,189,248,0.08);
-  border: 1.5px solid rgba(56,189,248,0.3);
-  color: var(--accent-blue);
-  box-shadow: 0 0 12px rgba(56,189,248,0.1);
+.pipeline-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke: var(--accent-blue);
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
-.pf-node.n2 {
-  background: rgba(251,191,36,0.08);
-  border: 1.5px solid rgba(251,191,36,0.3);
-  color: var(--accent-amber);
-  box-shadow: 0 0 12px rgba(251,191,36,0.1);
-}
-.pf-line {
-  width: 48px;
-  height: 1.5px;
-  background: var(--border-subtle);
-  position: relative;
-  overflow: hidden;
-}
-.pf-line::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, var(--accent-blue), transparent);
-  background-size: 200% 100%;
-  animation: flowPulse 2.5s ease-in-out infinite;
+@keyframes iconPulse {
+  0%, 100% { box-shadow: 0 0 16px rgba(56,189,248,0.1); }
+  50% { box-shadow: 0 0 24px rgba(56,189,248,0.2); }
 }
 .right-controls { display: flex; align-items: center; gap: 6px; }
 
@@ -1252,14 +1222,6 @@ body {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-@keyframes flowPulse {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
-@keyframes nodeBreath {
-  0%, 100% { box-shadow: 0 0 8px currentColor; opacity: 0.7; }
-  50% { box-shadow: 0 0 16px currentColor; opacity: 1; }
-}
 
 /* ═══ VERIFICATION DETAILS PANEL ═══ */
 .vd-panel { margin-top: 12px; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
@@ -1298,7 +1260,7 @@ body {
   .cfg-drawer { width: 100%; max-width: 100%; }
   .b { max-width: 98%; }
   .top-bar { padding: 0 16px; height: 56px; }
-  .pipeline-flow { display: none; }
+  .pipeline-icon { display: none; }
   .chat { padding: 16px; }
   .ibar { padding: 12px 16px 16px; }
   .stress-panel.open { padding: 24px 16px; }
@@ -1310,12 +1272,10 @@ body {
 
 <div class="top-bar">
   <h1>
-    <span class="g1">GPT-1</span><span class="arr">&rarr;</span><span class="g2">GPT-2</span>
+    <span class="title-text">Epistemic Pipeline</span>
   </h1>
-  <div class="pipeline-flow">
-    <div class="pf-node n1"><span>?</span></div>
-    <div class="pf-line"><div class="pf-pulse"></div></div>
-    <div class="pf-node n2"><span>?</span></div>
+  <div class="pipeline-icon">
+    <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
   </div>
   <div class="right-controls">
     <button class="cfg-btn stress-btn" onclick="openStress()">
