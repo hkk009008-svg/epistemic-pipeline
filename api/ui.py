@@ -2073,8 +2073,18 @@ async function go(e) {
     ld.remove();
 
     if (!r.ok) {
-      const err = await r.json();
-      ab('err', '', esc(err.detail || 'Request failed'));
+      const ct = r.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        const err = await r.json();
+        ab('err', '', esc(err.detail || 'Request failed'));
+      } else {
+        const txt = await r.text();
+        const hint = r.status === 504 || r.status === 502
+          ? ' The pipeline may have timed out. Try again or use a simpler query.'
+          : '';
+        ab('err', '', 'Server error (HTTP ' + r.status + ').' + hint);
+        console.error('Non-JSON error response:', r.status, txt.substring(0, 500));
+      }
       return;
     }
 
@@ -2200,7 +2210,15 @@ async function go(e) {
     timers.forEach(t => clearTimeout(t));
     clearStages();
     ld.remove();
-    ab('err', '', 'Error: ' + esc(err.message));
+    const msg = err.message || String(err);
+    if (msg.includes('Unexpected token') || msg.includes('not valid JSON')) {
+      ab('err', '', 'Server returned a non-JSON response (possible timeout or deployment issue). Check deployment logs for details.');
+    } else if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
+      ab('err', '', 'Network error: could not reach the server. Check your connection.');
+    } else {
+      ab('err', '', 'Error: ' + esc(msg));
+    }
+    console.error('Pipeline error:', err);
   } finally {
     btn.disabled = false;
     inp.focus();
