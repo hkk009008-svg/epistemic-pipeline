@@ -1,6 +1,8 @@
 """FastAPI route definitions for the epistemic verification pipeline."""
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import os
 from collections import defaultdict
@@ -164,10 +166,25 @@ def feedback_summary():
 
 # ---- Pipeline ----
 
+# Server-side timeout (seconds) — must finish before the CDN/proxy timeout
+# to return a proper JSON error instead of the platform's XML/HTML error page.
+_PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "55"))
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
-def pipeline_endpoint(req: PipelineRequest):
+async def pipeline_endpoint(req: PipelineRequest):
+    loop = asyncio.get_event_loop()
     try:
-        return run_pipeline(req)
+        result = await asyncio.wait_for(
+            loop.run_in_executor(_executor, run_pipeline, req),
+            timeout=_PIPELINE_TIMEOUT,
+        )
+        return result
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Pipeline timed out after {_PIPELINE_TIMEOUT}s. Try a simpler query or disable web search.",
+        )
     except PipelineError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
