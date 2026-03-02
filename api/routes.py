@@ -171,8 +171,66 @@ def feedback_summary():
 _PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "55"))
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
+def _stream_pipeline(req: PipelineRequest):
+    """Run pipeline and yield NDJSON progress events."""
+    import time
+    import threading
+    import queue
+
+    result_q: queue.Queue = queue.Queue()
+    error_holder: list = []
+
+    def _run():
+        try:
+            result = run_pipeline(req)
+            result_q.put(result)
+        except Exception as e:
+            error_holder.append(e)
+            result_q.put(None)
+
+    t = threading.Thread(target=_run, daemon=True)
+    start = time.monotonic()
+    t.start()
+
+    # Emit progress events while pipeline runs
+    stages = ["routing", "search", "gpt1", "decomposition", "nli", "gpt2", "gpt3", "rewrite"]
+    stage_idx = 0
+    emitted = set()
+
+    while t.is_alive():
+        elapsed = time.monotonic() - start
+        # Emit stage estimates based on typical timing
+        stage_times = [0.1, 1.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]
+        while stage_idx < len(stages) and elapsed > stage_times[stage_idx]:
+            stage_name = stages[stage_idx]
+            if stage_name not in emitted:
+                emitted.add(stage_name)
+                yield json.dumps({"type": "stage", "stage": stage_name, "elapsed": round(elapsed, 1)}) + "\n"
+            stage_idx += 1
+        t.join(timeout=0.5)
+
+    # Emit final result
+    if error_holder:
+        e = error_holder[0]
+        if isinstance(e, PipelineError):
+            yield json.dumps({"type": "error", "detail": e.detail, "status_code": e.status_code}) + "\n"
+        else:
+            yield json.dumps({"type": "error", "detail": str(e), "status_code": 500}) + "\n"
+    else:
+        result = result_q.get_nowait()
+        if result:
+            yield json.dumps({"type": "result", "data": result.model_dump()}) + "\n"
+
+
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 async def pipeline_endpoint(req: PipelineRequest, request: Request):
+    # SSE streaming mode
+    if getattr(req, "stream", False):
+        return StreamingResponse(
+            _stream_pipeline(req),
+            media_type="application/x-ndjson",
+        )
+
     loop = asyncio.get_event_loop()
     try:
         result = await asyncio.wait_for(

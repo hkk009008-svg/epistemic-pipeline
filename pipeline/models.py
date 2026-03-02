@@ -81,6 +81,8 @@ class PipelineRequest(BaseModel):
     tier: Literal["strict", "standard", "light"] = "strict"
     # Output format: auto (derive from tier), structured, annotated, concise
     output_format: Literal["auto", "structured", "annotated", "concise"] = "auto"
+    # Enable SSE streaming of pipeline progress events
+    stream: bool = False
 
     def model_post_init(self, __context):
         if os.getenv("ALLOW_PROMPT_OVERRIDE", "").lower() not in ("true", "1", "yes"):
