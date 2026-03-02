@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 
 import openai
 import anthropic as anthropic_sdk
 
 from pipeline.prompts import ACTIVATION_PATTERNS
+
+# Pre-compile activation patterns once at import time
+_COMPILED_ACTIVATION = [re.compile(p, re.IGNORECASE) for p in ACTIVATION_PATTERNS]
 
 
 class PipelineError(Exception):
@@ -23,8 +27,8 @@ def is_activation_phrase(text: str) -> bool:
     """Check if GPT-1 output is an activation/init phrase that should bypass GPT-2."""
     stripped = text.strip()
     if len(stripped) < 100:
-        for pattern in ACTIVATION_PATTERNS:
-            if re.search(pattern, stripped, re.IGNORECASE):
+        for pattern in _COMPILED_ACTIVATION:
+            if pattern.search(stripped):
                 return True
     return False
 
@@ -147,26 +151,50 @@ def call_openai(client, model: str, system: str, user_content: str,
     raise PipelineError(502, f"OpenAI call failed after {_max_retries} retries: {last_exc}")
 
 
-def _make_client(stage_config: dict):
-    """Create the appropriate client for a provider config.
+# Client cache: reuse TCP connections across calls (avoids SSL handshake per call)
+_client_cache: dict[tuple, tuple[str, object]] = {}
+_client_cache_lock = threading.Lock()
 
-    Returns (provider_type, client) where provider_type is "openai" or "anthropic".
+
+def _make_client(stage_config: dict):
+    """Return a cached (provider_type, client) for the given config.
+
+    Clients are cached by (provider, api_key, base_url) to reuse TCP
+    connections and benefit from HTTP/2 multiplexing. This avoids the
+    overhead of a fresh SSL handshake on every LLM call (3-7 per request).
     """
     provider = stage_config["provider"]
     api_key = stage_config["api_key"]
     base_url = stage_config.get("base_url", "")
 
+    cache_key = (provider, api_key, base_url)
+
+    with _client_cache_lock:
+        cached = _client_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     if provider == "anthropic":
-        return ("anthropic", anthropic_sdk.Anthropic(api_key=api_key))
+        result = ("anthropic", anthropic_sdk.Anthropic(api_key=api_key))
     elif provider in ("openrouter", "ollama"):
         # Both use OpenAI-compatible API with custom base_url
-        return ("openai", openai.OpenAI(api_key=api_key, base_url=base_url))
+        result = ("openai", openai.OpenAI(api_key=api_key, base_url=base_url))
     else:
         # Default: openai
         kwargs = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
-        return ("openai", openai.OpenAI(**kwargs))
+        result = ("openai", openai.OpenAI(**kwargs))
+
+    with _client_cache_lock:
+        _client_cache[cache_key] = result
+    return result
+
+
+def invalidate_client_cache() -> None:
+    """Clear the client cache (called when API keys change at runtime)."""
+    with _client_cache_lock:
+        _client_cache.clear()
 
 
 def call_llm(stage_config: dict, system: str, user_content: str,

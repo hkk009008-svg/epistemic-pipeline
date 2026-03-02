@@ -99,10 +99,15 @@ def should_search(flags: dict) -> bool:
 
 
 def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
-    """Re-rank search sources by authority score (descending), then by Tavily score."""
+    """Re-rank search sources by authority score (descending), then by snippet length as tiebreaker.
+
+    Authority score replaces the Tavily relevance score on s.score, so
+    we use snippet length as a secondary signal — longer snippets
+    typically contain more useful context for grounding.
+    """
     for s in sources:
         s.score = compute_source_authority(s.url)
-    return sorted(sources, key=lambda s: (-s.score, -s.score))
+    return sorted(sources, key=lambda s: (-s.score, -len(s.snippet)))
 
 
 def compute_search_quality(sources: list[SearchSource]) -> dict:

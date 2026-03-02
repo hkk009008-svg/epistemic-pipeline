@@ -6,6 +6,7 @@ The sanitizer enforces Audit v7 global rules deterministically.
 from __future__ import annotations
 
 import re
+from datetime import date
 
 # ---- Prompt Router patterns ----
 _ADVICE_RE = re.compile(
@@ -33,7 +34,16 @@ _JURISDICTION_RE = re.compile(
     r"|Wyoming|Vermont|Maine|New Hampshire|Rhode Island"
     r"|South Dakota|North Dakota|Delaware|West Virginia|Alaska)\b"
 )
-_FUTURE_YEAR_RE = re.compile(r"\b(202[5-9]|20[3-9]\d|2[1-9]\d{2}|[3-9]\d{3})\b")
+def _build_future_year_re() -> re.Pattern:
+    """Build a regex matching years strictly after the current year.
+
+    Dynamic so it stays correct across year boundaries without code changes.
+    """
+    next_year = date.today().year + 1  # 2027 when current year is 2026
+    # Match next_year through 9999
+    return re.compile(rf"\b(?:{next_year}|20[3-9]\d|2[1-9]\d{{2}}|[3-9]\d{{3}})\b")
+
+_FUTURE_YEAR_RE = _build_future_year_re()
 _CURRENT_EVENTS_RE = re.compile(
     r"(?i)\b(?:current|latest|recent|right now|today|now|this year"
     r"|as of|who is the|what is the current|new|newest|updated)\b"
@@ -120,12 +130,31 @@ _OUTCOME_PROMISE_RE = re.compile(
     r"|could help|could assist|may improve|may help|could potentially)\b"
 )
 
+def _build_stale_date_re() -> re.Pattern:
+    """Build a regex matching 'as of [Month] YYYY' where YYYY < current year.
+
+    Dynamic so it catches last year's dates without annual code changes.
+    E.g. in 2026 this matches 2000-2025; in 2027 it matches 2000-2026.
+    """
+    last_year = date.today().year - 1  # 2025 when current year is 2026
+    last_digit = last_year % 10
+    # Match 2000 through last_year:
+    # 200[0-9] covers 2000-2009
+    # 201[0-9] covers 2010-2019
+    # 202[0-{last_digit}] covers 2020-202X
+    year_pattern = rf"20[0-1]\d|202[0-{last_digit}]"
+    return re.compile(
+        r"(?i)\bas of\s+(?:January|February|March|April|May|June|July|August"
+        r"|September|October|November|December)?\s*(?:" + year_pattern + r")\b"
+    )
+
 # Stale date qualifier — "as of [Month] [Year]" where year is before current year
 # Used when current_events flag is set to catch stale time-sensitive claims
-_STALE_DATE_RE = re.compile(
-    r"(?i)\bas of\s+(?:January|February|March|April|May|June|July|August"
-    r"|September|October|November|December)?\s*(?:20[0-1]\d|202[0-4])\b"
-)
+_STALE_DATE_RE = _build_stale_date_re()
+
+# Pre-compiled whitespace cleanup patterns (avoid re.sub recompilation per call)
+_MULTI_SPACE_RE = re.compile(r"  +")
+_TRAILING_SPACE_RE = re.compile(r" +\n")
 
 # G1: Vague legal claims without statute/regulation citation (pre-compiled)
 _VAGUE_LEGAL_RE = re.compile(
@@ -182,6 +211,6 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
             result = _VAGUE_LEGAL_RE.sub("[Legal claim requires citation]", result)
 
     # Clean up residual double-spaces / trailing whitespace per line (always)
-    result = re.sub(r"  +", " ", result)
-    result = re.sub(r" +\n", "\n", result)
+    result = _MULTI_SPACE_RE.sub(" ", result)
+    result = _TRAILING_SPACE_RE.sub("\n", result)
     return result.strip()
