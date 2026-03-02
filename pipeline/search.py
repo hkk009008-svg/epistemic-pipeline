@@ -5,7 +5,7 @@ and search quality metrics for improved grounding.
 """
 from __future__ import annotations
 
-import asyncio
+import threading
 from urllib.parse import urlparse
 
 from tavily import TavilyClient
@@ -15,7 +15,7 @@ from pipeline.models import SearchSource
 
 _tavily_client: TavilyClient | None = None
 _tavily_client_key: str = ""
-_tavily_lock: asyncio.Lock | None = None
+_tavily_lock = threading.Lock()
 
 # Domain authority tiers for source ranking
 _AUTHORITY_HIGH = {
@@ -72,17 +72,15 @@ def compute_source_authority(url: str) -> float:
         return 0.3
 
 
-async def _get_tavily_client() -> TavilyClient | None:
+def _get_tavily_client() -> TavilyClient | None:
     """Return a cached TavilyClient, or None if not configured/disabled."""
-    global _tavily_client, _tavily_client_key, _tavily_lock
+    global _tavily_client, _tavily_client_key
     if not config.is_tavily_enabled():
         return None
     current_key = config.get_tavily_key()
     if not current_key:
         return None
-    if _tavily_lock is None:
-        _tavily_lock = asyncio.Lock()
-    async with _tavily_lock:
+    with _tavily_lock:
         if _tavily_client is None or _tavily_client_key != current_key:
             _tavily_client = TavilyClient(api_key=current_key)
             _tavily_client_key = current_key
@@ -130,19 +128,18 @@ def compute_search_quality(sources: list[SearchSource]) -> dict:
     }
 
 
-async def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:
+def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:
     """Call Tavily search API. Returns (sources, raw_context_string).
 
     Sources are ranked by authority score before being returned.
     Returns empty results on any error (search is best-effort).
     """
-    client = await _get_tavily_client()
+    client = _get_tavily_client()
     if client is None:
         return [], ""
 
     try:
-        response = await asyncio.to_thread(
-            client.search,
+        response = client.search(
             query=query,
             search_depth="basic",
             max_results=max_results,
