@@ -5,6 +5,7 @@ and search quality metrics for improved grounding.
 """
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import urlparse
 
 from tavily import TavilyClient
@@ -14,6 +15,7 @@ from pipeline.models import SearchSource
 
 _tavily_client: TavilyClient | None = None
 _tavily_client_key: str = ""
+_tavily_lock: asyncio.Lock | None = None
 
 # Domain authority tiers for source ranking
 _AUTHORITY_HIGH = {
@@ -70,30 +72,32 @@ def compute_source_authority(url: str) -> float:
         return 0.3
 
 
-def _get_tavily_client() -> TavilyClient | None:
+async def _get_tavily_client() -> TavilyClient | None:
     """Return a cached TavilyClient, or None if not configured/disabled."""
-    global _tavily_client, _tavily_client_key
+    global _tavily_client, _tavily_client_key, _tavily_lock
     if not config.is_tavily_enabled():
         return None
     current_key = config.get_tavily_key()
     if not current_key:
         return None
-    if _tavily_client is None or _tavily_client_key != current_key:
-        _tavily_client = TavilyClient(api_key=current_key)
-        _tavily_client_key = current_key
+    if _tavily_lock is None:
+        _tavily_lock = asyncio.Lock()
+    async with _tavily_lock:
+        if _tavily_client is None or _tavily_client_key != current_key:
+            _tavily_client = TavilyClient(api_key=current_key)
+            _tavily_client_key = current_key
     return _tavily_client
 
 
 def should_search(flags: dict) -> bool:
-    """Determine if web search should be triggered based on prompt routing flags."""
-    if not config.is_tavily_enabled():
-        return False
-    return (
-        flags.get("percent_requested", False)
-        or flags.get("legal_mode", False)
-        or flags.get("future_year", False)
-        or flags.get("current_events", False)
-    )
+    """Determine if web search should be triggered.
+
+    When Tavily is enabled, always search — every query benefits from
+    grounding in current web sources.  The previous flag-gated approach
+    missed many factual queries (e.g. "who is the president") because
+    they didn't match narrow keyword regexes.
+    """
+    return config.is_tavily_enabled()
 
 
 def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
@@ -104,59 +108,41 @@ def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
 
 
 def compute_search_quality(sources: list[SearchSource]) -> dict:
-    """Compute search quality metrics for the result set.
-
-    Returns:
-        {
-            "source_count": int,
-            "avg_authority": float,
-            "high_authority_count": int,
-            "has_gov_edu": bool,
-            "quality_tier": "high" | "medium" | "low" | "none",
-        }
-    """
+    """Compute search quality metrics for the result set."""
     if not sources:
         return {
-            "source_count": 0,
-            "avg_authority": 0.0,
-            "high_authority_count": 0,
-            "has_gov_edu": False,
-            "quality_tier": "none",
+            "source_count": 0, "avg_authority": 0.0,
+            "high_authority_count": 0, "has_gov_edu": False, "quality_tier": "none",
         }
-
     authorities = [compute_source_authority(s.url) for s in sources]
     avg = sum(authorities) / len(authorities)
     high_count = sum(1 for a in authorities if a >= 0.9)
     has_gov_edu = any(a >= 1.0 for a in authorities)
-
     if avg >= 0.8 or high_count >= 2:
         tier = "high"
     elif avg >= 0.5 or high_count >= 1:
         tier = "medium"
     else:
         tier = "low"
-
     return {
-        "source_count": len(sources),
-        "avg_authority": round(avg, 2),
-        "high_authority_count": high_count,
-        "has_gov_edu": has_gov_edu,
-        "quality_tier": tier,
+        "source_count": len(sources), "avg_authority": round(avg, 2),
+        "high_authority_count": high_count, "has_gov_edu": has_gov_edu, "quality_tier": tier,
     }
 
 
-def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:
+async def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:
     """Call Tavily search API. Returns (sources, raw_context_string).
 
     Sources are ranked by authority score before being returned.
     Returns empty results on any error (search is best-effort).
     """
-    client = _get_tavily_client()
+    client = await _get_tavily_client()
     if client is None:
         return [], ""
 
     try:
-        response = client.search(
+        response = await asyncio.to_thread(
+            client.search,
             query=query,
             search_depth="basic",
             max_results=max_results,

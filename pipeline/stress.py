@@ -85,7 +85,7 @@ _TEST_MAX_RETRIES = 2  # Retry a failed test once before recording ERROR
 _TEST_RETRY_DELAY = 3  # Seconds between test retries
 
 
-def _run_single_test(t: dict) -> dict:
+def _run_single_test(t: dict, tier: str = "strict") -> dict:
     """Run a single test case through the pipeline with retry on transient errors.
 
     Returns a result dict suitable for PSS computation and progress reporting.
@@ -98,7 +98,7 @@ def _run_single_test(t: dict) -> dict:
     for attempt in range(_TEST_MAX_RETRIES + 1):
         start = time.time()
         try:
-            pr = PipelineRequest(prompt=t["prompt"])
+            pr = PipelineRequest(prompt=t["prompt"], tier=tier)
             resp_obj = run_pipeline(pr)
             resp = resp_obj.dict() if hasattr(resp_obj, 'dict') else resp_obj.model_dump()
             duration = time.time() - start
@@ -158,23 +158,28 @@ def _is_transient_test_error(exc: Exception) -> bool:
     return any(kw in msg for kw in ("timeout", "connection", "rate limit", "503", "502", "504"))
 
 
-def generate_stress_results(tests: list):
+def generate_stress_results(tests: list, tier: str = "strict", start_index: int = 0):
     """Generator that yields NDJSON lines: progress events + final summary.
 
     Each test is run through the pipeline and results are streamed.
     Emits periodic heartbeat lines to keep the connection alive during
     long-running LLM calls (prevents proxy idle-timeout disconnects).
+
+    *start_index* allows resuming a partial run — tests before start_index
+    are skipped.  *tier* is forwarded to PipelineRequest for each test.
     """
     import threading
 
+    total_tests = len(tests)
+    tests = tests[start_index:]
     results = []
 
-    for i, t in enumerate(tests):
+    for i, t in enumerate(tests, start=start_index):
         # Run each test in a background thread so we can emit heartbeats
         result_box: list = []
 
-        def _worker(test_case=t):
-            result_box.append(_run_single_test(test_case))
+        def _worker(test_case=t, _tier=tier):
+            result_box.append(_run_single_test(test_case, tier=_tier))
 
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()
@@ -191,7 +196,7 @@ def generate_stress_results(tests: list):
         progress = {
             "type": "progress",
             "index": i + 1,
-            "total": len(tests),
+            "total": total_tests,
             "id": result["id"],
             "verdict": result["final_verdict"],
             "arbiter": result["arbiter_decision"],

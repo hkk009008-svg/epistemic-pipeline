@@ -31,6 +31,32 @@ def _date_context() -> str:
     )
 
 
+def _resolve_output_format(tier: str, output_format: str) -> str:
+    """Resolve 'auto' output format based on tier."""
+    if output_format != "auto":
+        return output_format
+    return {"strict": "structured", "standard": "annotated", "light": "concise"}.get(tier, "structured")
+
+
+def clean_for_display(text: str) -> str:
+    """Strip internal sanitizer/epistemic markers for display."""
+    import re
+    # Annotated-format inline markers
+    text = re.sub(r"\[verified\]\s*", "", text)
+    text = re.sub(r"\[inference\]\s*", "", text)
+    text = re.sub(r"\[unverified\]\s*", "", text)
+    text = re.sub(r"\[user-provided\]\s*", "", text)
+    # Sanitizer substitution markers
+    text = re.sub(r"\[Typicality language removed\]", "", text)
+    text = re.sub(r"\[Unverified generalization removed\]", "", text)
+    text = re.sub(r"\[Stale [^\]]*\]", "", text)
+    text = re.sub(r"\[Legal claim requires citation\]", "", text)
+    # Collapse double spaces and excess blank lines
+    text = re.sub(r"  +", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def _fail_message(flags: dict, search_performed: bool) -> str:
     """Return a user-friendly failure message instead of bare 'NO PASS'."""
     if flags.get("current_events") and not search_performed:
@@ -171,6 +197,10 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt1_cfg = config.get_stage_config("gpt1")
     gpt2_cfg = config.get_stage_config("gpt2")
 
+    # ---- Tier + output format resolution ----
+    tier = getattr(req, "tier", "strict") or "strict"
+    output_format = _resolve_output_format(tier, getattr(req, "output_format", "auto") or "auto")
+
     # ---- Deterministic prompt routing ----
     flags = route_prompt(req.prompt)
     metrics.flags = flags
@@ -197,7 +227,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt2_system = date_ctx + gpt2_system
 
     # Flag-driven augmentation for both stages (search-aware)
-    gpt1_aug, gpt2_aug = build_augmentation(flags, search_performed=search_performed)
+    gpt1_aug, gpt2_aug = build_augmentation(flags, search_performed=search_performed, tier=tier, output_format=output_format)
     gpt1_system += gpt1_aug
     gpt2_system += gpt2_aug
 
@@ -286,7 +316,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     # Sanitize and return directly — skip GPT-2/GPT-3 (they would FAIL the stale
     # data and the rewrite loop adds 3 more API calls for the same result).
     if flags.get("current_events") and not search_performed:
-        fast_output = sanitize_output(gpt1_output, flags)
+        fast_output = sanitize_output(gpt1_output, flags, tier=tier)
         fast_output += (
             "\n\n---\n"
             "Note: This response is based on training data that may be outdated. "
@@ -298,7 +328,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.finish()
         record_run(metrics)
         return PipelineResponse(
-            prompt_version=PROMPT_VERSION,
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw="(current-events fast path — no web search available)",
             claim_table=[], violations=[], gpt2_verdict="PASS",
@@ -319,7 +349,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.finish()
         record_run(metrics)
         return PipelineResponse(
-            prompt_version=PROMPT_VERSION,
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=True,
             gpt2_raw="(bypassed)", claim_table=[], violations=[], gpt2_verdict="PASS",
             final_verdict="PASS", final_result=gpt1_output,
@@ -329,7 +359,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         )
 
     # ---- Deterministic sanitizer (pre-clean before GPT-2) ----
-    sanitized_output = sanitize_output(gpt1_output, flags)
+    sanitized_output = sanitize_output(gpt1_output, flags, tier=tier)
     sanitizer_applied = (sanitized_output != gpt1_output)
 
     # ---- Atomic Claim Decomposition (pre-GPT-2) ----
@@ -405,7 +435,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     gpt2_sm = metrics.start_stage("gpt2", gpt2_cfg.get("provider", ""), gpt2_cfg.get("model", ""))
     gpt2_raw = call_llm(gpt2_cfg, gpt2_system, gpt2_user, expect_json=True)
     metrics.end_stage(gpt2_sm)
-    claim_table, violations, gpt2_verdict, findings, gpt2_reasoning, arbiter_result = parse_gpt2(gpt2_raw, flags=flags)
+    claim_table, violations, gpt2_verdict, findings, gpt2_reasoning, arbiter_result = parse_gpt2(gpt2_raw, flags=flags, tier=tier)
     metrics.gpt2_verdict = gpt2_verdict
     metrics.total_claims = len(claim_table)
     metrics.hard_findings = sum(1 for f in findings if f.get("severity") == "hard")
@@ -425,7 +455,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.finish()
         record_run(metrics)
         return PipelineResponse(
-            prompt_version=PROMPT_VERSION,
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
@@ -447,7 +477,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings, re_reasoning, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning, _ = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
 
         if re_verdict == "PASS":
             conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
@@ -458,7 +488,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             metrics.finish()
             record_run(metrics)
             return PipelineResponse(
-                prompt_version=PROMPT_VERSION,
+                prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
                 gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
                 gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
@@ -490,7 +520,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.finish()
         record_run(metrics)
         return PipelineResponse(
-            prompt_version=PROMPT_VERSION,
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
@@ -524,7 +554,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.end_stage(rw_sm)
 
         # Sanitize the rewrite (strip stale dates, banned evidence, etc.)
-        rewrite_output = sanitize_output(rewrite_output, flags)
+        rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
 
         # Append a note if current-events without search
         if flags.get("current_events") and not search_performed:
@@ -540,7 +570,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.finish()
         record_run(metrics)
         return PipelineResponse(
-            prompt_version=PROMPT_VERSION,
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
@@ -566,7 +596,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     rewrite_output = call_llm(gpt1_cfg, gpt1_system, rewrite_prompt)
 
     # Sanitize the rewrite before re-verification
-    rewrite_output = sanitize_output(rewrite_output, flags)
+    rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
 
     # Re-verify the rewritten output with GPT-2
     re_gpt2_user = (
@@ -576,7 +606,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
         )
     re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-    re_ct, re_viol, re_verdict, re_findings, _, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+    re_ct, re_viol, re_verdict, re_findings, _, _ = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
 
     # If still failing after arbiter rewrite, continue rewriting.
     # The arbiter decided ALLOW_WITH_EDITS (not BLOCK), meaning it believes
@@ -609,7 +639,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 f"Output the corrected response in full."
             )
         rewrite_output = call_llm(gpt1_cfg, gpt1_system, rewrite_instruction)
-        rewrite_output = sanitize_output(rewrite_output, flags)
+        rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
         # Re-verify
         re_gpt2_user = (
             f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
@@ -618,7 +648,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings, re_reasoning, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning, _ = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
         findings_history.append(re_findings)
 
     metrics.rewrite_loops = len(findings_history) - 1  # subtract initial
@@ -632,7 +662,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.finish()
         record_run(metrics)
         return PipelineResponse(
-            prompt_version=PROMPT_VERSION,
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
             gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
@@ -665,7 +695,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         f"Output the corrected response in full."
     )
     fallback_output = call_llm(gpt1_cfg, gpt1_system, fallback_prompt)
-    fallback_output = sanitize_output(fallback_output, flags)
+    fallback_output = sanitize_output(fallback_output, flags, tier=tier)
 
     metrics.final_verdict = "PASS"
     metrics.confidence_label = "Low"
@@ -673,7 +703,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     metrics.finish()
     record_run(metrics)
     return PipelineResponse(
-        prompt_version=PROMPT_VERSION,
+        prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
         gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
         gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
         gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,

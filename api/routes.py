@@ -5,7 +5,7 @@ import json
 import os
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from api.rate_limit import rate_limit_dependency
@@ -22,6 +22,20 @@ from api.ui import UI_HTML
 router = APIRouter()
 
 
+def _require_admin(request: Request):
+    """Verify admin token on config-mutation endpoints.
+
+    When ADMIN_TOKEN is set, requests must include Authorization: Bearer <token>.
+    When ADMIN_TOKEN is empty (local dev), all requests are allowed.
+    """
+    token = config.ADMIN_TOKEN
+    if not token:
+        return  # No token configured — open access (local dev)
+    auth = request.headers.get("authorization", "")
+    if auth != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="Unauthorized — invalid or missing admin token.")
+
+
 # ---- UI ----
 
 @router.get("/", response_class=HTMLResponse)
@@ -33,12 +47,12 @@ def ui():
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "key_set": config.has_api_key()}
+    return {"status": "ok"}
 
 
 # ---- OpenAI config ----
 
-@router.post("/api/openai/config")
+@router.post("/api/openai/config", dependencies=[Depends(_require_admin)])
 def set_openai_config(cfg: OpenAIConfig):
     clean_key = cfg.api_key.strip()
     clean_key = clean_key.encode("ascii", errors="ignore").decode("ascii")
@@ -62,7 +76,7 @@ def get_openai_config():
 
 # ---- Tavily (web search) config ----
 
-@router.post("/api/tavily/config")
+@router.post("/api/tavily/config", dependencies=[Depends(_require_admin)])
 def set_tavily_config(cfg: TavilyConfig):
     clean_key = cfg.api_key.strip()
     clean_key = clean_key.encode("ascii", errors="ignore").decode("ascii")
@@ -84,7 +98,7 @@ def get_tavily_config():
     }
 
 
-@router.post("/api/tavily/toggle")
+@router.post("/api/tavily/toggle", dependencies=[Depends(_require_admin)])
 def toggle_tavily(enabled: bool = True):
     if not config.has_tavily_key():
         raise HTTPException(status_code=400, detail="Set Tavily API key first.")
@@ -152,11 +166,6 @@ def feedback_summary():
 
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 def pipeline_endpoint(req: PipelineRequest):
-    if len(req.prompt) > config.MAX_PROMPT_LENGTH:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Prompt exceeds maximum length of {config.MAX_PROMPT_LENGTH} characters.",
-        )
     try:
         return run_pipeline(req)
     except PipelineError as e:
@@ -193,7 +202,10 @@ def stress_endpoint(req: StressRequest):
     if not tests:
         raise HTTPException(status_code=400, detail="No matching test cases.")
 
+    tier = getattr(req, "tier", "strict") or "strict"
+    start_index = getattr(req, "start_index", 0) or 0
+
     return StreamingResponse(
-        generate_stress_results(tests),
+        generate_stress_results(tests, tier=tier, start_index=start_index),
         media_type="application/x-ndjson",
     )

@@ -556,3 +556,155 @@ class TestParseGpt2ArbiterFields:
         _, _, verdict, _, _, arbiter = parse_gpt2(raw)
         assert verdict == "PASS"
         assert arbiter is None
+
+
+# ===================================================================
+# parse_gpt2() -- tier-aware severity and thresholds
+# ===================================================================
+
+
+class TestParseGpt2TierSeverity:
+    """Tier parameter changes severity classification and soft thresholds."""
+
+    def test_t2_hard_in_strict(self):
+        """T2 is hard in strict tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T2", "severity": "soft", "detail": "Typicality."}],
+            "verdict": "PASS",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="strict")
+        assert findings[0]["severity"] == "hard"
+        assert verdict == "FAIL"
+
+    def test_t2_soft_in_standard(self):
+        """T2 is soft in standard tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T2", "severity": "hard", "detail": "Typicality."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="standard")
+        assert findings[0]["severity"] == "soft"
+        assert verdict == "PASS"  # 1 soft < 4 threshold
+
+    def test_t3_hard_in_strict(self):
+        """T3 is hard in strict tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T3", "severity": "soft", "detail": "Causal claim."}],
+            "verdict": "PASS",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="strict")
+        assert findings[0]["severity"] == "hard"
+        assert verdict == "FAIL"
+
+    def test_t3_soft_in_standard(self):
+        """T3 is soft in standard tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T3", "severity": "hard", "detail": "Causal claim."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="standard")
+        assert findings[0]["severity"] == "soft"
+        assert verdict == "PASS"
+
+    def test_t7_hard_in_strict(self):
+        """T7 is hard in strict tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T7", "severity": "soft", "detail": "Stale fact."}],
+            "verdict": "PASS",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="strict")
+        assert findings[0]["severity"] == "hard"
+        assert verdict == "FAIL"
+
+    def test_t7_soft_in_light(self):
+        """T7 is soft in light tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T7", "severity": "hard", "detail": "Stale fact."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="light")
+        assert findings[0]["severity"] == "soft"
+        assert verdict == "PASS"  # 1 soft < 5 threshold
+
+    def test_t1_always_hard(self):
+        """T1 is hard in ALL tiers."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T1", "severity": "hard", "detail": "Fabricated."}],
+            "verdict": "FAIL",
+        })
+        for tier in ("strict", "standard", "light"):
+            _, _, verdict, findings, _, _ = parse_gpt2(raw, tier=tier)
+            assert findings[0]["severity"] == "hard", f"T1 should be hard in {tier}"
+            assert verdict == "FAIL"
+
+    def test_t5_skipped_in_light(self):
+        """T5 findings are skipped entirely in light tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T5", "severity": "soft", "detail": "Prescriptive."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="light")
+        assert findings == []
+        assert verdict == "PASS"
+
+    def test_t6_skipped_in_light(self):
+        """T6 (Reassurance framing) is skipped in light tier."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "Reassurance framing", "severity": "soft", "detail": "Praise."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _, _ = parse_gpt2(raw, tier="light")
+        assert findings == []
+        assert verdict == "PASS"
+
+    def test_strict_threshold_3(self):
+        """Strict tier: 3 soft findings = FAIL."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [
+                {"type": "Overconfidence", "severity": "soft", "detail": "A"},
+                {"type": "Missing jurisdiction", "severity": "soft", "detail": "B"},
+                {"type": "Unacknowledged conflict", "severity": "soft", "detail": "C"},
+            ],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, _, _, _ = parse_gpt2(raw, tier="strict")
+        assert verdict == "FAIL"
+
+    def test_standard_threshold_4(self):
+        """Standard tier: 3 soft findings = PASS (threshold is 4)."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [
+                {"type": "Overconfidence", "severity": "soft", "detail": "A"},
+                {"type": "Missing jurisdiction", "severity": "soft", "detail": "B"},
+                {"type": "Unacknowledged conflict", "severity": "soft", "detail": "C"},
+            ],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, _, _, _ = parse_gpt2(raw, tier="standard")
+        assert verdict == "PASS"
+
+    def test_light_threshold_5(self):
+        """Light tier: 4 soft findings = PASS (threshold is 5)."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [
+                {"type": "Overconfidence", "severity": "soft", "detail": "A"},
+                {"type": "Missing jurisdiction", "severity": "soft", "detail": "B"},
+                {"type": "Unacknowledged conflict", "severity": "soft", "detail": "C"},
+                {"type": "T4", "severity": "soft", "detail": "D"},
+            ],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, _, _, _ = parse_gpt2(raw, tier="light")
+        assert verdict == "PASS"

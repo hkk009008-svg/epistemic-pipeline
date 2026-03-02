@@ -135,41 +135,53 @@ _VAGUE_LEGAL_RE = re.compile(
 )
 
 
-def sanitize_output(text: str, flags: dict) -> str:
+def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
     """Pre-clean GPT-1 output deterministically before GPT-2 verification.
 
-    Flag-aware behavior:
+    Tier-gated behavior:
+    - strict: all rules applied (current behavior)
+    - standard: G1/G2 applied; G3 only when percent_requested; G4/G6/legal as strict
+    - light: all sanitizer rules skipped (only whitespace cleanup)
+
+    Flag-aware behavior (strict and standard tiers):
     - advice_requested: skip outcome-promise stripping (let GPT-2 handle contextually)
     - legal_mode: apply stricter evidence stripping
-    - Always enforce G2 (typicality) and G1 (banned evidence)
+    - current_events: flag stale date-qualified claims
     """
     result = text
 
-    # 1. G1: Replace banned evidence phrases with abstention marker
-    result = _BANNED_EVIDENCE_RE.sub("[Unverified generalization removed]", result)
+    # ---- G1 + G2: Banned evidence & typicality (strict and standard only) ----
+    if tier in ("strict", "standard"):
+        result = _BANNED_EVIDENCE_RE.sub("[Unverified generalization removed]", result)
+        result = _TYPICALITY_RE.sub("[Typicality language removed]", result)
 
-    # 2. G2: Replace typicality language with abstention marker
-    result = _TYPICALITY_RE.sub("[Typicality language removed]", result)
+    # ---- G3: Bare stats (citation-aware) ----
+    # strict: always strip bare stats without nearby citations
+    # standard: strip only when percent_requested
+    # light: skip entirely
+    if tier == "strict":
+        result = _replace_bare_percents(result)
+    elif tier == "standard" and flags.get("percent_requested"):
+        result = _replace_bare_percents(result)
 
-    # 3. Convert bare % claims to Unknown(Actionable) — skip if citation nearby
-    result = _replace_bare_percents(result)
+    # ---- G4: Outcome promises (strict and standard, skipped in light) ----
+    if tier in ("strict", "standard"):
+        if not flags.get("advice_requested"):
+            result = _OUTCOME_PROMISE_RE.sub("", result)
 
-    # 4. Strip outcome-promise phrases — but skip if advice was requested
-    #    (let GPT-2 handle contextually for advice-requested prompts)
-    if not flags.get("advice_requested"):
-        result = _OUTCOME_PROMISE_RE.sub("", result)
+    # ---- G6: Stale dates (strict and standard only) ----
+    if tier in ("strict", "standard"):
+        if flags.get("current_events"):
+            result = _STALE_DATE_RE.sub(
+                "[Stale — verify current status from an authoritative source]", result
+            )
 
-    # 5. Current-events mode: flag stale date-qualified claims
-    if flags.get("current_events"):
-        result = _STALE_DATE_RE.sub(
-            "[Stale — verify current status from an authoritative source]", result
-        )
+    # ---- Legal mode extra (strict and standard only) ----
+    if tier in ("strict", "standard"):
+        if flags.get("legal_mode"):
+            result = _VAGUE_LEGAL_RE.sub("[Legal claim requires citation]", result)
 
-    # 6. Legal mode: extra strict — flag any remaining vague legal language
-    if flags.get("legal_mode"):
-        result = _VAGUE_LEGAL_RE.sub("[Legal claim requires citation]", result)
-
-    # Clean up residual double-spaces / trailing whitespace per line
+    # Clean up residual double-spaces / trailing whitespace per line (always)
     result = re.sub(r"  +", " ", result)
     result = re.sub(r" +\n", "\n", result)
     return result.strip()

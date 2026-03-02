@@ -38,6 +38,47 @@ _LEGACY_TO_TRIPWIRE = {
     "Missing jurisdiction": "Missing jurisdiction",
 }
 
+# Tier-specific severity maps — keys absent from a tier's map default to "soft".
+_TIER_SEVERITY = {
+    "strict": {
+        "Fabricated statistic": "hard",
+        "Fabricated citation": "hard",
+        "False legal conclusion": "hard",
+        "Evidence instantiation": "hard",
+        "Causal claim as fact": "hard",
+        "Unverified current fact": "hard",
+        "T1": "hard", "T2": "hard", "T3": "hard", "T7": "hard",
+    },
+    "standard": {
+        "Fabricated statistic": "hard",
+        "Fabricated citation": "hard",
+        "False legal conclusion": "hard",
+        "Evidence instantiation": "hard",
+        "Unverified current fact": "hard",
+        "Causal claim as fact": "soft",
+        "T1": "hard", "T2": "soft", "T3": "soft", "T7": "hard",
+    },
+    "light": {
+        "Fabricated statistic": "hard",
+        "Fabricated citation": "hard",
+        "False legal conclusion": "hard",
+        "Evidence instantiation": "hard",
+        "Causal claim as fact": "soft",
+        "Unverified current fact": "soft",
+        "T1": "hard", "T2": "soft", "T3": "soft", "T7": "soft",
+    },
+}
+
+# Soft-finding threshold per tier: soft_count >= threshold → FAIL
+_SOFT_THRESHOLD = {"strict": 3, "standard": 4, "light": 5}
+
+# Finding types to skip entirely per tier
+_SKIP_TYPES = {
+    "strict": set(),
+    "standard": set(),
+    "light": {"T5", "T6", "Prescriptive creep", "Prescriptive violation", "Reassurance framing"},
+}
+
 # All finding types that are context-filterable when advice is requested
 _PRESCRIPTIVE_TYPES = {"Prescriptive creep", "T5", "Prescriptive violation"}
 
@@ -47,13 +88,18 @@ def _all_soft(findings: List[dict]) -> bool:
     return len(findings) > 0 and all(f.get("severity") == "soft" for f in findings)
 
 
-def parse_gpt2(raw: str, flags: Optional[dict] = None):
+def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
     """Parse GPT-2 JSON output into claim_table, findings, violations, verdict, reasoning, arbiter.
 
     When *flags* is provided:
     - advice_requested=True: soft prescriptive findings without outcome-promise
       language are filtered out.
     - jurisdiction_present=True: "Missing jurisdiction" findings are filtered out.
+
+    The *tier* parameter gates severity classification and soft-finding thresholds:
+    - strict: current behavior (T1/T2/T3/T7 hard, 3+ soft = FAIL)
+    - standard: T3 soft, T2 soft always, threshold 4+
+    - light: only T1 hard, T5/T6 skipped, threshold 5+
 
     Returns 6 values: (claim_table, violations, verdict, findings, reasoning_trace, arbiter_result)
 
@@ -89,15 +135,24 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None):
                 for v in parsed["violations"]
             ]
 
+        # Resolve severity map and skip-set for the active tier
+        severity_map = _TIER_SEVERITY.get(tier, _TIER_SEVERITY["strict"])
+        skip_types = _SKIP_TYPES.get(tier, set())
+
         findings = []  # type: List[dict]
         for f in raw_findings:
             ftype = f.get("type", "")
             severity = f.get("severity", "soft").lower()
             detail = f.get("detail", "")
 
-            # Override severity for known hard types (in case GPT-2 misclassified)
-            if ftype in _LEGACY_SEVERITY:
-                severity = _LEGACY_SEVERITY[ftype]
+            # Skip finding types not applicable in this tier
+            if ftype in skip_types:
+                continue
+
+            # Override severity for known types in this tier's map;
+            # for unknown types, keep GPT-2's self-reported severity
+            if ftype in severity_map:
+                severity = severity_map[ftype]
 
             # Context-aware filter: if advice was requested, drop soft
             # prescriptive findings unless they contain outcome promises.
@@ -124,10 +179,11 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None):
         # Derive violations list (backward compat)
         violations = [f["type"] for f in findings]
 
-        # Recompute verdict based on severity-tier rule
+        # Recompute verdict based on tier-specific severity rules
         hard_count = sum(1 for f in findings if f["severity"] == "hard")
         soft_count = sum(1 for f in findings if f["severity"] == "soft")
-        if hard_count > 0 or soft_count >= 3:
+        soft_threshold = _SOFT_THRESHOLD.get(tier, 3)
+        if hard_count > 0 or soft_count >= soft_threshold:
             verdict = "FAIL"
         else:
             verdict = "PASS"

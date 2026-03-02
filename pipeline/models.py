@@ -1,8 +1,10 @@
 """Pydantic models for pipeline requests, responses, and internal data."""
 from __future__ import annotations
 
-from pydantic import BaseModel
-from typing import Optional, List
+import os
+
+from pydantic import BaseModel, Field
+from typing import Literal, Optional, List
 
 
 class OpenAIConfig(BaseModel):
@@ -67,10 +69,22 @@ class ConfidenceBreakdown(BaseModel):
 
 
 class PipelineRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(..., max_length=10_000)
+    # System prompt overrides — only accepted when ALLOW_PROMPT_OVERRIDE=true (dev only).
+    # In production, these are silently ignored to prevent verification bypass.
     gpt1_system: str = ""
     gpt2_system: str = ""
     gpt3_system: str = ""
+    # Verification tier: strict (default/current), standard (balanced), light (fact-check only)
+    tier: Literal["strict", "standard", "light"] = "strict"
+    # Output format: auto (derive from tier), structured, annotated, concise
+    output_format: Literal["auto", "structured", "annotated", "concise"] = "auto"
+
+    def model_post_init(self, __context):
+        if not os.getenv("ALLOW_PROMPT_OVERRIDE", "").lower() in ("true", "1", "yes"):
+            object.__setattr__(self, "gpt1_system", "")
+            object.__setattr__(self, "gpt2_system", "")
+            object.__setattr__(self, "gpt3_system", "")
 
 
 class PipelineResponse(BaseModel):
@@ -116,6 +130,9 @@ class PipelineResponse(BaseModel):
     decomposition_ran: bool = False
     # Meta-verification (high-stakes cross-check)
     meta_verification: Optional[dict] = None
+    # Tier and output format metadata
+    tier: str = "strict"
+    output_format: str = "structured"
 
 
 class StageConfig(BaseModel):
@@ -128,7 +145,9 @@ class StageConfig(BaseModel):
 
 class StressRequest(BaseModel):
     category: Optional[str] = None
-    count: Optional[int] = None
+    count: Optional[int] = Field(None, ge=1, le=100)
+    tier: Literal["strict", "standard", "light"] = "strict"
+    start_index: int = Field(0, ge=0, description="Resume from this test index (0-based)")
 
 
 class FeedbackRequest(BaseModel):

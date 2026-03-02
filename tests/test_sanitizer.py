@@ -420,3 +420,80 @@ class TestRoutePromptComparative:
     def test_comparative_not_detected(self, prompt: str):
         flags = route_prompt(prompt)
         assert flags["comparative"] is False
+
+
+# ===================================================================
+# sanitize_output() -- tier gating
+# ===================================================================
+
+
+class TestSanitizeTierGating:
+    """Tier parameter controls which sanitizer rules fire."""
+
+    def test_strict_strips_banned_evidence(self, flags_all_false: dict):
+        text = "Research shows that water is wet."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert "research shows" not in result.lower()
+
+    def test_standard_strips_banned_evidence(self, flags_all_false: dict):
+        text = "Research shows that water is wet."
+        result = sanitize_output(text, flags_all_false, tier="standard")
+        assert "research shows" not in result.lower()
+
+    def test_light_preserves_banned_evidence(self, flags_all_false: dict):
+        text = "Research shows that water is wet."
+        result = sanitize_output(text, flags_all_false, tier="light")
+        assert "research shows" in result.lower()
+
+    def test_strict_strips_typicality(self, flags_all_false: dict):
+        text = "People generally prefer this approach."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert "generally" not in result.lower()
+
+    def test_light_preserves_typicality(self, flags_all_false: dict):
+        text = "People generally prefer this approach."
+        result = sanitize_output(text, flags_all_false, tier="light")
+        assert "generally" in result.lower()
+
+    def test_strict_strips_bare_percent(self, flags_all_false: dict):
+        text = "About 50% of cases succeed."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert "Unknown(Actionable)" in result
+
+    def test_standard_preserves_bare_percent_without_flag(self, flags_all_false: dict):
+        """Standard tier skips bare-percent stripping unless percent_requested."""
+        text = "About 50% of cases succeed."
+        result = sanitize_output(text, flags_all_false, tier="standard")
+        assert "50%" in result
+
+    def test_standard_strips_bare_percent_with_flag(self):
+        """Standard tier strips bare percents when percent_requested is True."""
+        flags = {
+            "advice_requested": False, "percent_requested": True,
+            "legal_mode": False, "jurisdiction_present": False,
+            "future_year": False, "current_events": False, "comparative": False,
+        }
+        text = "About 50% of cases succeed."
+        result = sanitize_output(text, flags, tier="standard")
+        assert "Unknown(Actionable)" in result
+
+    def test_light_preserves_bare_percent(self, flags_all_false: dict):
+        text = "About 50% of cases succeed."
+        result = sanitize_output(text, flags_all_false, tier="light")
+        assert "50%" in result
+
+    def test_strict_strips_outcome_promise(self, flags_all_false: dict):
+        text = "This will improve your situation."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert "will improve" not in result.lower()
+
+    def test_light_preserves_outcome_promise(self, flags_all_false: dict):
+        text = "This will improve your situation."
+        result = sanitize_output(text, flags_all_false, tier="light")
+        assert "will improve" in result.lower()
+
+    def test_light_still_cleans_whitespace(self, flags_all_false: dict):
+        """Even light tier cleans up double spaces."""
+        text = "Hello   world   today."
+        result = sanitize_output(text, flags_all_false, tier="light")
+        assert "  " not in result

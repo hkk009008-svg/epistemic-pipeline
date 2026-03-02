@@ -17,6 +17,9 @@ MAX_REWRITE_LOOPS = 3
 MAX_PROMPT_LENGTH = 10000
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
 BEST_OF_N = int(os.getenv("BEST_OF_N", "1"))  # 1 = disabled, 2+ = enable best-of-N
+# Admin token — when set, POST /api/openai/config and /api/tavily/config require
+# Authorization: Bearer <token>. When unset (local dev), config endpoints are open.
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
 # ---- Runtime overrides (set via /api/openai/config) ----
 _runtime: dict = {}
@@ -48,7 +51,7 @@ def get_key_preview() -> str:
     key = get_api_key()
     if not key:
         return ""
-    return key[:8] + "..." + key[-4:]
+    return "sk-..." + key[-4:]
 
 
 # ---- Tavily (web search) ----
@@ -71,9 +74,10 @@ def get_tavily_key() -> str:
 
 def is_tavily_enabled() -> bool:
     with _tavily_lock:
-        # Enabled if there's a key and not explicitly disabled
+        # Inline key lookup to avoid re-acquiring _tavily_lock (non-reentrant)
+        key = _tavily_runtime.get("api_key") or TAVILY_API_KEY
         if "enabled" in _tavily_runtime:
-            return _tavily_runtime["enabled"] and bool(get_tavily_key())
+            return _tavily_runtime["enabled"] and bool(key)
         return bool(TAVILY_API_KEY)
 
 

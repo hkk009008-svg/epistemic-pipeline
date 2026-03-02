@@ -302,12 +302,63 @@ DEFAULT_GPT3_SYSTEM = (
 
 
 # ---------------------------------------------------------------------------
+# Output format instructions — appended to GPT-1/GPT-2 based on resolved format
+# ---------------------------------------------------------------------------
+_FORMAT_INSTRUCTIONS = {
+    "structured": "",
+    "annotated": (
+        "\n\n## Output Format Override: ANNOTATED\n"
+        "Instead of rigid section headers (Observed/Inference/Unknown/Discriminators/Boundary), "
+        "write clean prose paragraphs. Within your prose, mark each claim with an inline "
+        "confidence marker:\n"
+        "  [verified] — fact with a verifiable citation\n"
+        "  [inference] — logical deduction, explicitly tagged\n"
+        "  [unverified] — gap or unverified claim\n"
+        "  [user-provided] — fact the user asserted\n"
+        "At the bottom, add a Confidence line: High/Medium/Low with 1-sentence justification.\n"
+        "Do NOT use section headers like 'Observed' or 'Unknown(Actionable)'. "
+        "Use natural paragraph flow with inline markers."
+    ),
+    "concise": (
+        "\n\n## Output Format Override: CONCISE\n"
+        "Provide a single-paragraph or few-paragraph natural answer. "
+        "Do NOT use section headers, epistemic markers, or structured format. "
+        "Write as a clear, direct response. "
+        "At the very end, append a brief confidence note (e.g., 'Confidence: Medium — based on ...') "
+        "and any source links if available. Keep total length under 300 words."
+    ),
+}
+
+_GPT2_FORMAT_INSTRUCTIONS = {
+    "structured": "",
+    "annotated": (
+        "\n\nFORMAT NOTE: GPT-1 was instructed to use ANNOTATED format (inline markers like "
+        "[verified], [inference], [unverified] within prose). "
+        "Do NOT flag the absence of section headers (Observed/Unknown/etc.) as a violation. "
+        "Verify the accuracy of each marked claim based on its inline marker."
+    ),
+    "concise": (
+        "\n\nFORMAT NOTE: GPT-1 was instructed to use CONCISE format (natural prose, no section "
+        "headers, no epistemic markers in body). Do NOT flag the absence of structured format "
+        "or epistemic markers as a violation. Focus verification ONLY on: "
+        "(1) fabricated claims (T1), (2) unverified current facts (T7 if applicable). "
+        "T4/T5/T6 findings should be skipped for concise format."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # build_augmentation — flag-driven prompt shaping for both stages
 # ---------------------------------------------------------------------------
 _augmentation_cache: dict = {}
 
 
-def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
+def build_augmentation(
+    flags: dict,
+    search_performed: bool = False,
+    tier: str = "strict",
+    output_format: str = "structured",
+) -> tuple:
     """Return (gpt1_aug, gpt2_aug) strings based on prompt-routing flags.
 
     Each string is appended to the respective system prompt to adapt behavior
@@ -317,11 +368,15 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
     GPT-2 now handles both verification and arbitration, so arbiter-specific
     augmentation is merged into gpt2_aug.
 
-    Results are cached by flags+search_performed to avoid rebuilding identical
-    augmentation strings across stress-test runs with similar prompt types.
+    The *tier* parameter adds tier-context instructions so LLMs understand the
+    verification strictness level.  The *output_format* parameter appends format
+    instructions that shape GPT-1 output structure and GPT-2 verification expectations.
+
+    Results are cached by flags+search_performed+tier+format to avoid rebuilding
+    identical augmentation strings across stress-test runs with similar prompt types.
     """
-    # Cache key: frozen flags + search_performed
-    cache_key = (tuple(sorted(flags.items())), search_performed)
+    # Cache key: frozen flags + search_performed + tier + format
+    cache_key = (tuple(sorted(flags.items())), search_performed, tier, output_format)
     if cache_key in _augmentation_cache:
         return _augmentation_cache[cache_key]
 
@@ -461,6 +516,37 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
             "STRONGLY prefer ALLOW_AS_UNKNOWN_ONLY over BLOCK. "
             "BLOCK only if GPT-1 fabricated evidence (T1) or made definitive false claims."
         )
+
+    # ---- Tier-specific context (standard / light) ----
+    if tier == "standard":
+        gpt1_parts.append(
+            "TIER — standard: Moderate verification. Causal claims (T3) and typicality "
+            "violations (T2) are treated as soft findings. The soft-finding threshold "
+            "for FAIL is 4 (not 3). Focus on hard fabrication (T1/T7) as critical."
+        )
+        gpt2_parts.append(
+            "TIER — standard: T2 and T3 are SOFT (not hard). Soft threshold = 4. "
+            "Only T1 and T7 remain hard. Calibrate your severity assignments accordingly."
+        )
+    elif tier == "light":
+        gpt1_parts.append(
+            "TIER — light: Fact-check only mode. Prioritize T1 (fabrication) and T7 "
+            "(unverified current facts). Prescriptive (T5) and reassurance (T6) findings "
+            "are skipped entirely. Keep your response natural and concise."
+        )
+        gpt2_parts.append(
+            "TIER — light: Only T1 (hard) and T7 (soft in light) are relevant. "
+            "T5 and T6 are SKIPPED — do not report them. Soft threshold = 5. "
+            "Focus verification only on fabricated evidence and unverified current facts."
+        )
+
+    # ---- Output format instructions ----
+    fmt_gpt1 = _FORMAT_INSTRUCTIONS.get(output_format, "")
+    fmt_gpt2 = _GPT2_FORMAT_INSTRUCTIONS.get(output_format, "")
+    if fmt_gpt1:
+        gpt1_parts.append(fmt_gpt1)
+    if fmt_gpt2:
+        gpt2_parts.append(fmt_gpt2)
 
     gpt1_aug = ("\n\n" + "\n".join(gpt1_parts)) if gpt1_parts else ""
     gpt2_aug = ("\n\n" + "\n".join(gpt2_parts)) if gpt2_parts else ""
