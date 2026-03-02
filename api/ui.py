@@ -1072,20 +1072,6 @@ body {
   border-radius: var(--radius-lg);
   z-index: 1;
 }
-.stress-log::after {
-  content: '';
-  position: absolute;
-  left: 0; right: 0;
-  height: 6px;
-  background: linear-gradient(180deg, transparent, rgba(56,189,248,0.07), transparent);
-  pointer-events: none;
-  z-index: 2;
-  animation: scanline 4s linear infinite;
-}
-@keyframes scanline {
-  0% { top: 0; }
-  100% { top: 100%; }
-}
 .stress-log .pass { color: var(--accent-emerald); }
 .stress-log .fail { color: var(--accent-rose); }
 .stress-log .arb { color: var(--accent-violet); }
