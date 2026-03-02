@@ -54,45 +54,52 @@ class TestParseGpt2PassVerdict:
     """PASS verdicts with no findings."""
 
     def test_pass_verdict(self, gpt2_pass_json: str):
-        claim_table, violations, verdict, findings, reasoning = parse_gpt2(gpt2_pass_json)
+        claim_table, violations, verdict, findings, reasoning, arbiter = parse_gpt2(gpt2_pass_json)
         assert verdict == "PASS"
         assert violations == []
         assert findings == []
+        assert arbiter is None
         assert len(claim_table) == 1
         assert claim_table[0].claim == "Water boils at 100C at sea level."
         assert claim_table[0].category == "Supported"
 
     def test_pass_with_no_flags(self, gpt2_pass_json: str):
-        claim_table, violations, verdict, findings, _ = parse_gpt2(gpt2_pass_json, flags=None)
+        claim_table, violations, verdict, findings, _, arbiter = parse_gpt2(gpt2_pass_json, flags=None)
         assert verdict == "PASS"
+        assert arbiter is None
 
 
 class TestParseGpt2HardFindings:
     """Hard findings always produce FAIL."""
 
     def test_single_hard_finding(self, gpt2_fail_hard_json: str):
-        claim_table, violations, verdict, findings, _ = parse_gpt2(gpt2_fail_hard_json)
+        claim_table, violations, verdict, findings, _, arbiter = parse_gpt2(gpt2_fail_hard_json)
         assert verdict == "FAIL"
         assert len(findings) == 1
         assert findings[0]["severity"] == "hard"
         assert findings[0]["type"] == "Fabricated statistic"
         assert "Fabricated statistic" in violations
+        # arbiter_result should have a default since no arbiter fields in JSON
+        assert arbiter is not None
+        assert arbiter["decision"] == "ALLOW_WITH_EDITS"
 
     def test_hard_finding_with_any_flags(self, gpt2_fail_hard_json: str, flags_advice_requested: dict):
         """Hard findings cause FAIL regardless of flags."""
-        _, _, verdict, findings, _ = parse_gpt2(gpt2_fail_hard_json, flags=flags_advice_requested)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(gpt2_fail_hard_json, flags=flags_advice_requested)
         assert verdict == "FAIL"
         assert len(findings) == 1
+        assert arbiter is not None
 
 
 class TestParseGpt2SoftAccumulation:
     """Three or more soft findings trigger FAIL."""
 
     def test_three_soft_findings_fail(self, gpt2_fail_soft_accumulation_json: str):
-        _, violations, verdict, findings, _ = parse_gpt2(gpt2_fail_soft_accumulation_json)
+        _, violations, verdict, findings, _, arbiter = parse_gpt2(gpt2_fail_soft_accumulation_json)
         assert verdict == "FAIL"
         assert len(findings) == 3
         assert all(f["severity"] == "soft" for f in findings)
+        assert arbiter is not None
 
     def test_two_soft_findings_pass(self):
         """Two soft findings should be PASS (threshold is >= 3)."""
@@ -104,9 +111,10 @@ class TestParseGpt2SoftAccumulation:
             ],
             "verdict": "FAIL",  # GPT-2 may say FAIL, but we recompute
         })
-        _, _, verdict, findings, _ = parse_gpt2(raw)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(raw)
         assert verdict == "PASS"
         assert len(findings) == 2
+        assert arbiter is None
 
     def test_one_soft_finding_pass(self):
         """One soft finding should be PASS."""
@@ -117,8 +125,9 @@ class TestParseGpt2SoftAccumulation:
             ],
             "verdict": "FAIL",
         })
-        _, _, verdict, _, _ = parse_gpt2(raw)
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
         assert verdict == "PASS"
+        assert arbiter is None
 
 
 # ===================================================================
@@ -135,8 +144,9 @@ class TestParseGpt2VerdictRecomputation:
             "findings": [],
             "verdict": "FAIL",
         })
-        _, _, verdict, _, _ = parse_gpt2(raw)
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
         assert verdict == "PASS"
+        assert arbiter is None
 
     def test_gpt2_says_pass_but_hard_finding_gives_fail(self):
         raw = json.dumps({
@@ -146,9 +156,10 @@ class TestParseGpt2VerdictRecomputation:
             ],
             "verdict": "PASS",
         })
-        _, _, verdict, findings, _ = parse_gpt2(raw)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(raw)
         assert verdict == "FAIL"
         assert len(findings) == 1
+        assert arbiter is not None
 
     def test_mixed_hard_and_soft(self):
         raw = json.dumps({
@@ -159,8 +170,9 @@ class TestParseGpt2VerdictRecomputation:
             ],
             "verdict": "PASS",
         })
-        _, _, verdict, _, _ = parse_gpt2(raw)
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
         assert verdict == "FAIL"
+        assert arbiter is not None
 
 
 # ===================================================================
@@ -174,35 +186,38 @@ class TestParseGpt2PrescriptiveCreepFiltering:
     def test_prescriptive_creep_dropped_when_advice_requested(
         self, gpt2_prescriptive_creep_no_outcome_json: str, flags_advice_requested: dict
     ):
-        _, violations, verdict, findings, _ = parse_gpt2(
+        _, violations, verdict, findings, _, arbiter = parse_gpt2(
             gpt2_prescriptive_creep_no_outcome_json, flags=flags_advice_requested
         )
         assert verdict == "PASS"
         assert findings == []
         assert violations == []
+        assert arbiter is None
 
     def test_prescriptive_creep_kept_when_no_advice_flag(
         self, gpt2_prescriptive_creep_no_outcome_json: str, flags_all_false: dict
     ):
-        _, violations, verdict, findings, _ = parse_gpt2(
+        _, violations, verdict, findings, _, arbiter = parse_gpt2(
             gpt2_prescriptive_creep_no_outcome_json, flags=flags_all_false
         )
         assert verdict == "PASS"  # 1 soft < 3 threshold
         assert len(findings) == 1
         assert findings[0]["type"] == "Prescriptive creep"
+        assert arbiter is None
 
     def test_prescriptive_creep_kept_when_no_flags(
         self, gpt2_prescriptive_creep_no_outcome_json: str
     ):
         """No flags at all -- prescriptive creep is NOT filtered."""
-        _, _, verdict, findings, _ = parse_gpt2(gpt2_prescriptive_creep_no_outcome_json)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(gpt2_prescriptive_creep_no_outcome_json)
         assert len(findings) == 1
+        assert arbiter is None
 
     def test_prescriptive_creep_with_outcome_kept_even_with_advice_flag(
         self, gpt2_prescriptive_creep_with_outcome_json: str, flags_advice_requested: dict
     ):
         """Outcome-promise language means the finding is kept even when advice is requested."""
-        _, violations, verdict, findings, _ = parse_gpt2(
+        _, violations, verdict, findings, _, arbiter = parse_gpt2(
             gpt2_prescriptive_creep_with_outcome_json, flags=flags_advice_requested
         )
         assert len(findings) == 1
@@ -222,9 +237,10 @@ class TestParseGpt2PrescriptiveCreepFiltering:
             ],
             "verdict": "FAIL",
         })
-        _, _, verdict, findings, _ = parse_gpt2(raw, flags=flags_advice_requested)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(raw, flags=flags_advice_requested)
         assert verdict == "FAIL"
         assert len(findings) == 1
+        assert arbiter is not None
 
     def test_filtering_changes_verdict_from_fail_to_pass(self, flags_advice_requested: dict):
         """Three soft findings, but two are filterable prescriptive creep -> PASS."""
@@ -237,11 +253,12 @@ class TestParseGpt2PrescriptiveCreepFiltering:
             ],
             "verdict": "FAIL",
         })
-        _, _, verdict, findings, _ = parse_gpt2(raw, flags=flags_advice_requested)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(raw, flags=flags_advice_requested)
         # Two prescriptive creep entries filtered, leaving 1 soft -> PASS
         assert verdict == "PASS"
         assert len(findings) == 1
         assert findings[0]["type"] == "Overconfidence"
+        assert arbiter is None
 
 
 # ===================================================================
@@ -260,13 +277,14 @@ class TestParseGpt2BackwardCompat:
             "violations": ["Unsupported evidence reference", "Overconfidence"],
             "verdict": "FAIL",
         })
-        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _, arbiter = parse_gpt2(raw)
         assert len(findings) == 2
         assert all(f["severity"] == "soft" for f in findings)
         assert findings[0]["type"] == "Unsupported evidence reference"
         assert findings[1]["type"] == "Overconfidence"
         # 2 soft findings -> PASS
         assert verdict == "PASS"
+        assert arbiter is None
 
     def test_old_violations_three_gives_fail(self):
         raw = json.dumps({
@@ -274,9 +292,10 @@ class TestParseGpt2BackwardCompat:
             "violations": ["A", "B", "C"],
             "verdict": "FAIL",
         })
-        _, _, verdict, findings, _ = parse_gpt2(raw)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(raw)
         assert verdict == "FAIL"
         assert len(findings) == 3
+        assert arbiter is not None
 
 
 # ===================================================================
@@ -288,31 +307,35 @@ class TestParseGpt2MalformedInput:
     """Malformed or unparseable input should produce a hard parse error."""
 
     def test_garbage_string(self):
-        claim_table, violations, verdict, findings, _ = parse_gpt2("not json at all !!!")
+        claim_table, violations, verdict, findings, _, arbiter = parse_gpt2("not json at all !!!")
         assert verdict == "FAIL"
         assert claim_table == []
         assert any("parse error" in v.lower() for v in violations)
         assert findings[0]["severity"] == "hard"
+        assert arbiter is not None
+        assert arbiter["decision"] == "BLOCK"
 
     def test_empty_string(self):
-        _, violations, verdict, findings, _ = parse_gpt2("")
+        _, violations, verdict, findings, _, arbiter = parse_gpt2("")
         assert verdict == "FAIL"
         assert len(findings) == 1
         assert findings[0]["severity"] == "hard"
+        assert arbiter is not None
 
     def test_valid_json_but_wrong_schema(self):
         raw = json.dumps({"foo": "bar"})
-        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _, arbiter = parse_gpt2(raw)
         # No claim_table, no findings -> should PASS (no hard/soft findings)
         assert verdict == "PASS"
         assert claim_table == []
         assert findings == []
+        assert arbiter is None
 
     def test_partial_json(self):
         """Truncated JSON that extract_json cannot fix."""
         raw = '{"claim_table": [{"claim": "test"'
         # extract_json might fix this or not -- either way parse_gpt2 should not crash
-        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _, arbiter = parse_gpt2(raw)
         # Result depends on whether extract_json can recover; just check no exception
         assert verdict in ("PASS", "FAIL")
 
@@ -335,11 +358,12 @@ class TestParseGpt2ClaimTable:
             "findings": [],
             "verdict": "PASS",
         })
-        claim_table, _, _, _, _ = parse_gpt2(raw)
+        claim_table, _, _, _, _, arbiter = parse_gpt2(raw)
         assert len(claim_table) == 3
         assert claim_table[0].claim == "Claim A"
         assert claim_table[1].category == "Inference"
         assert claim_table[2].justification == "No source."
+        assert arbiter is None
 
     def test_missing_fields_default(self):
         """Missing fields in claim entries should get defaults."""
@@ -350,7 +374,7 @@ class TestParseGpt2ClaimTable:
             "findings": [],
             "verdict": "PASS",
         })
-        claim_table, _, _, _, _ = parse_gpt2(raw)
+        claim_table, _, _, _, _, arbiter = parse_gpt2(raw)
         assert len(claim_table) == 1
         assert claim_table[0].claim == "Only claim field."
         assert claim_table[0].category == "Unknown"
@@ -362,7 +386,7 @@ class TestParseGpt2ClaimTable:
             "findings": [],
             "verdict": "PASS",
         })
-        claim_table, _, _, _, _ = parse_gpt2(raw)
+        claim_table, _, _, _, _, arbiter = parse_gpt2(raw)
         assert claim_table == []
 
 
@@ -381,9 +405,10 @@ class TestParseGpt2MarkdownWrapped:
             "verdict": "PASS",
         })
         raw = f"```json\n{inner}\n```"
-        claim_table, violations, verdict, findings, _ = parse_gpt2(raw)
+        claim_table, violations, verdict, findings, _, arbiter = parse_gpt2(raw)
         assert verdict == "PASS"
         assert len(claim_table) == 1
+        assert arbiter is None
 
     def test_fenced_json_with_prose_preamble(self):
         inner = json.dumps({
@@ -392,9 +417,10 @@ class TestParseGpt2MarkdownWrapped:
             "verdict": "FAIL",
         })
         raw = f"Here is the verification result:\n```json\n{inner}\n```"
-        _, _, verdict, findings, _ = parse_gpt2(raw)
+        _, _, verdict, findings, _, arbiter = parse_gpt2(raw)
         assert len(findings) == 1
         assert verdict == "PASS"  # Only 1 soft -> PASS
+        assert arbiter is None
 
 
 # ===================================================================
@@ -417,10 +443,11 @@ class TestParseGpt2ReasoningTrace:
             "findings": [],
             "verdict": "PASS",
         })
-        _, _, verdict, _, reasoning = parse_gpt2(raw)
+        _, _, verdict, _, reasoning, arbiter = parse_gpt2(raw)
         assert verdict == "PASS"
         assert len(reasoning) == 2
         assert "boiling point" in reasoning[0]
+        assert arbiter is None
 
     def test_reasoning_trace_missing_returns_empty_list(self):
         """If reasoning_trace is not in JSON, return empty list."""
@@ -429,7 +456,7 @@ class TestParseGpt2ReasoningTrace:
             "findings": [],
             "verdict": "PASS",
         })
-        _, _, _, _, reasoning = parse_gpt2(raw)
+        _, _, _, _, reasoning, arbiter = parse_gpt2(raw)
         assert reasoning == []
 
     def test_reasoning_trace_non_list_returns_empty(self):
@@ -440,10 +467,92 @@ class TestParseGpt2ReasoningTrace:
             "findings": [],
             "verdict": "PASS",
         })
-        _, _, _, _, reasoning = parse_gpt2(raw)
+        _, _, _, _, reasoning, arbiter = parse_gpt2(raw)
         assert reasoning == []
 
     def test_malformed_input_returns_empty_reasoning(self):
         """Malformed input should produce empty reasoning."""
-        _, _, _, _, reasoning = parse_gpt2("garbage")
+        _, _, _, _, reasoning, arbiter = parse_gpt2("garbage")
         assert reasoning == []
+        assert arbiter is not None
+
+
+# ===================================================================
+# parse_gpt2() -- merged arbiter fields
+# ===================================================================
+
+
+class TestParseGpt2ArbiterFields:
+    """parse_gpt2 extracts arbiter fields when verdict is FAIL."""
+
+    def test_arbiter_fields_extracted_on_fail(self):
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T1", "severity": "hard", "detail": "Fabricated stat."}],
+            "verdict": "FAIL",
+            "arbiter_decision": "ALLOW_WITH_EDITS",
+            "rationale": ["Claim can be deleted."],
+            "edits_for_gpt1": [
+                {"action": "DELETE", "target": "some text", "replacement": ""}
+            ],
+            "final_policy_notes": ["Note 1"],
+        })
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
+        assert verdict == "FAIL"
+        assert arbiter is not None
+        assert arbiter["decision"] == "ALLOW_WITH_EDITS"
+        assert arbiter["rationale"] == ["Claim can be deleted."]
+        assert len(arbiter["edits"]) == 1
+        assert arbiter["edits"][0].action == "DELETE"
+        assert arbiter["policy_notes"] == ["Note 1"]
+
+    def test_arbiter_block_on_fail(self):
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T1", "severity": "hard", "detail": "All fabricated."}],
+            "verdict": "FAIL",
+            "arbiter_decision": "BLOCK",
+            "rationale": ["Entire response is fabricated."],
+        })
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
+        assert verdict == "FAIL"
+        assert arbiter["decision"] == "BLOCK"
+
+    def test_arbiter_allow_as_unknown_only(self):
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [
+                {"type": "T4", "severity": "soft", "detail": "A"},
+                {"type": "T5", "severity": "soft", "detail": "B"},
+                {"type": "T6", "severity": "soft", "detail": "C"},
+            ],
+            "verdict": "FAIL",
+            "arbiter_decision": "ALLOW_AS_UNKNOWN_ONLY",
+            "rationale": ["Indeterminate question."],
+        })
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
+        assert verdict == "FAIL"
+        assert arbiter["decision"] == "ALLOW_AS_UNKNOWN_ONLY"
+
+    def test_no_arbiter_fields_defaults_to_allow_with_edits(self):
+        """When FAIL but no arbiter fields, default to ALLOW_WITH_EDITS."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T1", "severity": "hard", "detail": "Missing."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
+        assert verdict == "FAIL"
+        assert arbiter["decision"] == "ALLOW_WITH_EDITS"
+        assert arbiter["edits"] == []
+
+    def test_pass_has_no_arbiter(self):
+        """PASS verdict should have arbiter_result = None."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [],
+            "verdict": "PASS",
+        })
+        _, _, verdict, _, _, arbiter = parse_gpt2(raw)
+        assert verdict == "PASS"
+        assert arbiter is None
