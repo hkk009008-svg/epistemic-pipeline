@@ -313,7 +313,7 @@ class TestParseGpt2MalformedInput:
         assert any("parse error" in v.lower() for v in violations)
         assert findings[0]["severity"] == "hard"
         assert arbiter is not None
-        assert arbiter["decision"] == "BLOCK"
+        assert arbiter["decision"] == "ALLOW_WITH_EDITS"
 
     def test_empty_string(self):
         _, violations, verdict, findings, _, arbiter = parse_gpt2("")

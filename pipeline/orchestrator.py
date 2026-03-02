@@ -402,14 +402,14 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         nli_lines = []
         for c in atomic_claims:
             nli = c.get("nli_result", {})
-            tier = nli.get("confidence_tier", "")
-            if tier == "strong_support":
+            nli_tier = nli.get("confidence_tier", "")
+            if nli_tier == "strong_support":
                 nli_lines.append(f'  NLI-STRONG-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
-            elif tier == "weak_support":
+            elif nli_tier == "weak_support":
                 nli_lines.append(f'  NLI-WEAK-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
-            elif tier == "strong_contradiction":
+            elif nli_tier == "strong_contradiction":
                 nli_lines.append(f'  NLI-CONTRADICTED (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
-            elif tier == "weak_contradiction":
+            elif nli_tier == "weak_contradiction":
                 nli_lines.append(f'  NLI-WEAK-CONTRADICTION (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
         if nli_lines:
             grounding_str = ""
@@ -506,6 +506,23 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         # Auto-repair didn't clear it -- fall through to arbiter below
 
     # ---- Step 3: GPT-2 FAIL — use merged arbiter decision from GPT-2 ----
+    # Safety net: override BLOCK to ALLOW_WITH_EDITS when the response
+    # contains any truthful content.  The GPT-2 prompt says "BLOCK only when
+    # the ENTIRE response is unsalvageable fabrication", but gpt-4o-mini
+    # frequently over-BLOCKs.  If at least one claim is Observed, Supported,
+    # or even Inference, the response has salvageable content.
+    if arbiter_result["decision"] == "BLOCK" and claim_table:
+        salvageable_cats = {"supported", "observed", "inference", "user-provided"}
+        has_truthful = any(
+            (ct.category if isinstance(ct.category, str) else "").lower().strip() in salvageable_cats
+            for ct in claim_table
+        )
+        if has_truthful:
+            arbiter_result["decision"] = "ALLOW_WITH_EDITS"
+            arbiter_result["rationale"] = [
+                "Overridden from BLOCK: claim table contains truthful content that can be preserved with edits."
+            ] + arbiter_result["rationale"]
+
     arbiter_decision = arbiter_result["decision"]
     arbiter_rationale = arbiter_result["rationale"]
     arbiter_edits = arbiter_result["edits"]
