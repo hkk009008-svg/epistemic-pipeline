@@ -98,6 +98,7 @@ class PipelineResponse(BaseModel):
     rewrite_claim_table: List[ClaimEntry]
     rewrite_violations: List[str]
     rewrite_verdict: str
+    rewrite_reasoning: List[str] = []  # GPT-2 reasoning trace from re-verification
     # Final
     final_verdict: str
     final_result: str

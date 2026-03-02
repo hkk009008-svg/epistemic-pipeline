@@ -1784,13 +1784,14 @@ function renderViolations(viols) {
   return h + '</div>';
 }
 
-function renderVerificationDetails(d) {
+function renderVerificationDetails(d, reasoningOverride) {
   var parts = [];
 
-  // Reasoning trace
-  if (d.gpt2_reasoning && d.gpt2_reasoning.length > 0) {
+  // Reasoning trace (use override if provided, e.g. rewrite_reasoning for re-verify)
+  var reasoning = reasoningOverride || d.gpt2_reasoning;
+  if (reasoning && reasoning.length > 0) {
     var rh = '<div class="vd-section"><div class="vd-title">Reasoning Trace</div><ol class="vd-trace">';
-    d.gpt2_reasoning.forEach(function(step) { rh += '<li>' + esc(step) + '</li>'; });
+    reasoning.forEach(function(step) { rh += '<li>' + esc(step) + '</li>'; });
     rh += '</ol></div>';
     parts.push(rh);
   }
@@ -1989,7 +1990,7 @@ async function go(e) {
       ab('rw', 'GPT-1 (Rewrite)', esc(d.rewrite_output));
 
       // Re-verification
-      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderConfidence(d.confidence) + renderViolations(d.rewrite_violations) + renderVerificationDetails(d);
+      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderConfidence(d.confidence) + renderViolations(d.rewrite_violations) + renderVerificationDetails(d, d.rewrite_reasoning);
       ab('rv', 'GPT-2 (Re-verify) &mdash; ' + d.rewrite_verdict, rvBody);
     }
 

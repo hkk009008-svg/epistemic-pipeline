@@ -451,7 +451,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags)
 
         if re_verdict == "PASS":
             conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
@@ -469,6 +469,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 rewrite_occurred=True, rewrite_output=sanitized_output,
                 rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
                 rewrite_violations=re_viol, rewrite_verdict=re_verdict,
+                rewrite_reasoning=re_reasoning,
                 arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
                 arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
                 final_verdict="PASS", final_result=sanitized_output,
@@ -657,7 +658,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
-        re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags)
         findings_history.append(re_findings)
 
     metrics.rewrite_loops = len(findings_history) - 1  # subtract initial
@@ -681,6 +682,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             rewrite_occurred=True, rewrite_output=rewrite_output,
             rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
             rewrite_violations=re_viol, rewrite_verdict=re_verdict,
+            rewrite_reasoning=re_reasoning,
             final_verdict="PASS",
             final_result=rewrite_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
@@ -721,6 +723,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         rewrite_occurred=True, rewrite_output=fallback_output,
         rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
         rewrite_violations=re_viol, rewrite_verdict="PASS",
+        rewrite_reasoning=re_reasoning,
         final_verdict="PASS",
         final_result=fallback_output,
         prompt_flags=flags, sanitizer_applied=True,
