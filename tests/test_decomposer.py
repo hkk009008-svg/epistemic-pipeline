@@ -4,7 +4,12 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from pipeline.decomposer import decompose_claims
+from pipeline.decomposer import (
+    decompose_claims,
+    check_decomposition_quality,
+    _is_compound,
+    _validate_claim,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -111,3 +116,119 @@ class TestDecomposeClaims:
         call_args = mock_call.call_args
         assert "my question" in call_args[0][2]  # user_content
         assert "gpt1 text" in call_args[0][2]
+
+    @patch("pipeline.decomposer.call_llm")
+    def test_short_claims_filtered(self, mock_call):
+        mock_call.return_value = json.dumps({
+            "claims": [
+                {"text": "OK."},  # Too short (<8 chars)
+                {"text": "Water boils at 100 degrees Celsius."},
+            ]
+        })
+        cfg = {"provider": "openai", "api_key": "k", "model": "m", "base_url": ""}
+        result = decompose_claims(cfg, "output", "prompt")
+        assert len(result) == 1
+        assert result[0]["text"] == "Water boils at 100 degrees Celsius."
+
+
+# ---------------------------------------------------------------------------
+# _validate_claim
+# ---------------------------------------------------------------------------
+
+class TestValidateClaim:
+    def test_valid_claim(self):
+        result = _validate_claim({"text": "Water boils at 100C."})
+        assert result is not None
+        assert result["text"] == "Water boils at 100C."
+
+    def test_short_claim_rejected(self):
+        assert _validate_claim({"text": "Hi."}) is None
+
+    def test_no_text_field(self):
+        assert _validate_claim({"has_citation": True}) is None
+
+    def test_not_dict(self):
+        assert _validate_claim("string") is None
+
+    def test_defaults_flags(self):
+        result = _validate_claim({"text": "Some valid claim text."})
+        assert result["has_citation"] is False
+        assert result["is_unknown"] is False
+
+    def test_strips_whitespace(self):
+        result = _validate_claim({"text": "  Padded claim text.  "})
+        assert result["text"] == "Padded claim text."
+
+
+# ---------------------------------------------------------------------------
+# _is_compound
+# ---------------------------------------------------------------------------
+
+class TestIsCompound:
+    def test_simple_claim(self):
+        assert _is_compound("Water boils at 100C.") is False
+
+    def test_compound_with_and(self):
+        assert _is_compound("Water boils at 100C and ice melts at 0C and steam rises.") is True
+
+    def test_compound_with_semicolons(self):
+        assert _is_compound("The rate is 73%; the average approval takes 3 months.") is True
+
+    def test_single_semicolon_short_parts(self):
+        assert _is_compound("Short; part.") is False
+
+    def test_both_and_pattern(self):
+        assert _is_compound("Both the rate and the average are high.") is True
+
+
+# ---------------------------------------------------------------------------
+# check_decomposition_quality
+# ---------------------------------------------------------------------------
+
+class TestDecompositionQuality:
+    def test_empty_claims(self):
+        result = check_decomposition_quality("Some original text with words.", [])
+        assert result["quality_tier"] == "poor"
+        assert result["completeness_score"] == 0.0
+
+    def test_good_quality(self):
+        original = "Water boils at 100 degrees Celsius at sea level pressure."
+        claims = [
+            {"text": "Water boils at 100 degrees Celsius."},
+            {"text": "This occurs at sea level pressure."},
+        ]
+        result = check_decomposition_quality(original, claims)
+        assert result["quality_tier"] == "good"
+        assert result["completeness_score"] > 0.5
+
+    def test_poor_quality_low_coverage(self):
+        original = "The economy grew 3% last quarter, unemployment fell to 4%, and inflation remained at 2%."
+        claims = [
+            {"text": "Something unrelated to original."},
+        ]
+        result = check_decomposition_quality(original, claims)
+        assert result["completeness_score"] < 0.3
+
+    def test_compound_claims_detected(self):
+        claims = [
+            {"text": "Water boils at 100C and ice melts at 0C and both are important."},
+        ]
+        result = check_decomposition_quality("some text", claims)
+        assert result["compound_count"] == 1
+
+    def test_claim_count(self):
+        claims = [
+            {"text": "Claim one here."},
+            {"text": "Claim two here."},
+            {"text": "Claim three here."},
+        ]
+        result = check_decomposition_quality("some text", claims)
+        assert result["claim_count"] == 3
+
+    def test_avg_claim_length(self):
+        claims = [
+            {"text": "Short claim."},  # 12
+            {"text": "A much longer claim text here."},  # 30
+        ]
+        result = check_decomposition_quality("some text", claims)
+        assert result["avg_claim_length"] == 21.0

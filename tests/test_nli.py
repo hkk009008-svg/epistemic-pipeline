@@ -8,6 +8,9 @@ from pipeline.nli import (
     classify_nli,
     batch_classify_nli,
     verify_claims_with_nli,
+    compute_grounding_rate,
+    detect_unsupported_spans,
+    _compute_confidence_tier,
 )
 
 
@@ -32,6 +35,41 @@ class TestNliAvailability:
         # we just verify the function returns a bool without error
         result = is_nli_available()
         assert isinstance(result, bool)
+
+
+# ---------------------------------------------------------------------------
+# _compute_confidence_tier
+# ---------------------------------------------------------------------------
+
+class TestConfidenceTier:
+    """Test the continuous NLI score to confidence tier mapping."""
+
+    def test_strong_support(self):
+        assert _compute_confidence_tier(0.9, 0.02) == "strong_support"
+
+    def test_weak_support(self):
+        assert _compute_confidence_tier(0.5, 0.1) == "weak_support"
+
+    def test_strong_contradiction(self):
+        assert _compute_confidence_tier(0.1, 0.85) == "strong_contradiction"
+
+    def test_weak_contradiction(self):
+        assert _compute_confidence_tier(0.1, 0.55) == "weak_contradiction"
+
+    def test_neutral(self):
+        assert _compute_confidence_tier(0.2, 0.2) == "neutral"
+
+    def test_threshold_boundary_entailment(self):
+        assert _compute_confidence_tier(0.7, 0.1) == "strong_support"
+
+    def test_threshold_boundary_contradiction(self):
+        assert _compute_confidence_tier(0.1, 0.7) == "strong_contradiction"
+
+    def test_weak_boundary(self):
+        assert _compute_confidence_tier(0.4, 0.1) == "weak_support"
+
+    def test_just_below_weak(self):
+        assert _compute_confidence_tier(0.39, 0.39) == "neutral"
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +100,7 @@ class TestVerifyClaimsWithNli:
         assert len(result) == 1
         assert result[0]["nli_result"]["supported"] is True
         assert result[0]["nli_result"]["contradicted"] is False
+        assert result[0]["nli_result"]["confidence_tier"] == "strong_support"
 
     @patch("pipeline.nli.is_nli_available", return_value=True)
     @patch("pipeline.nli.batch_classify_nli")
@@ -74,6 +113,7 @@ class TestVerifyClaimsWithNli:
         result = verify_claims_with_nli(claims, evidence)
         assert result[0]["nli_result"]["contradicted"] is True
         assert result[0]["nli_result"]["supported"] is False
+        assert result[0]["nli_result"]["confidence_tier"] == "strong_contradiction"
 
     @patch("pipeline.nli.is_nli_available", return_value=True)
     @patch("pipeline.nli.batch_classify_nli")
@@ -86,6 +126,7 @@ class TestVerifyClaimsWithNli:
         result = verify_claims_with_nli(claims, evidence)
         assert result[0]["nli_result"]["supported"] is False
         assert result[0]["nli_result"]["contradicted"] is False
+        assert result[0]["nli_result"]["confidence_tier"] == "neutral"
 
     @patch("pipeline.nli.is_nli_available", return_value=True)
     @patch("pipeline.nli.batch_classify_nli")
@@ -100,6 +141,22 @@ class TestVerifyClaimsWithNli:
         assert result[0]["nli_result"]["best_entailment"] == 0.85
         assert result[0]["nli_result"]["best_source_idx"] == 1
         assert result[0]["nli_result"]["supported"] is True
+        assert result[0]["nli_result"]["confidence_tier"] == "strong_support"
+
+    @patch("pipeline.nli.is_nli_available", return_value=True)
+    @patch("pipeline.nli.batch_classify_nli")
+    def test_per_source_scores_included(self, mock_batch, mock_avail):
+        mock_batch.return_value = [
+            {"label": "neutral", "scores": {"entailment": 0.3, "contradiction": 0.1, "neutral": 0.6}},
+            {"label": "entailment", "scores": {"entailment": 0.85, "contradiction": 0.05, "neutral": 0.1}},
+        ]
+        claims = [{"text": "The rate is 73%."}]
+        evidence = ["Source A.", "Source B."]
+        result = verify_claims_with_nli(claims, evidence)
+        scores = result[0]["nli_result"]["per_source_scores"]
+        assert len(scores) == 2
+        assert scores[0]["source_idx"] == 0
+        assert scores[1]["source_idx"] == 1
 
     @patch("pipeline.nli.is_nli_available", return_value=True)
     @patch("pipeline.nli.batch_classify_nli")
@@ -118,6 +175,126 @@ class TestVerifyClaimsWithNli:
         result = verify_claims_with_nli(claims, evidence)
         assert result == claims
         assert "nli_result" not in result[0]
+
+
+# ---------------------------------------------------------------------------
+# compute_grounding_rate
+# ---------------------------------------------------------------------------
+
+class TestGroundingRate:
+    """Test grounding rate computation."""
+
+    def test_empty_claims(self):
+        result = compute_grounding_rate([])
+        assert result["grounding_rate"] == 0.0
+        assert result["total_evaluated"] == 0
+
+    def test_no_nli_results(self):
+        claims = [{"text": "claim1"}, {"text": "claim2"}]
+        result = compute_grounding_rate(claims)
+        assert result["grounding_rate"] == 0.0
+        assert result["total_evaluated"] == 0
+
+    def test_all_supported(self):
+        claims = [
+            {"text": "c1", "nli_result": {"confidence_tier": "strong_support", "best_entailment": 0.9}},
+            {"text": "c2", "nli_result": {"confidence_tier": "weak_support", "best_entailment": 0.5}},
+        ]
+        result = compute_grounding_rate(claims)
+        assert result["grounding_rate"] == 1.0
+        assert result["grounded_count"] == 2
+        assert result["total_evaluated"] == 2
+
+    def test_mixed(self):
+        claims = [
+            {"text": "c1", "nli_result": {"confidence_tier": "strong_support"}},
+            {"text": "c2", "nli_result": {"confidence_tier": "neutral"}},
+            {"text": "c3", "nli_result": {"confidence_tier": "strong_contradiction"}},
+            {"text": "c4", "nli_result": {"confidence_tier": "weak_support"}},
+        ]
+        result = compute_grounding_rate(claims)
+        assert result["grounding_rate"] == 0.5  # 2/4
+        assert result["grounded_count"] == 2
+        assert result["contradicted_count"] == 1
+        assert result["neutral_count"] == 1
+
+    def test_all_contradicted(self):
+        claims = [
+            {"text": "c1", "nli_result": {"confidence_tier": "strong_contradiction"}},
+        ]
+        result = compute_grounding_rate(claims)
+        assert result["grounding_rate"] == 0.0
+        assert result["contradicted_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# detect_unsupported_spans
+# ---------------------------------------------------------------------------
+
+class TestDetectUnsupportedSpans:
+    """Test unsupported span detection."""
+
+    def test_no_claims(self):
+        assert detect_unsupported_spans("Some text.", []) == []
+
+    def test_no_nli_results(self):
+        claims = [{"text": "Some claim."}]
+        assert detect_unsupported_spans("Some claim.", claims) == []
+
+    def test_contradicted_span_detected(self):
+        text = "Water boils at 50 degrees Celsius."
+        claims = [{
+            "text": "Water boils at 50 degrees Celsius.",
+            "nli_result": {
+                "confidence_tier": "strong_contradiction",
+                "worst_contradiction": 0.88,
+                "best_entailment": 0.05,
+            },
+        }]
+        spans = detect_unsupported_spans(text, claims)
+        assert len(spans) == 1
+        assert spans[0]["reason"] == "contradicted_by_evidence"
+        assert spans[0]["start"] >= 0
+
+    def test_no_evidence_span_detected(self):
+        text = "The GDP of Narnia is $500 billion."
+        claims = [{
+            "text": "The GDP of Narnia is $500 billion.",
+            "nli_result": {
+                "confidence_tier": "neutral",
+                "worst_contradiction": 0.1,
+                "best_entailment": 0.1,
+            },
+        }]
+        spans = detect_unsupported_spans(text, claims)
+        assert len(spans) == 1
+        assert spans[0]["reason"] == "no_evidence_found"
+
+    def test_supported_claims_not_flagged(self):
+        text = "Water boils at 100C."
+        claims = [{
+            "text": "Water boils at 100C.",
+            "nli_result": {
+                "confidence_tier": "strong_support",
+                "worst_contradiction": 0.02,
+                "best_entailment": 0.95,
+            },
+        }]
+        spans = detect_unsupported_spans(text, claims)
+        assert len(spans) == 0
+
+    def test_weak_support_not_flagged(self):
+        text = "The rate is about 50%."
+        claims = [{
+            "text": "The rate is about 50%.",
+            "nli_result": {
+                "confidence_tier": "weak_support",
+                "worst_contradiction": 0.1,
+                "best_entailment": 0.45,
+            },
+        }]
+        spans = detect_unsupported_spans(text, claims)
+        assert len(spans) == 0
 
 
 # ---------------------------------------------------------------------------

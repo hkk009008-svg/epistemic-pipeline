@@ -1287,6 +1287,36 @@ body {
   50% { box-shadow: 0 0 16px currentColor; opacity: 1; }
 }
 
+/* ═══ VERIFICATION DETAILS PANEL ═══ */
+.vd-panel { margin-top: 12px; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+.vd-summary { padding: 10px 14px; cursor: pointer; font-size: 13px; font-weight: 600; color: #8b949e; background: #161b22; user-select: none; }
+.vd-summary:hover { color: #c9d1d9; background: #1c2129; }
+.vd-panel[open] .vd-summary { border-bottom: 1px solid #30363d; }
+.vd-section { padding: 12px 14px; border-bottom: 1px solid #21262d; }
+.vd-section:last-child { border-bottom: none; }
+.vd-title { font-size: 12px; font-weight: 600; color: #58a6ff; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+.vd-trace { margin: 0; padding-left: 20px; font-size: 13px; color: #c9d1d9; line-height: 1.6; }
+.vd-trace li { margin-bottom: 4px; }
+.grounding-bar-wrap { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.grounding-bar { flex: 1; height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; }
+.grounding-fill { height: 100%; background: linear-gradient(90deg, #f85149, #d29922, #3fb950); border-radius: 4px; transition: width 0.3s; }
+.grounding-pct { font-size: 14px; font-weight: 700; color: #e6edf3; min-width: 40px; }
+.grounding-stats { font-size: 12px; color: #8b949e; }
+.vd-spans { display: flex; flex-direction: column; gap: 6px; }
+.vd-span { padding: 8px 10px; border-radius: 6px; font-size: 13px; color: #e6edf3; }
+.span-contra { background: rgba(248, 81, 73, 0.15); border-left: 3px solid #f85149; }
+.span-noevid { background: rgba(210, 153, 34, 0.15); border-left: 3px solid #d29922; }
+.span-reason { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; margin-right: 6px; opacity: 0.8; }
+.vd-meta { display: flex; flex-direction: column; gap: 6px; }
+.vd-meta-item { padding: 8px 10px; border-radius: 6px; font-size: 13px; color: #e6edf3; }
+.meta-high { background: rgba(248, 81, 73, 0.15); border-left: 3px solid #f85149; }
+.meta-med { background: rgba(210, 153, 34, 0.15); border-left: 3px solid #d29922; }
+.meta-low { background: rgba(139, 148, 158, 0.1); border-left: 3px solid #8b949e; }
+.meta-sev { font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 4px; }
+.meta-type { font-weight: 600; color: #58a6ff; margin-right: 4px; }
+.vd-flags { display: flex; flex-wrap: wrap; gap: 6px; }
+.flag-chip { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; background: rgba(88, 166, 255, 0.15); color: #58a6ff; border: 1px solid rgba(88, 166, 255, 0.3); }
+
 /* ═══ RESPONSIVE ═══ */
 @media (max-width: 640px) {
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1754,6 +1784,68 @@ function renderViolations(viols) {
   return h + '</div>';
 }
 
+function renderVerificationDetails(d) {
+  var parts = [];
+
+  // Reasoning trace
+  if (d.gpt2_reasoning && d.gpt2_reasoning.length > 0) {
+    var rh = '<div class="vd-section"><div class="vd-title">Reasoning Trace</div><ol class="vd-trace">';
+    d.gpt2_reasoning.forEach(function(step) { rh += '<li>' + esc(step) + '</li>'; });
+    rh += '</ol></div>';
+    parts.push(rh);
+  }
+
+  // NLI Grounding
+  if (d.confidence && d.confidence.grounding && d.confidence.grounding.total_evaluated > 0) {
+    var g = d.confidence.grounding;
+    var pct = Math.round(g.grounding_rate * 100);
+    var gh = '<div class="vd-section"><div class="vd-title">NLI Grounding Rate</div>';
+    gh += '<div class="grounding-bar-wrap">';
+    gh += '<div class="grounding-bar"><div class="grounding-fill" style="width:' + pct + '%"></div></div>';
+    gh += '<span class="grounding-pct">' + pct + '%</span></div>';
+    gh += '<div class="grounding-stats">' + g.grounded_count + ' grounded, ' + g.contradicted_count + ' contradicted, ' + g.neutral_count + ' neutral of ' + g.total_evaluated + ' evaluated</div>';
+    gh += '</div>';
+    parts.push(gh);
+  }
+
+  // Unsupported spans
+  if (d.confidence && d.confidence.unsupported_spans && d.confidence.unsupported_spans.length > 0) {
+    var sh = '<div class="vd-section"><div class="vd-title">Unsupported Spans</div><div class="vd-spans">';
+    d.confidence.unsupported_spans.forEach(function(s) {
+      var badge = s.reason === 'contradicted_by_evidence' ? 'span-contra' : 'span-noevid';
+      sh += '<div class="vd-span ' + badge + '"><span class="span-reason">' + esc(s.reason.replace(/_/g, ' ')) + '</span> ' + esc(s.text) + '</div>';
+    });
+    sh += '</div></div>';
+    parts.push(sh);
+  }
+
+  // Meta-verification
+  if (d.meta_verification && d.meta_verification.ran && d.meta_verification.issues && d.meta_verification.issues.length > 0) {
+    var mh = '<div class="vd-section"><div class="vd-title">Meta-Verification Issues</div><div class="vd-meta">';
+    d.meta_verification.issues.forEach(function(issue) {
+      var sev = issue.severity === 'high' ? 'meta-high' : (issue.severity === 'medium' ? 'meta-med' : 'meta-low');
+      mh += '<div class="vd-meta-item ' + sev + '"><span class="meta-sev">' + esc(issue.severity) + '</span> <span class="meta-type">' + esc(issue.type) + '</span>: ' + esc(issue.detail) + '</div>';
+    });
+    mh += '</div></div>';
+    parts.push(mh);
+  }
+
+  // Prompt flags
+  if (d.prompt_flags) {
+    var active = Object.keys(d.prompt_flags).filter(function(k) { return d.prompt_flags[k]; });
+    if (active.length > 0) {
+      var fh = '<div class="vd-section"><div class="vd-title">Active Flags</div><div class="vd-flags">';
+      active.forEach(function(f) { fh += '<span class="flag-chip">' + esc(f) + '</span>'; });
+      fh += '</div></div>';
+      parts.push(fh);
+    }
+  }
+
+  if (parts.length === 0) return '';
+
+  return '<details class="vd-panel"><summary class="vd-summary">Verification Details</summary>' + parts.join('') + '</details>';
+}
+
 function editActionCls(a) {
   const al = (a||'').toUpperCase();
   if (al === 'DELETE') return 'del';
@@ -1833,7 +1925,7 @@ async function go(e) {
     }
 
     // ---- GPT-2 results ----
-    let g2body = renderClaimTable(d.claim_table) + renderConfidence(d.confidence) + renderViolations(d.violations);
+    let g2body = renderClaimTable(d.claim_table) + renderConfidence(d.confidence) + renderViolations(d.violations) + renderVerificationDetails(d);
     ab('g2', 'GPT-2 (Verifier) &mdash; ' + d.gpt2_verdict, g2body);
 
     if (d.gpt2_verdict === 'PASS') {
@@ -1897,7 +1989,7 @@ async function go(e) {
       ab('rw', 'GPT-1 (Rewrite)', esc(d.rewrite_output));
 
       // Re-verification
-      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderConfidence(d.confidence) + renderViolations(d.rewrite_violations);
+      let rvBody = renderClaimTable(d.rewrite_claim_table) + renderConfidence(d.confidence) + renderViolations(d.rewrite_violations) + renderVerificationDetails(d);
       ab('rv', 'GPT-2 (Re-verify) &mdash; ' + d.rewrite_verdict, rvBody);
     }
 
