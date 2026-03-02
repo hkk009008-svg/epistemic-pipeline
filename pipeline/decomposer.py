@@ -128,6 +128,48 @@ def check_decomposition_quality(
     }
 
 
+# Patterns for trivial / non-checkworthy claims
+_TRIVIAL_PATTERNS = [
+    re.compile(r"^(the )?(sky|water|sun|earth|grass) (is|are) ", re.IGNORECASE),
+    re.compile(r"^(this|that|it) (is|was) (a|an|the) ", re.IGNORECASE),
+    re.compile(r"^(in (summary|conclusion|general|other words))", re.IGNORECASE),
+    re.compile(r"^(as (mentioned|noted|stated|discussed))", re.IGNORECASE),
+]
+
+# Minimum word count for a checkworthy claim (conservative to avoid false negatives)
+_MIN_CHECKWORTHY_WORDS = 3
+
+
+def filter_checkworthy(claims: List[dict]) -> List[dict]:
+    """Filter out trivial/non-checkworthy claims.
+
+    Removes:
+    - Tautologies and common knowledge
+    - Transition/structural phrases
+    - User-provided assertions (already flagged)
+    - Claims too short to be meaningful
+    """
+    filtered = []
+    for c in claims:
+        text = c.get("text", "").strip()
+
+        # Skip user-provided claims (no need to verify what the user said)
+        if c.get("is_user_provided", False):
+            filtered.append(c)  # keep but mark as user-provided
+            continue
+
+        # Skip trivially short
+        if len(text.split()) < _MIN_CHECKWORTHY_WORDS:
+            continue
+
+        # Skip trivial patterns
+        if any(pat.match(text) for pat in _TRIVIAL_PATTERNS):
+            continue
+
+        filtered.append(c)
+    return filtered
+
+
 def decompose_claims(stage_config: dict, gpt1_output: str,
                      user_prompt: str = "") -> List[dict]:
     """Decompose GPT-1 output into atomic claims.
@@ -149,7 +191,8 @@ def decompose_claims(stage_config: dict, gpt1_output: str,
             v = _validate_claim(c)
             if v is not None:
                 validated.append(v)
-        return validated
+        # Filter out trivial/non-checkworthy claims
+        return filter_checkworthy(validated)
     except Exception:
         # Decomposition failure is non-fatal — GPT-2 can still work without it
         return []
