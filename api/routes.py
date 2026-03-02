@@ -11,10 +11,12 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from api.rate_limit import rate_limit_dependency
 
 import config
-from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, StressRequest
+from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, StressRequest, FeedbackRequest
 from pipeline.helpers import PipelineError
 from pipeline.orchestrator import run_pipeline
 from pipeline.stress import generate_stress_results
+from pipeline.metrics import get_aggregate
+from pipeline.feedback import FeedbackEntry, get_feedback_store
 from api.ui import UI_HTML
 
 router = APIRouter()
@@ -108,6 +110,42 @@ def get_stage_config_endpoint(stage: str):
         "model": cfg["model"],
         "key_set": bool(cfg["api_key"]),
     }
+
+
+# ---- Metrics ----
+
+@router.get("/api/metrics")
+def metrics_endpoint():
+    """Return aggregate pipeline metrics since startup."""
+    return get_aggregate().to_dict()
+
+
+# ---- Feedback ----
+
+@router.post("/api/feedback")
+def submit_feedback(req: FeedbackRequest):
+    """Submit user feedback on a pipeline result."""
+    if req.rating not in ("accurate", "inaccurate", "partially_accurate"):
+        raise HTTPException(status_code=400, detail="Rating must be: accurate, inaccurate, or partially_accurate")
+    import uuid
+    store = get_feedback_store()
+    entry = FeedbackEntry(
+        feedback_id=uuid.uuid4().hex[:12],
+        request_id=req.request_id,
+        prompt=req.prompt,
+        rating=req.rating,
+        verdict_correct=req.verdict_correct,
+        confidence_correct=req.confidence_correct,
+        comment=req.comment,
+    )
+    store.add(entry)
+    return {"status": "ok", "feedback_id": entry.feedback_id}
+
+
+@router.get("/api/feedback/summary")
+def feedback_summary():
+    """Return aggregate feedback statistics."""
+    return get_feedback_store().get_summary()
 
 
 # ---- Pipeline ----

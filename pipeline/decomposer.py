@@ -2,9 +2,15 @@
 
 Runs as a separate LLM call BEFORE GPT-2 verification.
 Each claim is a single factual assertion that can be independently verified.
+
+Features:
+- Quality validation (completeness, correctness checks)
+- Compound claim detection and splitting
+- Decomposition quality metrics
 """
 from __future__ import annotations
 
+import re
 from typing import List
 
 from pipeline.helpers import extract_json, call_llm
@@ -27,6 +33,100 @@ DECOMPOSER_SYSTEM = (
     "]}"
 )
 
+# Patterns suggesting a compound claim (multiple assertions in one)
+_COMPOUND_PATTERNS = [
+    re.compile(r"\band\b.*\band\b", re.IGNORECASE),  # multiple "and" conjunctions
+    re.compile(r"\bwhile\b.*\balso\b", re.IGNORECASE),
+    re.compile(r"\bboth\b.*\band\b", re.IGNORECASE),
+]
+
+# Min length for a meaningful claim
+_MIN_CLAIM_LENGTH = 8
+
+
+def _validate_claim(c: dict) -> dict | None:
+    """Validate and normalize a single claim dict. Returns None if invalid."""
+    if not isinstance(c, dict) or "text" not in c:
+        return None
+    text = str(c["text"]).strip()
+    if len(text) < _MIN_CLAIM_LENGTH:
+        return None
+    return {
+        "text": text,
+        "has_citation": bool(c.get("has_citation", False)),
+        "is_unknown": bool(c.get("is_unknown", False)),
+        "is_user_provided": bool(c.get("is_user_provided", False)),
+    }
+
+
+def _is_compound(claim_text: str) -> bool:
+    """Heuristic check if a claim text contains multiple assertions."""
+    for pat in _COMPOUND_PATTERNS:
+        if pat.search(claim_text):
+            return True
+    # Check for semicolons separating clauses
+    if ";" in claim_text:
+        parts = [p.strip() for p in claim_text.split(";") if len(p.strip()) >= 10]
+        if len(parts) >= 2:
+            return True
+    return False
+
+
+def check_decomposition_quality(
+    original_text: str,
+    claims: List[dict],
+) -> dict:
+    """Evaluate the quality of a decomposition.
+
+    Returns:
+        {
+            "completeness_score": float (0-1),  # coverage of original text
+            "compound_count": int,  # claims that look like they need further splitting
+            "avg_claim_length": float,
+            "claim_count": int,
+            "quality_tier": "good" | "acceptable" | "poor",
+        }
+    """
+    if not claims:
+        return {
+            "completeness_score": 0.0,
+            "compound_count": 0,
+            "avg_claim_length": 0.0,
+            "claim_count": 0,
+            "quality_tier": "poor",
+        }
+
+    # Completeness: check what fraction of original content words appear in claims
+    orig_words = set(re.findall(r'\b\w{4,}\b', original_text.lower()))
+    claim_words = set()
+    for c in claims:
+        claim_words.update(re.findall(r'\b\w{4,}\b', c.get("text", "").lower()))
+
+    completeness = len(orig_words & claim_words) / max(len(orig_words), 1)
+
+    # Compound detection
+    compound_count = sum(1 for c in claims if _is_compound(c.get("text", "")))
+
+    # Average claim length
+    lengths = [len(c.get("text", "")) for c in claims]
+    avg_length = sum(lengths) / max(len(lengths), 1)
+
+    # Quality tier
+    if completeness >= 0.6 and compound_count == 0:
+        tier = "good"
+    elif completeness >= 0.4 or compound_count <= 1:
+        tier = "acceptable"
+    else:
+        tier = "poor"
+
+    return {
+        "completeness_score": round(completeness, 3),
+        "compound_count": compound_count,
+        "avg_claim_length": round(avg_length, 1),
+        "claim_count": len(claims),
+        "quality_tier": tier,
+    }
+
 
 def decompose_claims(stage_config: dict, gpt1_output: str,
                      user_prompt: str = "") -> List[dict]:
@@ -46,13 +146,9 @@ def decompose_claims(stage_config: dict, gpt1_output: str,
         # Validate structure
         validated = []
         for c in claims:
-            if isinstance(c, dict) and "text" in c:
-                validated.append({
-                    "text": str(c["text"]),
-                    "has_citation": bool(c.get("has_citation", False)),
-                    "is_unknown": bool(c.get("is_unknown", False)),
-                    "is_user_provided": bool(c.get("is_user_provided", False)),
-                })
+            v = _validate_claim(c)
+            if v is not None:
+                validated.append(v)
         return validated
     except Exception:
         # Decomposition failure is non-fatal — GPT-2 can still work without it

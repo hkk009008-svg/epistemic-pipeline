@@ -34,6 +34,25 @@ class EditEntry(BaseModel):
     replacement: str
 
 
+class GroundingInfo(BaseModel):
+    """NLI-backed claim grounding rate metrics."""
+    grounding_rate: float = 0.0
+    grounded_count: int = 0
+    ungrounded_count: int = 0
+    contradicted_count: int = 0
+    neutral_count: int = 0
+    total_evaluated: int = 0
+
+
+class UnsupportedSpan(BaseModel):
+    """A span of text identified as unsupported by evidence."""
+    text: str = ""
+    start: int = -1
+    end: int = -1
+    reason: str = ""
+    confidence_tier: str = ""
+
+
 class ConfidenceBreakdown(BaseModel):
     observed_pct: float = 0.0
     inference_pct: float = 0.0
@@ -42,6 +61,9 @@ class ConfidenceBreakdown(BaseModel):
     user_provided_pct: float = 0.0
     total_claims: int = 0
     confidence_label: str = "Unknown"  # "High", "Medium", "Low", "Unknown"
+    # NLI-backed grounding rate (when NLI + evidence available)
+    grounding: Optional[GroundingInfo] = None
+    unsupported_spans: List[UnsupportedSpan] = []
 
 
 class PipelineRequest(BaseModel):
@@ -91,6 +113,8 @@ class PipelineResponse(BaseModel):
     # Atomic claim decomposition
     atomic_claims: List[dict] = []
     decomposition_ran: bool = False
+    # Meta-verification (high-stakes cross-check)
+    meta_verification: Optional[dict] = None
 
 
 class StageConfig(BaseModel):
@@ -104,3 +128,12 @@ class StageConfig(BaseModel):
 class StressRequest(BaseModel):
     category: Optional[str] = None
     count: Optional[int] = None
+
+
+class FeedbackRequest(BaseModel):
+    request_id: str = ""
+    prompt: str = ""
+    rating: str  # "accurate", "inaccurate", "partially_accurate"
+    verdict_correct: Optional[bool] = None
+    confidence_correct: Optional[bool] = None
+    comment: str = ""

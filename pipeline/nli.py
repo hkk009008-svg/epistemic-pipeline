@@ -3,6 +3,12 @@
 Classifies (premise, hypothesis) pairs as entailment/contradiction/neutral.
 Used to pre-verify atomic claims against evidence before GPT-2.
 
+Features:
+- Continuous confidence scores (not just binary supported/contradicted)
+- Span-level unsupported segment detection
+- Configurable thresholds
+- Grounding rate computation for confidence calibration
+
 This module is OPTIONAL — if torch/transformers are not installed,
 all functions return None and the pipeline proceeds without NLI.
 """
@@ -10,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -24,6 +31,12 @@ LABEL_MAP = ["contradiction", "entailment", "neutral"]
 
 # Optional remote NLI service URL
 NLI_SERVICE_URL = os.getenv("NLI_SERVICE_URL", "")
+
+# Configurable thresholds (calibrate against labeled data)
+ENTAILMENT_THRESHOLD = 0.7
+CONTRADICTION_THRESHOLD = 0.7
+# Weaker threshold for "likely supported" (continuous signal)
+WEAK_SUPPORT_THRESHOLD = 0.4
 
 
 def is_nli_available() -> bool:
@@ -135,6 +148,23 @@ def batch_classify_nli(pairs: List[Tuple[str, str]]) -> List[Optional[dict]]:
         return [None] * len(pairs)
 
 
+def _compute_confidence_tier(entailment: float, contradiction: float) -> str:
+    """Map continuous NLI scores to a confidence tier.
+
+    Returns: "strong_support", "weak_support", "neutral",
+             "weak_contradiction", "strong_contradiction"
+    """
+    if entailment >= ENTAILMENT_THRESHOLD:
+        return "strong_support"
+    if entailment >= WEAK_SUPPORT_THRESHOLD:
+        return "weak_support"
+    if contradiction >= CONTRADICTION_THRESHOLD:
+        return "strong_contradiction"
+    if contradiction >= WEAK_SUPPORT_THRESHOLD:
+        return "weak_contradiction"
+    return "neutral"
+
+
 def verify_claims_with_nli(
     claims: List[dict],
     evidence_snippets: List[str],
@@ -142,7 +172,7 @@ def verify_claims_with_nli(
     """Run NLI verification on atomic claims against evidence snippets.
 
     For each claim, checks entailment against each evidence snippet.
-    Returns claims enriched with nli_result field.
+    Returns claims enriched with nli_result field containing continuous scores.
 
     claims: List of {"text": "...", ...} from decomposer
     evidence_snippets: List of text strings (from Tavily or other sources)
@@ -165,28 +195,138 @@ def verify_claims_with_nli(
         best_entailment = 0.0
         worst_contradiction = 0.0
         best_source_idx = -1
+        all_scores = []
 
         for i, r in enumerate(results):
             if r is None:
                 continue
             ent_score = r["scores"].get("entailment", 0.0)
             con_score = r["scores"].get("contradiction", 0.0)
+            all_scores.append({"source_idx": i, "entailment": ent_score, "contradiction": con_score})
             if ent_score > best_entailment:
                 best_entailment = ent_score
                 best_source_idx = i
             if con_score > worst_contradiction:
                 worst_contradiction = con_score
 
+        confidence_tier = _compute_confidence_tier(best_entailment, worst_contradiction)
+
         claim["nli_result"] = {
             "best_entailment": round(best_entailment, 4),
             "worst_contradiction": round(worst_contradiction, 4),
             "best_source_idx": best_source_idx,
-            "supported": best_entailment > 0.7,
-            "contradicted": worst_contradiction > 0.7,
+            "supported": best_entailment > ENTAILMENT_THRESHOLD,
+            "contradicted": worst_contradiction > CONTRADICTION_THRESHOLD,
+            "confidence_tier": confidence_tier,
+            "per_source_scores": all_scores,
         }
         enriched.append(claim)
 
     return enriched
+
+
+def compute_grounding_rate(claims: List[dict]) -> dict:
+    """Compute the Claim Grounding Rate (CGR) from NLI-enriched claims.
+
+    Returns:
+        {
+            "grounding_rate": float (0.0-1.0),
+            "grounded_count": int,
+            "ungrounded_count": int,
+            "contradicted_count": int,
+            "neutral_count": int,
+            "total_evaluated": int,
+        }
+    """
+    if not claims:
+        return {
+            "grounding_rate": 0.0,
+            "grounded_count": 0,
+            "ungrounded_count": 0,
+            "contradicted_count": 0,
+            "neutral_count": 0,
+            "total_evaluated": 0,
+        }
+
+    grounded = 0
+    contradicted = 0
+    neutral = 0
+    evaluated = 0
+
+    for claim in claims:
+        nli = claim.get("nli_result")
+        if not nli:
+            continue
+        evaluated += 1
+        tier = nli.get("confidence_tier", "neutral")
+        if tier in ("strong_support", "weak_support"):
+            grounded += 1
+        elif tier in ("strong_contradiction", "weak_contradiction"):
+            contradicted += 1
+        else:
+            neutral += 1
+
+    rate = grounded / evaluated if evaluated > 0 else 0.0
+
+    return {
+        "grounding_rate": round(rate, 4),
+        "grounded_count": grounded,
+        "ungrounded_count": neutral + contradicted,
+        "contradicted_count": contradicted,
+        "neutral_count": neutral,
+        "total_evaluated": evaluated,
+    }
+
+
+def detect_unsupported_spans(
+    text: str,
+    claims: List[dict],
+) -> List[dict]:
+    """Identify spans of text that are unsupported by evidence.
+
+    Uses NLI results from verified claims to find unsupported segments.
+    Returns a list of span descriptors:
+    [{"text": "...", "start": int, "end": int, "reason": "..."}]
+    """
+    spans = []
+    for claim in claims:
+        nli = claim.get("nli_result")
+        if not nli:
+            continue
+
+        claim_text = claim.get("text", "")
+        if not claim_text:
+            continue
+
+        tier = nli.get("confidence_tier", "neutral")
+        if tier in ("strong_contradiction", "weak_contradiction"):
+            # Find this claim text in the original output
+            match = re.search(re.escape(claim_text[:50]), text)
+            start = match.start() if match else -1
+            end = match.end() if match else -1
+            spans.append({
+                "text": claim_text,
+                "start": start,
+                "end": end,
+                "reason": "contradicted_by_evidence",
+                "confidence_tier": tier,
+                "contradiction_score": nli.get("worst_contradiction", 0.0),
+            })
+        elif tier == "neutral" and nli.get("best_entailment", 0.0) < 0.2:
+            # Very low support — likely unsupported
+            match = re.search(re.escape(claim_text[:50]), text)
+            start = match.start() if match else -1
+            end = match.end() if match else -1
+            spans.append({
+                "text": claim_text,
+                "start": start,
+                "end": end,
+                "reason": "no_evidence_found",
+                "confidence_tier": tier,
+                "best_entailment": nli.get("best_entailment", 0.0),
+            })
+
+    return spans
 
 
 def _classify_nli_remote(premise: str, hypothesis: str) -> Optional[dict]:

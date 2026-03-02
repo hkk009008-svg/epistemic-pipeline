@@ -268,13 +268,24 @@ DEFAULT_GPT3_SYSTEM = (
 # ---------------------------------------------------------------------------
 # build_augmentation — flag-driven prompt shaping for all 3 stages
 # ---------------------------------------------------------------------------
+_augmentation_cache: dict = {}
+
+
 def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
     """Return (gpt1_aug, gpt2_aug, gpt3_aug) strings based on prompt-routing flags.
 
     Each string is appended to the respective system prompt to adapt behavior
     for the specific prompt context.  When search_performed is True, current-events
     augmentation is relaxed because GPT-1 has verified web sources to ground its claims.
+
+    Results are cached by flags+search_performed to avoid rebuilding identical
+    augmentation strings across stress-test runs with similar prompt types.
     """
+    # Cache key: frozen flags + search_performed
+    cache_key = (tuple(sorted(flags.items())), search_performed)
+    if cache_key in _augmentation_cache:
+        return _augmentation_cache[cache_key]
+
     gpt1_parts = []
     gpt2_parts = []
     gpt3_parts = []
@@ -443,4 +454,6 @@ def build_augmentation(flags: dict, search_performed: bool = False) -> tuple:
     gpt2_aug = ("\n\n" + "\n".join(gpt2_parts)) if gpt2_parts else ""
     gpt3_aug = ("\n\n" + "\n".join(gpt3_parts)) if gpt3_parts else ""
 
-    return gpt1_aug, gpt2_aug, gpt3_aug
+    result = (gpt1_aug, gpt2_aug, gpt3_aug)
+    _augmentation_cache[cache_key] = result
+    return result

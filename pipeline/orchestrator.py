@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import date
 
 import config
-from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown, SearchSource
+from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown, SearchSource, GroundingInfo, UnsupportedSpan
 from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
@@ -14,7 +15,10 @@ from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search
 from pipeline.decomposer import decompose_claims
-from pipeline.nli import verify_claims_with_nli, is_nli_available
+from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
+from pipeline.meta_verify import meta_verify_pass
+from pipeline.metrics import PipelineMetrics, record_run
+from pipeline.best_of_n import generate_best_of_n
 
 
 def _date_context() -> str:
@@ -39,58 +43,57 @@ def _fail_message(flags: dict, search_performed: bool) -> str:
     return "NO PASS - Output blocked by verification"
 
 
-def compute_confidence(claim_table: list, findings: list | None = None) -> ConfidenceBreakdown:
+def compute_confidence(
+    claim_table: list,
+    findings: list | None = None,
+    nli_grounding: dict | None = None,
+    unsupported_spans: list | None = None,
+) -> ConfidenceBreakdown:
     """Compute a confidence breakdown from a list of ClaimEntry objects.
 
-    When *findings* is provided, hard findings penalize the confidence label
-    (any hard finding drops the label one tier). This prevents a response with
-    70% Observed but a fabricated statistic from getting "High" confidence.
+    Uses a multi-signal approach:
+    1. GPT-2 claim categories (Observed, Inference, etc.)
+    2. Hard findings penalty (drops confidence tier)
+    3. NLI grounding rate (when available, blends with category signal)
+
+    The NLI grounding rate provides calibrated confidence by checking
+    what percentage of claims can be verified against evidence.
     """
     total = len(claim_table)
     if total == 0:
-        return ConfidenceBreakdown()
+        grounding_info = None
+        if nli_grounding and nli_grounding.get("total_evaluated", 0) > 0:
+            grounding_info = GroundingInfo(**nli_grounding)
+        return ConfidenceBreakdown(grounding=grounding_info)
 
-    # Category counts with position weighting
-    # First-third claims get 1.5x weight, middle 1.0x, last-third 0.7x
-    observed = inference = hypothesis = unsupported = user_provided = 0.0
-    total_weight = 0.0
+    # Category counts (uniform weight — position bias removed)
+    observed = inference = hypothesis = unsupported = user_provided = 0
 
-    for i, entry in enumerate(claim_table):
-        position_ratio = i / max(total - 1, 1)
-        if position_ratio < 0.33:
-            weight = 1.5
-        elif position_ratio < 0.67:
-            weight = 1.0
-        else:
-            weight = 0.7
-
+    for entry in claim_table:
         cat = (entry.category if isinstance(entry.category, str) else str(entry.category)).lower().strip()
         if cat in ("supported", "observed"):
-            observed += weight
+            observed += 1
         elif cat == "inference":
-            inference += weight
+            inference += 1
         elif cat == "hypothesis":
-            hypothesis += weight
+            hypothesis += 1
         elif cat == "unsupported":
-            unsupported += weight
+            unsupported += 1
         elif cat == "user-provided":
-            user_provided += weight
-        total_weight += weight
+            user_provided += 1
 
-    if total_weight == 0:
-        return ConfidenceBreakdown()
-
-    observed_pct = round((observed / total_weight) * 100, 1)
-    inference_pct = round((inference / total_weight) * 100, 1)
-    hypothesis_pct = round((hypothesis / total_weight) * 100, 1)
-    unsupported_pct = round((unsupported / total_weight) * 100, 1)
-    user_provided_pct = round((user_provided / total_weight) * 100, 1)
+    observed_pct = round((observed / total) * 100, 1)
+    inference_pct = round((inference / total) * 100, 1)
+    hypothesis_pct = round((hypothesis / total) * 100, 1)
+    unsupported_pct = round((unsupported / total) * 100, 1)
+    user_provided_pct = round((user_provided / total) * 100, 1)
 
     # Hard findings penalty: any hard finding drops confidence one tier
     hard_count = 0
     if findings:
         hard_count = sum(1 for f in findings if f.get("severity") == "hard")
 
+    # Base label from GPT-2 categories
     if observed_pct >= 70 and hard_count == 0:
         label = "High"
     elif observed_pct >= 40 and hard_count <= 1:
@@ -100,6 +103,39 @@ def compute_confidence(claim_table: list, findings: list | None = None) -> Confi
     else:
         label = "Unknown"
 
+    # NLI grounding rate adjustment: when evidence exists, blend with category signal
+    grounding_info = None
+    if nli_grounding and nli_grounding.get("total_evaluated", 0) > 0:
+        grounding_info = GroundingInfo(**nli_grounding)
+        gr = nli_grounding["grounding_rate"]
+        contradicted = nli_grounding.get("contradicted_count", 0)
+
+        # Contradicted claims should downgrade confidence
+        if contradicted > 0:
+            if label == "High":
+                label = "Medium"
+            elif label == "Medium":
+                label = "Low"
+
+        # Low grounding rate with evidence available means claims are unverifiable
+        if gr < 0.3 and label in ("High", "Medium"):
+            label = "Low"
+        elif gr >= 0.7 and label == "Low" and hard_count == 0:
+            # High grounding can rescue Low if no hard findings
+            label = "Medium"
+
+    # Build unsupported span models
+    span_models = []
+    if unsupported_spans:
+        for s in unsupported_spans:
+            span_models.append(UnsupportedSpan(
+                text=s.get("text", ""),
+                start=s.get("start", -1),
+                end=s.get("end", -1),
+                reason=s.get("reason", ""),
+                confidence_tier=s.get("confidence_tier", ""),
+            ))
+
     return ConfidenceBreakdown(
         observed_pct=observed_pct,
         inference_pct=inference_pct,
@@ -108,6 +144,8 @@ def compute_confidence(claim_table: list, findings: list | None = None) -> Confi
         user_provided_pct=user_provided_pct,
         total_claims=total,
         confidence_label=label,
+        grounding=grounding_info,
+        unsupported_spans=span_models,
     )
 
 
@@ -127,12 +165,16 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     if not config.has_api_key():
         raise PipelineError(400, "Set your OpenAI API key first.")
 
+    metrics = PipelineMetrics(request_id=uuid.uuid4().hex[:12], prompt_length=len(req.prompt))
+    metrics.start()
+
     gpt1_cfg = config.get_stage_config("gpt1")
     gpt2_cfg = config.get_stage_config("gpt2")
     gpt3_cfg = config.get_stage_config("gpt3")
 
     # ---- Deterministic prompt routing ----
     flags = route_prompt(req.prompt)
+    metrics.flags = flags
 
     # ---- Web Search Enrichment (before augmentation so flags are search-aware) ----
     search_sources: list[SearchSource] = []
@@ -140,8 +182,12 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     search_performed = False
 
     if should_search(flags):
+        sm = metrics.start_stage("search")
         search_sources, search_context = perform_web_search(req.prompt)
         search_performed = len(search_sources) > 0
+        metrics.end_stage(sm)
+        metrics.search_performed = search_performed
+        metrics.search_sources_count = len(search_sources)
 
     gpt1_system = req.gpt1_system or DEFAULT_GPT1_SYSTEM
     gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
@@ -227,8 +273,16 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
     )
 
-    # ---- Step 1: GPT-1 Generate ----
-    gpt1_output = call_llm(gpt1_cfg, gpt1_system, gpt1_user_content)
+    # ---- Step 1: GPT-1 Generate (with optional best-of-N) ----
+    gpt1_sm = metrics.start_stage("gpt1", gpt1_cfg.get("provider", ""), gpt1_cfg.get("model", ""))
+    best_of_n_count = getattr(config, "BEST_OF_N", 1)
+    if best_of_n_count >= 2:
+        gpt1_output, bon_info = generate_best_of_n(
+            gpt1_cfg, gpt1_system, gpt1_user_content, flags, n=best_of_n_count,
+        )
+    else:
+        gpt1_output = call_llm(gpt1_cfg, gpt1_system, gpt1_user_content)
+    metrics.end_stage(gpt1_sm)
 
     # ---- Current-events fast path (no Tavily) ----
     # If the query is about current events and we have no web search to ground it,
@@ -242,6 +296,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             "Note: This response is based on training data that may be outdated. "
             "For verified current information, enable Tavily web search in Settings."
         )
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = "Low"
+        metrics.bypassed = True
+        metrics.finish()
+        record_run(metrics)
         return PipelineResponse(
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
@@ -259,6 +318,10 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     # ---- Activation bypass ----
     if is_activation_phrase(gpt1_output):
+        metrics.bypassed = True
+        metrics.final_verdict = "PASS"
+        metrics.finish()
+        record_run(metrics)
         return PipelineResponse(
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=True,
@@ -274,12 +337,33 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     sanitizer_applied = (sanitized_output != gpt1_output)
 
     # ---- Atomic Claim Decomposition (pre-GPT-2) ----
+    decomp_sm = metrics.start_stage("decomposition")
     atomic_claims = decompose_claims(gpt2_cfg, sanitized_output, req.prompt)
+    metrics.end_stage(decomp_sm)
+    metrics.decomposition_ran = len(atomic_claims) > 0
+    metrics.atomic_claims_count = len(atomic_claims)
+
     # ---- NLI Pre-Verification (optional layer) ----
+    nli_grounding = {}
+    nli_unsupported_spans = []
     if atomic_claims and is_nli_available():
         evidence_snippets = [s.snippet for s in search_sources] if search_sources else []
         if evidence_snippets:
+            nli_sm = metrics.start_stage("nli")
             atomic_claims = verify_claims_with_nli(atomic_claims, evidence_snippets)
+            metrics.end_stage(nli_sm)
+            metrics.nli_ran = True
+            metrics.nli_supported_count = sum(
+                1 for c in atomic_claims if c.get("nli_result", {}).get("supported")
+            )
+            metrics.nli_contradicted_count = sum(
+                1 for c in atomic_claims if c.get("nli_result", {}).get("contradicted")
+            )
+            # Compute grounding rate for confidence calibration
+            nli_grounding = compute_grounding_rate(atomic_claims)
+            metrics.grounding_rate = nli_grounding.get("grounding_rate", 0.0)
+            # Detect unsupported spans
+            nli_unsupported_spans = detect_unsupported_spans(sanitized_output, atomic_claims)
 
     decomp_kwargs = dict(atomic_claims=atomic_claims, decomposition_ran=len(atomic_claims) > 0)
 
@@ -292,12 +376,20 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         nli_lines = []
         for c in atomic_claims:
             nli = c.get("nli_result", {})
-            if nli.get("supported"):
-                nli_lines.append(f'  NLI-SUPPORTED: "{c["text"][:80]}..."')
-            elif nli.get("contradicted"):
-                nli_lines.append(f'  NLI-CONTRADICTED: "{c["text"][:80]}..."')
+            tier = nli.get("confidence_tier", "")
+            if tier == "strong_support":
+                nli_lines.append(f'  NLI-STRONG-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
+            elif tier == "weak_support":
+                nli_lines.append(f'  NLI-WEAK-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
+            elif tier == "strong_contradiction":
+                nli_lines.append(f'  NLI-CONTRADICTED (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
+            elif tier == "weak_contradiction":
+                nli_lines.append(f'  NLI-WEAK-CONTRADICTION (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
         if nli_lines:
-            nli_block = "\n\nNLI PRE-VERIFICATION SIGNALS:\n" + "\n".join(nli_lines)
+            grounding_str = ""
+            if nli_grounding:
+                grounding_str = f"\nGrounding Rate: {nli_grounding['grounding_rate']:.1%} ({nli_grounding['grounded_count']}/{nli_grounding['total_evaluated']} claims grounded)"
+            nli_block = "\n\nNLI PRE-VERIFICATION SIGNALS:\n" + "\n".join(nli_lines) + grounding_str
 
         gpt2_user = (
             f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
@@ -314,11 +406,28 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
             f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
         )
+    gpt2_sm = metrics.start_stage("gpt2", gpt2_cfg.get("provider", ""), gpt2_cfg.get("model", ""))
     gpt2_raw = call_llm(gpt2_cfg, gpt2_system, gpt2_user, expect_json=True)
+    metrics.end_stage(gpt2_sm)
     claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2(gpt2_raw, flags=flags)
+    metrics.gpt2_verdict = gpt2_verdict
+    metrics.total_claims = len(claim_table)
+    metrics.hard_findings = sum(1 for f in findings if f.get("severity") == "hard")
+    metrics.soft_findings = sum(1 for f in findings if f.get("severity") == "soft")
 
     # ---- If GPT-2 PASS: done ----
     if gpt2_verdict == "PASS":
+        conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None)
+
+        # Meta-verification: cross-check GPT-2 PASS on high-stakes queries
+        meta_result = meta_verify_pass(flags, claim_table, findings, atomic_claims, conf.confidence_label)
+        if meta_result["ran"] and meta_result["adjusted_label"] != conf.confidence_label:
+            conf.confidence_label = meta_result["adjusted_label"]
+
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = conf.confidence_label
+        metrics.finish()
+        record_run(metrics)
         return PipelineResponse(
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
@@ -326,7 +435,8 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
             final_verdict="PASS", final_result=sanitized_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
-            confidence=compute_confidence(claim_table, findings),
+            confidence=conf,
+            meta_verification=meta_result if meta_result["ran"] else None,
             **empty_response, **search_kwargs, **decomp_kwargs,
         )
 
@@ -344,6 +454,13 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
 
         if re_verdict == "PASS":
+            conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
+            metrics.final_verdict = "PASS"
+            metrics.confidence_label = conf.confidence_label
+            metrics.rewrite_loops = 1
+            metrics.convergence_outcome = "pass"
+            metrics.finish()
+            record_run(metrics)
             return PipelineResponse(
                 prompt_version=PROMPT_VERSION,
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
@@ -356,7 +473,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
                 final_verdict="PASS", final_result=sanitized_output,
                 prompt_flags=flags, sanitizer_applied=True,
-                confidence=compute_confidence(re_ct, re_findings),
+                confidence=conf,
                 **search_kwargs, **decomp_kwargs,
             )
         # Auto-repair didn't clear it -- fall through to arbiter below
@@ -398,11 +515,19 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         f"{search_evidence}"
     )
 
+    gpt3_sm = metrics.start_stage("gpt3", gpt3_cfg.get("provider", ""), gpt3_cfg.get("model", ""))
     gpt3_raw = call_llm(gpt3_cfg, gpt3_system, gpt3_user, expect_json=True)
+    metrics.end_stage(gpt3_sm)
     arbiter_decision, arbiter_rationale, arbiter_edits, arbiter_policy_notes = parse_gpt3(gpt3_raw)
+    metrics.arbiter_decision = arbiter_decision
 
     # ---- Decision: BLOCK ----
     if arbiter_decision == "BLOCK":
+        metrics.final_verdict = "FAIL"
+        block_conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None)
+        metrics.confidence_label = block_conf.confidence_label
+        metrics.finish()
+        record_run(metrics)
         return PipelineResponse(
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
@@ -415,7 +540,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
             final_verdict="FAIL", final_result=_fail_message(flags, search_performed),
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
-            confidence=compute_confidence(claim_table, findings),
+            confidence=block_conf,
             **search_kwargs, **decomp_kwargs,
         )
 
@@ -433,7 +558,9 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             f"Set Confidence to Low.\n"
             f"Output the corrected response in full."
         )
+        rw_sm = metrics.start_stage("rewrite_unknown")
         rewrite_output = call_llm(gpt1_cfg, gpt1_system, rewrite_prompt)
+        metrics.end_stage(rw_sm)
 
         # Sanitize the rewrite (strip stale dates, banned evidence, etc.)
         rewrite_output = sanitize_output(rewrite_output, flags)
@@ -445,6 +572,12 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
                 "For verified current information, enable Tavily web search in Settings."
             )
 
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = "Low"
+        metrics.rewrite_loops = 1
+        metrics.convergence_outcome = "arbiter_unknown"
+        metrics.finish()
+        record_run(metrics)
         return PipelineResponse(
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
@@ -527,8 +660,16 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         re_ct, re_viol, re_verdict, re_findings, _ = parse_gpt2(re_gpt2_raw, flags=flags)
         findings_history.append(re_findings)
 
+    metrics.rewrite_loops = len(findings_history) - 1  # subtract initial
+
     # If the rewrite loop passed, return success
     if re_verdict == "PASS":
+        conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = conf.confidence_label
+        metrics.convergence_outcome = "pass"
+        metrics.finish()
+        record_run(metrics)
         return PipelineResponse(
             prompt_version=PROMPT_VERSION,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
@@ -543,7 +684,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             final_verdict="PASS",
             final_result=rewrite_output,
             prompt_flags=flags, sanitizer_applied=sanitizer_applied,
-            confidence=compute_confidence(re_ct, re_findings),
+            confidence=conf,
             **search_kwargs, **decomp_kwargs,
         )
 
@@ -564,6 +705,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     fallback_output = call_llm(gpt1_cfg, gpt1_system, fallback_prompt)
     fallback_output = sanitize_output(fallback_output, flags)
 
+    metrics.final_verdict = "PASS"
+    metrics.confidence_label = "Low"
+    metrics.convergence_outcome = "fallback"
+    metrics.finish()
+    record_run(metrics)
     return PipelineResponse(
         prompt_version=PROMPT_VERSION,
         gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,

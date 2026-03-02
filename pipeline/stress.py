@@ -78,14 +78,24 @@ def compute_pss_metrics(results: list) -> dict:
     }
 
 
-def generate_stress_results(tests: list):
-    """Generator that yields NDJSON lines: progress events + final summary.
+_HEARTBEAT_INTERVAL = 15  # seconds between keepalive heartbeats
 
-    Each test is run through the pipeline and results are streamed.
+
+_TEST_MAX_RETRIES = 2  # Retry a failed test once before recording ERROR
+_TEST_RETRY_DELAY = 3  # Seconds between test retries
+
+
+def _run_single_test(t: dict) -> dict:
+    """Run a single test case through the pipeline with retry on transient errors.
+
+    Returns a result dict suitable for PSS computation and progress reporting.
+    Retries up to _TEST_MAX_RETRIES times on transient API errors before
+    recording the test as ERROR.
     """
-    results = []
+    from pipeline.helpers import PipelineError
 
-    for i, t in enumerate(tests):
+    last_error = ""
+    for attempt in range(_TEST_MAX_RETRIES + 1):
         start = time.time()
         try:
             pr = PipelineRequest(prompt=t["prompt"])
@@ -96,7 +106,7 @@ def generate_stress_results(tests: list):
             rewrite_occurred = resp.get("rewrite_occurred", False)
             final_violations = resp.get("rewrite_violations", []) if rewrite_occurred else resp.get("violations", [])
 
-            result = {
+            return {
                 "id": t["id"],
                 "category": t["category"],
                 "prompt": t["prompt"],
@@ -114,18 +124,67 @@ def generate_stress_results(tests: list):
                 "duration_s": round(duration, 2),
                 "error": "",
             }
+        except PipelineError as e:
+            duration = time.time() - start
+            last_error = str(e)
+            # Retry on transient server/provider errors
+            if e.status_code in (429, 502, 503, 504) and attempt < _TEST_MAX_RETRIES:
+                time.sleep(_TEST_RETRY_DELAY * (attempt + 1))
+                continue
         except Exception as e:
             duration = time.time() - start
-            result = {
-                "id": t["id"], "category": t["category"], "prompt": t["prompt"],
-                "final_verdict": "ERROR", "final_result": "",
-                "gpt2_verdict": "ERROR",
-                "violations": [], "final_violations": [],
-                "rewrite_occurred": False, "rewrite_cycles": 0,
-                "arbiter_invoked": False, "arbiter_decision": "",
-                "bypassed": False, "labels": t.get("labels", {}),
-                "duration_s": round(duration, 2), "error": str(e),
-            }
+            last_error = str(e)
+            # Retry on connection-style errors
+            if attempt < _TEST_MAX_RETRIES and _is_transient_test_error(e):
+                time.sleep(_TEST_RETRY_DELAY * (attempt + 1))
+                continue
+
+    # All retries exhausted — record as ERROR
+    return {
+        "id": t["id"], "category": t["category"], "prompt": t["prompt"],
+        "final_verdict": "ERROR", "final_result": "",
+        "gpt2_verdict": "ERROR",
+        "violations": [], "final_violations": [],
+        "rewrite_occurred": False, "rewrite_cycles": 0,
+        "arbiter_invoked": False, "arbiter_decision": "",
+        "bypassed": False, "labels": t.get("labels", {}),
+        "duration_s": round(duration, 2), "error": last_error,
+    }
+
+
+def _is_transient_test_error(exc: Exception) -> bool:
+    """Return True if the exception looks transient and worth retrying."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("timeout", "connection", "rate limit", "503", "502", "504"))
+
+
+def generate_stress_results(tests: list):
+    """Generator that yields NDJSON lines: progress events + final summary.
+
+    Each test is run through the pipeline and results are streamed.
+    Emits periodic heartbeat lines to keep the connection alive during
+    long-running LLM calls (prevents proxy idle-timeout disconnects).
+    """
+    import threading
+
+    results = []
+
+    for i, t in enumerate(tests):
+        # Run each test in a background thread so we can emit heartbeats
+        result_box: list = []
+
+        def _worker(test_case=t):
+            result_box.append(_run_single_test(test_case))
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+
+        while worker.is_alive():
+            worker.join(timeout=_HEARTBEAT_INTERVAL)
+            if worker.is_alive():
+                yield json.dumps({"type": "heartbeat"}) + "\n"
+
+        result = result_box[0]
         results.append(result)
 
         # Stream progress line

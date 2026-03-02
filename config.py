@@ -16,6 +16,7 @@ PORT = int(os.getenv("PORT", "8000"))
 MAX_REWRITE_LOOPS = 3
 MAX_PROMPT_LENGTH = 10000
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
+BEST_OF_N = int(os.getenv("BEST_OF_N", "1"))  # 1 = disabled, 2+ = enable best-of-N
 
 # ---- Runtime overrides (set via /api/openai/config) ----
 _runtime: dict = {}
