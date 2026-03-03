@@ -1,8 +1,6 @@
 """Tests for pipeline/source_match.py — deterministic source-matching post-processor."""
 from __future__ import annotations
 
-import pytest
-
 from pipeline.models import ClaimEntry, SearchSource
 from pipeline.source_match import (
     _extract_keywords,

@@ -63,6 +63,8 @@ class ConfidenceBreakdown(BaseModel):
     user_provided_pct: float = 0.0
     total_claims: int = 0
     confidence_label: str = "Unknown"  # "High", "Medium", "Low", "Unknown"
+    # Human-readable reasoning for the confidence score
+    confidence_reasoning: List[str] = []
     # NLI-backed grounding rate (when NLI + evidence available)
     grounding: Optional[GroundingInfo] = None
     unsupported_spans: List[UnsupportedSpan] = []
@@ -79,9 +81,11 @@ class PipelineRequest(BaseModel):
     tier: Literal["strict", "standard", "light"] = "strict"
     # Output format: auto (derive from tier), structured, annotated, concise
     output_format: Literal["auto", "structured", "annotated", "concise"] = "auto"
+    # Enable SSE streaming of pipeline progress events
+    stream: bool = False
 
     def model_post_init(self, __context):
-        if not os.getenv("ALLOW_PROMPT_OVERRIDE", "").lower() in ("true", "1", "yes"):
+        if os.getenv("ALLOW_PROMPT_OVERRIDE", "").lower() not in ("true", "1", "yes"):
             object.__setattr__(self, "gpt1_system", "")
             object.__setattr__(self, "gpt2_system", "")
             object.__setattr__(self, "gpt3_system", "")
@@ -121,6 +125,8 @@ class PipelineResponse(BaseModel):
     sanitizer_applied: bool = False
     # Web search enrichment
     search_performed: bool = False
+    search_attempted: bool = False
+    search_note: str = ""
     search_query: str = ""
     search_sources: List[SearchSource] = []
     # Confidence scoring

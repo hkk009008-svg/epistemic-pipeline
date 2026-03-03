@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.models import EditEntry
 
@@ -286,7 +284,7 @@ class TestApplyEditsMultiple:
         assert "MOVE the following to the Unknowns section" in result
         # Each is a bullet
         lines = result.split("\n")
-        bullet_lines = [l for l in lines if l.strip().startswith("- ")]
+        bullet_lines = [line for line in lines if line.strip().startswith("- ")]
         assert len(bullet_lines) == 3
 
     def test_edit_order_preserved(self, sample_edits: list):
@@ -311,7 +309,7 @@ class TestApplyEditsEmpty:
         assert "Apply ONLY these edits" in result
         # No bullet points
         lines = result.split("\n")
-        bullet_lines = [l for l in lines if l.strip().startswith("- ")]
+        bullet_lines = [line for line in lines if line.strip().startswith("- ")]
         assert len(bullet_lines) == 0
 
 

@@ -1,8 +1,6 @@
 """Tests for pipeline/stress.py — PSS metric computation and edge cases."""
 from __future__ import annotations
 
-import pytest
-
 from pipeline.stress import compute_pss_metrics, has_leaked_stats
 
 

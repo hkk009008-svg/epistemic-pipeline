@@ -90,12 +90,21 @@ def _get_tavily_client() -> TavilyClient | None:
 def should_search(flags: dict) -> bool:
     """Determine if web search should be triggered.
 
-    When Tavily is enabled, always search — every query benefits from
-    grounding in current web sources.  The previous flag-gated approach
-    missed many factual queries (e.g. "who is the president") because
-    they didn't match narrow keyword regexes.
+    Only search when the query has signals that benefit from current web
+    data: current events, legal, advice, comparisons, statistics, or
+    future-year references.  Pure conceptual/explanatory queries (no flags
+    set) skip search to save 1-3 s of latency.
     """
-    return config.is_tavily_enabled()
+    if not config.is_tavily_enabled():
+        return False
+    return any([
+        flags.get("current_events"),
+        flags.get("legal_mode"),
+        flags.get("advice_requested"),
+        flags.get("comparative"),
+        flags.get("percent_requested"),
+        flags.get("future_year"),
+    ])
 
 
 def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
@@ -131,6 +140,27 @@ def compute_search_quality(sources: list[SearchSource]) -> dict:
         "source_count": len(sources), "avg_authority": round(avg, 2),
         "high_authority_count": high_count, "has_gov_edu": has_gov_edu, "quality_tier": tier,
     }
+
+
+def refine_search_query(original_query: str, unsupported_claims: list[str]) -> str:
+    """Build a refined search query from unsupported claims.
+
+    Takes the original query and specific unsupported claim texts,
+    combining them into a more targeted search query.
+    """
+    # Take up to 3 unsupported claims for the refined query
+    claim_keywords = []
+    for claim in unsupported_claims[:3]:
+        # Extract key phrases (skip very short or generic words)
+        words = [w for w in claim.split() if len(w) > 4]
+        claim_keywords.extend(words[:5])
+
+    if not claim_keywords:
+        return original_query
+
+    # Combine original query context with claim-specific keywords
+    refined = original_query + " " + " ".join(claim_keywords[:10])
+    return refined[:500]  # Cap to avoid overly long queries
 
 
 def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:

@@ -14,11 +14,11 @@ from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
 from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
-from pipeline.search import should_search, perform_web_search
+from pipeline.search import should_search, perform_web_search, refine_search_query
 from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
-from pipeline.decomposer import decompose_claims
+from pipeline.decomposer import decompose_claims, check_decomposition_quality
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
-from pipeline.meta_verify import meta_verify_pass
+from pipeline.meta_verify import meta_verify_pass, meta_verify_fail, is_high_stakes
 from pipeline.metrics import PipelineMetrics, record_run
 from pipeline.best_of_n import generate_best_of_n
 
@@ -74,17 +74,30 @@ def _fail_message(flags: dict, search_performed: bool) -> str:
     return "NO PASS - Output blocked by verification"
 
 
+# Weighted violation penalties (T1 fabrication is far worse than T6 reassurance)
+_VIOLATION_WEIGHTS = {
+    "T1": 2.0,   # Fabricated evidence
+    "T2": 1.5,   # Unsupported evidence reference
+    "T3": 1.5,   # Causal claim stated as fact
+    "T4": 1.0,   # Missing structural qualifier
+    "T5": 1.0,   # Prescriptive creep
+    "T6": 0.75,  # Reassurance framing
+    "T7": 0.75,  # Unverified current fact
+}
+
+
 def compute_confidence(
     claim_table: list,
     findings: list | None = None,
     nli_grounding: dict | None = None,
     unsupported_spans: list | None = None,
+    search_sources: list | None = None,
 ) -> ConfidenceBreakdown:
     """Compute a confidence breakdown from a list of ClaimEntry objects.
 
-    Uses a multi-signal approach:
-    1. GPT-2 claim categories (Observed, Inference, etc.)
-    2. Hard findings penalty (drops confidence tier)
+    Uses a dual-calibration approach:
+    1. Reasoning confidence: GPT-2 claim categories + weighted findings penalty
+    2. Evidence confidence: Source authority scores (when search sources available)
     3. NLI grounding rate (when available, blends with category signal)
 
     The NLI grounding rate provides calibrated confidence by checking
@@ -95,7 +108,10 @@ def compute_confidence(
         grounding_info = None
         if nli_grounding and nli_grounding.get("total_evaluated", 0) > 0:
             grounding_info = GroundingInfo(**nli_grounding)
-        return ConfidenceBreakdown(grounding=grounding_info)
+        return ConfidenceBreakdown(
+            grounding=grounding_info,
+            confidence_reasoning=["No claims to evaluate."],
+        )
 
     # Category counts (uniform weight — position bias removed)
     observed = inference = hypothesis = unsupported = user_provided = 0
@@ -119,17 +135,64 @@ def compute_confidence(
     unsupported_pct = round((unsupported / total) * 100, 1)
     user_provided_pct = round((user_provided / total) * 100, 1)
 
-    # Hard findings penalty: any hard finding drops confidence one tier
-    hard_count = 0
-    if findings:
-        hard_count = sum(1 for f in findings if f.get("severity") == "hard")
+    # Build confidence reasoning as we go
+    reasoning: list[str] = []
+    reasoning.append(f"{observed}/{total} claims verified as Observed ({observed_pct}%)")
+    if unsupported > 0:
+        reasoning.append(f"{unsupported}/{total} claims marked Unsupported ({unsupported_pct}%)")
+    if inference > 0:
+        reasoning.append(f"{inference}/{total} claims are inferences ({inference_pct}%)")
 
-    # Base label from GPT-2 categories
-    if observed_pct >= 70 and hard_count == 0:
+    # Weighted findings penalty (T1 fabrication >> T6 reassurance)
+    hard_count = 0
+    soft_count = 0
+    weighted_penalty = 0.0
+    if findings:
+        for f in findings:
+            w = _VIOLATION_WEIGHTS.get(f.get("type", ""), 1.0)
+            if f.get("severity") == "hard":
+                hard_count += 1
+                weighted_penalty += w
+            elif f.get("severity") == "soft":
+                soft_count += 1
+                weighted_penalty += w * 0.3  # soft findings have reduced weight
+    if hard_count > 0:
+        hard_types = ", ".join(sorted({f["type"] for f in findings if f.get("severity") == "hard"}))
+        reasoning.append(f"{hard_count} hard violation(s) detected ({hard_types}), weighted penalty: {weighted_penalty:.1f}")
+    if soft_count > 0:
+        soft_types = ", ".join(sorted({f["type"] for f in findings if f.get("severity") == "soft"}))
+        reasoning.append(f"{soft_count} soft violation(s) detected ({soft_types})")
+    if hard_count == 0 and soft_count == 0:
+        reasoning.append("No violations detected")
+
+    # Evidence confidence: source authority signal (when search sources available)
+    evidence_confidence = 0.0
+    if search_sources:
+        authorities = [getattr(s, "score", 0.5) for s in search_sources]
+        evidence_confidence = sum(authorities) / len(authorities) if authorities else 0.0
+        if evidence_confidence >= 0.8:
+            reasoning.append(f"Evidence quality: high (avg authority {evidence_confidence:.2f} from {len(search_sources)} sources)")
+        elif evidence_confidence >= 0.5:
+            reasoning.append(f"Evidence quality: medium (avg authority {evidence_confidence:.2f} from {len(search_sources)} sources)")
+        else:
+            reasoning.append(f"Evidence quality: low (avg authority {evidence_confidence:.2f})")
+
+    # Dual calibration: reasoning confidence (categories + penalties) blended with evidence confidence
+    # Reasoning score: 0-1 based on observed% and weighted penalty
+    reasoning_score = (observed_pct / 100.0) - (weighted_penalty * 0.15)
+    reasoning_score = max(0.0, min(1.0, reasoning_score))
+
+    if search_sources and evidence_confidence > 0:
+        combined_score = 0.6 * reasoning_score + 0.4 * evidence_confidence
+    else:
+        combined_score = reasoning_score
+
+    # Map combined score to label
+    if combined_score >= 0.65 and hard_count == 0:
         label = "High"
-    elif observed_pct >= 40 and hard_count <= 1:
+    elif combined_score >= 0.35 and weighted_penalty < 3.0:
         label = "Medium"
-    elif observed_pct >= 20:
+    elif combined_score >= 0.15:
         label = "Low"
     else:
         label = "Unknown"
@@ -141,8 +204,11 @@ def compute_confidence(
         gr = nli_grounding["grounding_rate"]
         contradicted = nli_grounding.get("contradicted_count", 0)
 
+        reasoning.append(f"NLI grounding rate: {gr:.0%} ({nli_grounding['grounded_count']}/{nli_grounding['total_evaluated']} claims grounded)")
+
         # Contradicted claims should downgrade confidence
         if contradicted > 0:
+            reasoning.append(f"{contradicted} claim(s) contradicted by evidence — downgrading confidence")
             if label == "High":
                 label = "Medium"
             elif label == "Medium":
@@ -150,9 +216,11 @@ def compute_confidence(
 
         # Low grounding rate with evidence available means claims are unverifiable
         if gr < 0.3 and label in ("High", "Medium"):
+            reasoning.append("Low grounding rate with evidence available — downgrading to Low")
             label = "Low"
         elif gr >= 0.7 and label == "Low" and hard_count == 0:
             # High grounding can rescue Low if no hard findings
+            reasoning.append("High grounding rate with no hard findings — upgrading to Medium")
             label = "Medium"
 
     # Build unsupported span models
@@ -175,6 +243,7 @@ def compute_confidence(
         user_provided_pct=user_provided_pct,
         total_claims=total,
         confidence_label=label,
+        confidence_reasoning=reasoning,
         grounding=grounding_info,
         unsupported_spans=span_models,
     )
@@ -216,13 +285,19 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     search_context = ""
     search_performed = False
 
+    search_attempted = False
+    search_note = ""
+
     if should_search(flags):
+        search_attempted = True
         sm = metrics.start_stage("search")
         search_sources, search_context = perform_web_search(req.prompt)
         search_performed = len(search_sources) > 0
         metrics.end_stage(sm)
         metrics.search_performed = search_performed
         metrics.search_sources_count = len(search_sources)
+        if not search_performed:
+            search_note = "Web search was enabled but returned no relevant sources for this query."
 
     gpt1_system = req.gpt1_system or DEFAULT_GPT1_SYSTEM
     gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
@@ -297,6 +372,8 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     search_kwargs = dict(
         search_performed=search_performed,
+        search_attempted=search_attempted,
+        search_note=search_note,
         search_query=req.prompt if search_performed else "",
         search_sources=search_sources,
     )
@@ -376,11 +453,18 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     sanitizer_applied = (sanitized_output != gpt1_output)
 
     # ---- Atomic Claim Decomposition (pre-GPT-2) ----
-    decomp_sm = metrics.start_stage("decomposition")
-    atomic_claims = decompose_claims(gpt2_cfg, sanitized_output, req.prompt)
-    metrics.end_stage(decomp_sm)
-    metrics.decomposition_ran = len(atomic_claims) > 0
-    metrics.atomic_claims_count = len(atomic_claims)
+    # Only decompose when it meaningfully enriches verification:
+    #   - NLI available: decomposition feeds NLI claim-by-claim checking
+    #   - High-stakes query: legal/medical/financial claims warrant extra scrutiny
+    # Skipping for routine queries saves 2-3 s per request.
+    should_decompose = is_nli_available() or is_high_stakes(flags)
+    atomic_claims: list = []
+    if should_decompose:
+        decomp_sm = metrics.start_stage("decomposition")
+        atomic_claims = decompose_claims(gpt2_cfg, sanitized_output, req.prompt)
+        metrics.end_stage(decomp_sm)
+        metrics.decomposition_ran = len(atomic_claims) > 0
+        metrics.atomic_claims_count = len(atomic_claims)
 
     # ---- NLI Pre-Verification (optional layer) ----
     nli_grounding = {}
@@ -462,9 +546,38 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     metrics.hard_findings = sum(1 for f in findings if f.get("severity") == "hard")
     metrics.soft_findings = sum(1 for f in findings if f.get("severity") == "soft")
 
+    # ---- Iterative retrieval: if >30% unsupported and search was available ----
+    if search_performed and claim_table:
+        unsupported_ct = sum(
+            1 for ct in claim_table
+            if (ct.category if isinstance(ct.category, str) else "").lower().strip() == "unsupported"
+        )
+        unsupported_ratio = unsupported_ct / len(claim_table)
+        if unsupported_ratio > 0.3:
+            # Build refined query from unsupported claim texts
+            unsupported_texts = [
+                ct.claim for ct in claim_table
+                if (ct.category if isinstance(ct.category, str) else "").lower().strip() == "unsupported"
+            ]
+            refined_query = refine_search_query(req.prompt, unsupported_texts)
+            retry_sources, retry_context = perform_web_search(refined_query, max_results=3)
+            if retry_sources:
+                # Merge new sources (deduplicate by URL)
+                existing_urls = {s.url for s in search_sources}
+                new_sources = [s for s in retry_sources if s.url not in existing_urls]
+                if new_sources:
+                    search_sources = search_sources + new_sources
+                    _src_kw_sets = build_source_keyword_sets(search_sources)
+                    # Re-run source-match correction with expanded evidence
+                    claim_table = recategorize_with_sources(claim_table, search_sources, _src_kw_sets)
+                    findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets)
+                    violations = [f["type"] for f in findings]
+                    gpt2_verdict = recompute_verdict(findings, tier=tier)
+                    search_kwargs["search_sources"] = search_sources
+
     # ---- If GPT-2 PASS: done ----
     if gpt2_verdict == "PASS":
-        conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None)
+        conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
 
         # Meta-verification: cross-check GPT-2 PASS on high-stakes queries
         meta_result = meta_verify_pass(flags, claim_table, findings, atomic_claims, conf.confidence_label)
@@ -487,6 +600,30 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             **empty_response, **search_kwargs, **decomp_kwargs,
         )
 
+    # ---- Meta-verify FAIL: catch false FAILs on high-stakes queries ----
+    fail_meta = meta_verify_fail(flags, claim_table, findings, atomic_claims)
+    if fail_meta["ran"] and fail_meta["override_to_pass"]:
+        findings = fail_meta["adjusted_findings"]
+        violations = [f["type"] for f in findings]
+        gpt2_verdict = recompute_verdict(findings, tier=tier)
+        if gpt2_verdict == "PASS":
+            conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
+            metrics.final_verdict = "PASS"
+            metrics.confidence_label = conf.confidence_label
+            metrics.finish()
+            record_run(metrics)
+            return PipelineResponse(
+                prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+                gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+                gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+                gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
+                final_verdict="PASS", final_result=sanitized_output,
+                prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+                confidence=conf,
+                meta_verification={"type": "false_fail_override", "reason": fail_meta["reason"]},
+                **empty_response, **search_kwargs, **decomp_kwargs,
+            )
+
     # ---- GPT-2 FAIL: soft-only auto-repair path ----
     max_rewrite_loops = getattr(config, "MAX_REWRITE_LOOPS", 1)
     if _all_soft(findings):
@@ -506,7 +643,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
             re_verdict = recompute_verdict(re_findings, tier=tier)
 
         if re_verdict == "PASS":
-            conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
+            conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
             metrics.final_verdict = "PASS"
             metrics.confidence_label = conf.confidence_label
             metrics.rewrite_loops = 1
@@ -565,7 +702,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     # ---- Decision: BLOCK ----
     if arbiter_decision == "BLOCK":
         metrics.final_verdict = "FAIL"
-        block_conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None)
+        block_conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
         metrics.confidence_label = block_conf.confidence_label
         metrics.finish()
         record_run(metrics)
@@ -643,6 +780,16 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     # ---- Decision: ALLOW_WITH_EDITS ----
     rewrite_prompt = apply_edits(sanitized_output, arbiter_edits)
+    # Inject GPT-2 findings so GPT-1 knows exactly what to fix
+    if findings:
+        finding_lines = "\n".join(
+            f"- {f['type']}: {f.get('detail', 'no detail')} (severity: {f.get('severity', '?')})"
+            for f in findings
+        )
+        rewrite_prompt += (
+            f"\n\nPrevious verification found these specific issues:\n{finding_lines}\n"
+            f"Please address each finding in your rewrite."
+        )
     rewrite_output = call_llm(gpt1_cfg, gpt1_system, rewrite_prompt)
 
     # Sanitize the rewrite before re-verification
@@ -715,7 +862,7 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
 
     # If the rewrite loop passed, return success
     if re_verdict == "PASS":
-        conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None)
+        conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
         metrics.final_verdict = "PASS"
         metrics.confidence_label = conf.confidence_label
         metrics.convergence_outcome = "pass"

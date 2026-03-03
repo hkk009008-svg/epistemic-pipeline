@@ -12,7 +12,7 @@ UI_HTML = """
 
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
-  :root {
+  :root, [data-theme="dark"] {
     --bg-root: #09090b;
     --bg-surface-0: #111113;
     --bg-surface-1: #161618;
@@ -43,6 +43,32 @@ UI_HTML = """
     --shadow-glow-emerald: 0 0 20px rgba(110,231,183,0.12);
     --shadow-glow-rose: 0 0 20px rgba(252,165,165,0.12);
     --transition: 0.2s ease;
+  }
+  [data-theme="light"] {
+    --bg-root: #f8f9fa;
+    --bg-surface-0: #ffffff;
+    --bg-surface-1: #f1f3f5;
+    --bg-surface-2: #e9ecef;
+    --bg-surface-3: #dee2e6;
+    --border-subtle: rgba(0,0,0,0.08);
+    --border-hover: rgba(0,0,0,0.15);
+    --border-focus: rgba(59,130,246,0.5);
+    --text-primary: #1a1a2e;
+    --text-secondary: #495057;
+    --text-tertiary: #6c757d;
+    --text-muted: #adb5bd;
+    --accent-blue: #3b82f6;
+    --accent-amber: #d97706;
+    --accent-violet: #7c3aed;
+    --accent-emerald: #059669;
+    --accent-rose: #e11d48;
+    --accent-teal: #0d9488;
+    --accent-lime: #65a30d;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.06);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.08);
+    --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
+    --shadow-glow-emerald: 0 0 20px rgba(5,150,105,0.12);
+    --shadow-glow-rose: 0 0 20px rgba(225,29,72,0.12);
   }
 
   body {
@@ -1288,6 +1314,63 @@ UI_HTML = """
     100% { background-position: 200% 0; }
   }
 
+  /* ---- L2 Verification Summary ---- */
+  .l2-toggle { color: var(--accent-blue); }
+  .l3-toggle { font-size: 11px; color: var(--text-muted); }
+  .l2-content { padding: 12px 0; }
+  .l2-row { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; line-height: 1.5; }
+  .l2-label { color: var(--text-tertiary); font-weight: 600; margin-right: 4px; }
+  .l2-signals { margin: 4px 0 0 16px; list-style: disc; }
+  .l2-signals li { font-size: 11px; color: var(--text-secondary); line-height: 1.6; }
+
+  /* ---- Theme Toggle ---- */
+  .theme-toggle { background: none; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 4px 6px; cursor: pointer; color: var(--text-secondary); transition: var(--transition); display: flex; align-items: center; }
+  .theme-toggle:hover { border-color: var(--border-hover); color: var(--text-primary); }
+  .theme-toggle svg { width: 14px; height: 14px; }
+  .theme-icon-sun { display: none; }
+  .theme-icon-moon { display: block; }
+  [data-theme="light"] .theme-icon-sun { display: block; }
+  [data-theme="light"] .theme-icon-moon { display: none; }
+
+  /* ---- Conversation History Sidebar ---- */
+  .history-btn { background: none; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 4px 6px; cursor: pointer; color: var(--text-secondary); transition: var(--transition); display: flex; align-items: center; }
+  .history-btn:hover { border-color: var(--border-hover); color: var(--text-primary); }
+  .history-btn svg { width: 14px; height: 14px; }
+  .history-sidebar { position: fixed; left: 0; top: 0; bottom: 0; width: 260px; background: var(--bg-surface-0); border-right: 1px solid var(--border-subtle); z-index: 200; transform: translateX(-100%); transition: transform 0.2s ease; overflow-y: auto; padding: 12px; }
+  .history-sidebar.open { transform: translateX(0); }
+  .history-sidebar h3 { font-size: 13px; color: var(--text-primary); margin-bottom: 12px; font-weight: 600; }
+  .history-item { padding: 8px 10px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; transition: var(--transition); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .history-item:hover { background: var(--bg-surface-2); color: var(--text-primary); }
+  .history-item.active { background: var(--bg-surface-2); color: var(--accent-blue); }
+  .history-item .history-date { display: block; font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+  .history-empty { font-size: 11px; color: var(--text-muted); text-align: center; padding: 20px 0; }
+  .history-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 199; display: none; }
+  .history-overlay.open { display: block; }
+
+  /* ---- Feedback Buttons ---- */
+  .fb-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
+  .fb-label { font-size: 11px; color: var(--text-muted); letter-spacing: 0.03em; }
+  .fb-btn { background: none; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 3px 8px; cursor: pointer; font-size: 13px; transition: var(--transition); }
+  .fb-btn:hover { border-color: var(--border-hover); background: var(--bg-surface-1); }
+  .fb-btn:disabled { opacity: 0.5; cursor: default; }
+  .fb-btn.fb-active { border-color: var(--accent-emerald); background: rgba(110,231,183,0.1); }
+  .fb-thanks { font-size: 11px; color: var(--accent-emerald); }
+
+  /* ---- Confidence Reasoning ---- */
+  .conf-reasoning { margin-top: 8px; }
+  .conf-reasoning summary { font-size: 11px; color: var(--text-tertiary); cursor: pointer; letter-spacing: 0.03em; }
+  .conf-reasoning summary:hover { color: var(--text-secondary); }
+  .conf-reasoning ul { margin: 6px 0 0 16px; list-style: disc; }
+  .conf-reasoning li { font-size: 11px; color: var(--text-secondary); line-height: 1.6; }
+
+  /* ---- Rate Limit Counter ---- */
+  .rl-counter { font-size: 10px; color: var(--text-muted); letter-spacing: 0.04em; padding: 2px 6px; border-radius: var(--radius-sm); background: var(--bg-surface-1); }
+  .rl-counter:empty { display: none; }
+  .rl-warn { color: var(--accent-rose); background: rgba(252,165,165,0.1); }
+
+  /* ---- Search Note ---- */
+  .search-note { font-size: 12px; color: var(--text-tertiary); font-style: italic; padding: 8px 0; }
+
   /* ---- Responsive ---- */
   @media (max-width: 640px) {
     .metrics-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1301,23 +1384,42 @@ UI_HTML = """
     .welcome-tiers { grid-template-columns: 1fr; }
     .welcome-title { font-size: 22px; }
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
 </style>
 </head>
 <body>
+
+<!-- Conversation History Sidebar -->
+<div class="history-overlay" id="histOverlay" onclick="toggleHistory()"></div>
+<div class="history-sidebar" id="histSidebar" aria-label="Conversation history">
+  <h3>History</h3>
+  <div id="histList"></div>
+</div>
 
 <div class="top-bar">
   <h1>
     <span class="g1" id="stg1">GPT-1</span><span class="arr">&rarr;</span><span class="g2" id="stg2">GPT-2</span><span class="arr">&rarr;</span><span class="g3" id="stg3">GPT-3</span>
   </h1>
   <div class="right-controls">
-    <button class="new-chat-btn" id="newChatBtn" onclick="clearChat()" title="New conversation">
+    <button class="history-btn" onclick="toggleHistory()" title="Conversation history" aria-label="Conversation history">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+    </button>
+    <span class="rl-counter" id="rl-counter" title="Rate limit remaining" aria-label="Rate limit status"></span>
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode" aria-label="Toggle light/dark mode">
+      <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+    <button class="new-chat-btn" id="newChatBtn" onclick="clearChat()" title="New conversation" aria-label="Start new conversation">
       <svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
     </button>
     <button class="cfg-btn stress-btn" onclick="openStress()">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
       Stress Test
     </button>
-    <button class="cfg-btn" onclick="tog()">
+    <button class="cfg-btn" onclick="tog()" aria-label="Open settings">
       <span class="kd off" id="kd"></span>
       <svg class="gear-icon" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
     </button>
@@ -1403,7 +1505,7 @@ Only include "Options" if user asked for actions/choices.</textarea>
   </div>
 </div>
 
-<div class="chat" id="ch">
+<div class="chat" id="ch" role="log" aria-live="polite" aria-relevant="additions" aria-label="Verification results">
   <div class="welcome" id="welcome">
     <div class="welcome-title">Epistemic Verification Pipeline</div>
     <div class="welcome-sub">
@@ -1523,9 +1625,9 @@ Only include "Options" if user asked for actions/choices.</textarea>
     </div>
   </div>
   <div class="tier-desc" id="tier-desc">Full Audit v7 rules &mdash; all claims verified, typicality stripped, bare stats require citations</div>
-  <form onsubmit="go(event)">
-    <input type="text" id="ui" placeholder="Ask anything..." autocomplete="off">
-    <button type="submit" id="sb">
+  <form onsubmit="go(event)" role="search" aria-label="Submit a claim for verification">
+    <input type="text" id="ui" placeholder="Ask anything..." autocomplete="off" aria-label="Enter text to verify">
+    <button type="submit" id="sb" aria-label="Submit for verification">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
     </button>
   </form>
@@ -1533,6 +1635,125 @@ Only include "Options" if user asked for actions/choices.</textarea>
 
 <script>
 let currentTier = 'strict';
+
+// ---- Conversation History (localStorage) ----
+const HIST_KEY = 'ep-conversations';
+const HIST_MAX = 100;
+let currentConvId = null;
+
+function getConversations() {
+  try { return JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); } catch(e) { return []; }
+}
+function saveConversations(convs) {
+  try {
+    // LRU eviction: keep only the newest HIST_MAX
+    if (convs.length > HIST_MAX) convs = convs.slice(0, HIST_MAX);
+    localStorage.setItem(HIST_KEY, JSON.stringify(convs));
+  } catch(e) {}
+}
+function addConversation(prompt, resultHtml) {
+  const convs = getConversations();
+  const conv = {
+    id: 'c-' + Date.now(),
+    title: prompt.substring(0, 60) + (prompt.length > 60 ? '...' : ''),
+    created_at: new Date().toISOString(),
+    prompt: prompt,
+    html: resultHtml
+  };
+  convs.unshift(conv);
+  saveConversations(convs);
+  currentConvId = conv.id;
+  renderHistory();
+}
+function renderHistory() {
+  const list = document.getElementById('histList');
+  const convs = getConversations();
+  if (convs.length === 0) {
+    list.innerHTML = '<div class="history-empty">No conversations yet</div>';
+    return;
+  }
+  let h = '';
+  convs.forEach(function(c) {
+    const dt = new Date(c.created_at);
+    const dateStr = dt.toLocaleDateString() + ' ' + dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    const cls = c.id === currentConvId ? ' active' : '';
+    h += '<div class="history-item' + cls + '" onclick="loadConversation(\\'' + c.id + '\\')" title="' + esc(c.title).replace(/"/g,'&quot;') + '">';
+    h += esc(c.title);
+    h += '<span class="history-date">' + dateStr + '</span>';
+    h += '</div>';
+  });
+  list.innerHTML = h;
+}
+function loadConversation(id) {
+  const convs = getConversations();
+  const conv = convs.find(function(c) { return c.id === id; });
+  if (!conv) return;
+  currentConvId = id;
+  const ch = document.getElementById('ch');
+  const w = document.getElementById('welcome');
+  if (w) w.style.display = 'none';
+  // Clear and restore
+  ch.innerHTML = conv.html;
+  toggleHistory();
+  renderHistory();
+}
+function toggleHistory() {
+  document.getElementById('histSidebar').classList.toggle('open');
+  document.getElementById('histOverlay').classList.toggle('open');
+}
+
+// ---- Theme ----
+function toggleTheme() {
+  const html = document.documentElement;
+  const current = html.getAttribute('data-theme') || 'dark';
+  const next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  try { localStorage.setItem('ep-theme', next); } catch(e) {}
+}
+(function initTheme() {
+  try {
+    const saved = localStorage.getItem('ep-theme');
+    if (saved) { document.documentElement.setAttribute('data-theme', saved); return; }
+  } catch(e) {}
+  if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+    document.documentElement.setAttribute('data-theme', 'light');
+  }
+})();
+
+// ---- Feedback ----
+async function sendFeedback(btn, rating, prompt) {
+  const row = btn.parentElement;
+  row.querySelectorAll('.fb-btn').forEach(function(b) { b.disabled = true; });
+  btn.classList.add('fb-active');
+  try {
+    await fetch('/api/feedback', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rating: rating, prompt: prompt})
+    });
+    row.innerHTML = '<span class="fb-thanks">Thanks for your feedback!</span>';
+  } catch(e) {
+    row.innerHTML = '<span class="fb-thanks">Could not send feedback.</span>';
+  }
+}
+
+// ---- Rate Limit Counter ----
+async function updateRateLimit() {
+  try {
+    const r = await fetch('/api/rate-limit');
+    if (r.ok) {
+      const d = await r.json();
+      const el = document.getElementById('rl-counter');
+      if (el) {
+        el.textContent = d.remaining + '/' + d.limit;
+        el.title = d.remaining + ' requests remaining this minute';
+        el.className = 'rl-counter' + (d.remaining <= 3 ? ' rl-warn' : '');
+      }
+    }
+  } catch(e) { /* best effort */ }
+}
+setInterval(updateRateLimit, 10000);
+
 const tierDescs = {
   strict: 'Full Audit v7 rules \u2014 all claims verified, typicality stripped, bare stats require citations',
   standard: 'Balanced verification \u2014 evidence rules applied, softer thresholds for natural prose',
@@ -1914,6 +2135,11 @@ function renderConfidence(conf) {
   h += '</div>';
   const lblCls = (conf.confidence_label || 'unknown').toLowerCase();
   h += '<div class="conf-badge ' + lblCls + '">Confidence: ' + esc(conf.confidence_label) + '</div>';
+  if (conf.confidence_reasoning && conf.confidence_reasoning.length > 0) {
+    h += '<details class="conf-reasoning"><summary>Why this confidence?</summary><ul>';
+    conf.confidence_reasoning.forEach(function(r) { h += '<li>' + esc(r) + '</li>'; });
+    h += '</ul></details>';
+  }
   h += '</div>';
   return h;
 }
@@ -2102,30 +2328,91 @@ async function go(e) {
     if (d.confidence && d.confidence.confidence_label) metaParts.push('<span>confidence: ' + esc(d.confidence.confidence_label) + '</span>');
     const metaHtml = '<div class="fo-meta">' + metaParts.join('<span class="fo-meta-sep">&middot;</span>') + '</div>';
 
-    // ---- Hero: Final Output with integrated metadata ----
+    // ---- Hero: Final Output with integrated metadata + feedback ----
+    const fbHtml = '<div class="fb-row" aria-label="Was this verification correct?">' +
+      '<span class="fb-label">Was this helpful?</span>' +
+      '<button class="fb-btn fb-up" onclick="sendFeedback(this,\\'accurate\\',\\''+esc(d.gpt1_input).replace(/'/g,"\\\\'")+'\\')" aria-label="Mark as accurate" title="Accurate">&#x1F44D;</button>' +
+      '<button class="fb-btn fb-down" onclick="sendFeedback(this,\\'inaccurate\\',\\''+esc(d.gpt1_input).replace(/'/g,"\\\\'")+'\\')" aria-label="Mark as inaccurate" title="Inaccurate">&#x1F44E;</button>' +
+      '</div>';
     if (d.final_verdict === 'PASS') {
-      ab('fo', 'Final Output', formatOutput(d.final_result) + metaHtml);
+      ab('fo', 'Final Output', formatOutput(d.final_result) + metaHtml + fbHtml);
     } else {
       let blockMsg = 'Output blocked by verification pipeline';
       if (d.arbiter_invoked && d.arbiter_decision === 'BLOCK' && d.arbiter_rationale && d.arbiter_rationale.length > 0) {
         blockMsg += '\\n\\nArbiter rationale:\\n' + d.arbiter_rationale.map(r => '\\u2022 ' + r).join('\\n');
       }
-      ab('fo blk', 'Blocked', esc(blockMsg) + metaHtml);
+      ab('fo blk', 'Blocked', esc(blockMsg) + metaHtml + fbHtml);
     }
 
-    // ---- Collapsible Pipeline Details ----
-    const pid = 'pd-' + Date.now();
+    // ---- L2: Verification Summary (auto-expand on FAIL) ----
+    const l2Btn = document.createElement('button');
+    l2Btn.className = 'pipeline-toggle l2-toggle';
+    l2Btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg> Verification Summary';
+    ch.appendChild(l2Btn);
+
+    const l2Div = document.createElement('div');
+    l2Div.className = 'pipeline-steps l2-summary';
+    ch.appendChild(l2Div);
+
+    l2Btn.onclick = function() {
+      l2Btn.classList.toggle('open');
+      l2Div.classList.toggle('open');
+    };
+
+    // Build L2 summary
+    let l2Html = '<div class="l2-content">';
+    // Stages that ran
+    let stages = ['GPT-1 (Generator)'];
+    if (!d.bypassed) stages.push('GPT-2 (Verifier)');
+    if (d.arbiter_invoked) stages.push('GPT-3 (Arbiter)');
+    if (d.rewrite_occurred) stages.push('Rewrite + Re-verify');
+    l2Html += '<div class="l2-row"><span class="l2-label">Stages:</span> ' + stages.join(' \\u2192 ') + '</div>';
+    // Claim count
+    if (d.claim_table && d.claim_table.length > 0) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Claims verified:</span> ' + d.claim_table.length + '</div>';
+    }
+    // Violations summary in plain English
+    if (d.violations && d.violations.length > 0) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Issues found:</span> ' + d.violations.length + ' violation(s) \\u2014 ' + d.violations.map(function(v) { return expandViolation(v); }).join(', ') + '</div>';
+    } else if (!d.bypassed) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Issues found:</span> None</div>';
+    }
+    // Search
+    if (d.search_performed) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Web sources:</span> ' + (d.search_sources ? d.search_sources.length : 0) + ' sources used for grounding</div>';
+    } else if (d.search_attempted && d.search_note) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Web search:</span> ' + esc(d.search_note) + '</div>';
+    }
+    // Confidence reasoning
+    if (d.confidence && d.confidence.confidence_reasoning && d.confidence.confidence_reasoning.length > 0) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Confidence signals:</span></div>';
+      l2Html += '<ul class="l2-signals">';
+      d.confidence.confidence_reasoning.forEach(function(r) { l2Html += '<li>' + esc(r) + '</li>'; });
+      l2Html += '</ul>';
+    }
+    l2Html += '</div>';
+    l2Div.innerHTML = l2Html;
+
+    // Auto-expand L2 on FAIL
+    if (d.final_verdict !== 'PASS') {
+      l2Btn.classList.add('open');
+      l2Div.classList.add('open');
+    }
+
+    // ---- L3: Full Pipeline Trace (collapsed by default) ----
     const pdBtn = document.createElement('button');
-    pdBtn.className = 'pipeline-toggle';
-    // Note: SVG is static trusted content
-    pdBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg> Pipeline Details';
-    pdBtn.onclick = function() { togglePipeline(this, pid); };
+    pdBtn.className = 'pipeline-toggle l3-toggle';
+    pdBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg> Advanced: Full Pipeline Trace';
     ch.appendChild(pdBtn);
 
     const pdDiv = document.createElement('div');
     pdDiv.className = 'pipeline-steps';
-    pdDiv.id = pid;
     ch.appendChild(pdDiv);
+
+    pdBtn.onclick = function() {
+      pdBtn.classList.toggle('open');
+      pdDiv.classList.toggle('open');
+    };
 
     // Build pipeline details inside the collapsible container
     function pab(cls, who, body) {
@@ -2144,6 +2431,8 @@ async function go(e) {
     // ---- Web Search ----
     if (d.search_performed && d.search_sources && d.search_sources.length) {
       pab('sr', 'Web Search (' + d.search_sources.length + ' sources)', renderSearchSources(d.search_sources));
+    } else if (d.search_attempted && d.search_note) {
+      pab('sr', 'Web Search', '<div class="search-note">' + esc(d.search_note) + '</div>');
     }
 
     // ---- GPT-1 output ----
@@ -2206,6 +2495,9 @@ async function go(e) {
 
     ch.scrollTop = ch.scrollHeight;
 
+    // Save to conversation history
+    addConversation(prompt, ch.innerHTML);
+
   } catch(err) {
     timers.forEach(t => clearTimeout(t));
     clearStages();
@@ -2222,11 +2514,14 @@ async function go(e) {
   } finally {
     btn.disabled = false;
     inp.focus();
+    updateRateLimit();
   }
 }
 
 lc();
 loadTav();
+updateRateLimit();
+renderHistory();
 document.getElementById('ui').focus();
 </script>
 </body>

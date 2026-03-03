@@ -92,14 +92,14 @@ class TestDecomposeClaims:
         mock_call.return_value = json.dumps({
             "claims": [
                 {"has_citation": False},
-                {"text": "Valid claim."},
+                {"text": "Climate change affects global temperatures."},
                 "not a dict",
             ]
         })
         cfg = {"provider": "openai", "api_key": "k", "model": "m", "base_url": ""}
         result = decompose_claims(cfg, "output", "prompt")
         assert len(result) == 1
-        assert result[0]["text"] == "Valid claim."
+        assert result[0]["text"] == "Climate change affects global temperatures."
 
     @patch("pipeline.decomposer.call_llm")
     def test_empty_claims_list(self, mock_call):

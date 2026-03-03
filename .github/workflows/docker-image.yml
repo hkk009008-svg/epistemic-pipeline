@@ -1,4 +1,4 @@
-name: Docker Image CI
+name: CI
 
 on:
   push:
@@ -8,11 +8,25 @@ on:
 
 jobs:
 
-  build:
-
+  test:
     runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: pip
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+    - name: Lint with ruff
+      run: ruff check .
+    - name: Run tests
+      run: python -m pytest tests/ -v --tb=short
 
+  build:
+    needs: test
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+      run: docker build . --file Dockerfile.local --tag epistemic-pipeline:$(date +%s)
