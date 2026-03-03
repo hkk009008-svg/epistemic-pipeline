@@ -2345,17 +2345,19 @@ async function go(e) {
     }
 
     // ---- L2: Verification Summary (auto-expand on FAIL) ----
-    const l2id = 'l2-' + Date.now();
     const l2Btn = document.createElement('button');
     l2Btn.className = 'pipeline-toggle l2-toggle';
     l2Btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg> Verification Summary';
-    l2Btn.onclick = function() { togglePipeline(this, l2id); };
     ch.appendChild(l2Btn);
 
     const l2Div = document.createElement('div');
     l2Div.className = 'pipeline-steps l2-summary';
-    l2Div.id = l2id;
     ch.appendChild(l2Div);
+
+    l2Btn.onclick = function() {
+      l2Btn.classList.toggle('open');
+      l2Div.classList.toggle('open');
+    };
 
     // Build L2 summary
     let l2Html = '<div class="l2-content">';
@@ -2398,17 +2400,19 @@ async function go(e) {
     }
 
     // ---- L3: Full Pipeline Trace (collapsed by default) ----
-    const pid = 'pd-' + Date.now();
     const pdBtn = document.createElement('button');
     pdBtn.className = 'pipeline-toggle l3-toggle';
     pdBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg> Advanced: Full Pipeline Trace';
-    pdBtn.onclick = function() { togglePipeline(this, pid); };
     ch.appendChild(pdBtn);
 
     const pdDiv = document.createElement('div');
     pdDiv.className = 'pipeline-steps';
-    pdDiv.id = pid;
     ch.appendChild(pdDiv);
+
+    pdBtn.onclick = function() {
+      pdBtn.classList.toggle('open');
+      pdDiv.classList.toggle('open');
+    };
 
     // Build pipeline details inside the collapsible container
     function pab(cls, who, body) {

@@ -453,12 +453,11 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
     sanitizer_applied = (sanitized_output != gpt1_output)
 
     # ---- Atomic Claim Decomposition (pre-GPT-2) ----
-    # Lazy decomposition: only run when it adds value (saves 3-5s on standard/light)
-    should_decompose = (
-        tier == "strict"
-        or is_nli_available()
-        or is_high_stakes(flags)
-    )
+    # Only decompose when it meaningfully enriches verification:
+    #   - NLI available: decomposition feeds NLI claim-by-claim checking
+    #   - High-stakes query: legal/medical/financial claims warrant extra scrutiny
+    # Skipping for routine queries saves 2-3 s per request.
+    should_decompose = is_nli_available() or is_high_stakes(flags)
     atomic_claims: list = []
     if should_decompose:
         decomp_sm = metrics.start_stage("decomposition")
@@ -466,17 +465,6 @@ def run_pipeline(req: PipelineRequest) -> PipelineResponse:
         metrics.end_stage(decomp_sm)
         metrics.decomposition_ran = len(atomic_claims) > 0
         metrics.atomic_claims_count = len(atomic_claims)
-
-        # Quality gate: if decomposition quality is poor, re-decompose once
-        if atomic_claims:
-            decomp_quality = check_decomposition_quality(sanitized_output, atomic_claims)
-            if decomp_quality["quality_tier"] == "poor":
-                retry_claims = decompose_claims(gpt2_cfg, sanitized_output, req.prompt)
-                if retry_claims:
-                    retry_quality = check_decomposition_quality(sanitized_output, retry_claims)
-                    if retry_quality["quality_tier"] != "poor":
-                        atomic_claims = retry_claims
-                        metrics.atomic_claims_count = len(atomic_claims)
 
     # ---- NLI Pre-Verification (optional layer) ----
     nli_grounding = {}

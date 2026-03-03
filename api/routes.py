@@ -168,8 +168,10 @@ def feedback_summary():
 
 # Server-side timeout (seconds) — must finish before the CDN/proxy timeout
 # to return a proper JSON error instead of the platform's XML/HTML error page.
-_PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "55"))
-_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+# Default 90 s accommodates arbiter + rewrite loops without false timeouts.
+_PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "90"))
+# 8 workers: allows concurrent pipelines without exhausting Railway CPU budget.
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 def _stream_pipeline(req: PipelineRequest):
     """Run pipeline and yield NDJSON progress events."""

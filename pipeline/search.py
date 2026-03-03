@@ -90,12 +90,21 @@ def _get_tavily_client() -> TavilyClient | None:
 def should_search(flags: dict) -> bool:
     """Determine if web search should be triggered.
 
-    When Tavily is enabled, always search — every query benefits from
-    grounding in current web sources.  The previous flag-gated approach
-    missed many factual queries (e.g. "who is the president") because
-    they didn't match narrow keyword regexes.
+    Only search when the query has signals that benefit from current web
+    data: current events, legal, advice, comparisons, statistics, or
+    future-year references.  Pure conceptual/explanatory queries (no flags
+    set) skip search to save 1-3 s of latency.
     """
-    return config.is_tavily_enabled()
+    if not config.is_tavily_enabled():
+        return False
+    return any([
+        flags.get("current_events"),
+        flags.get("legal_mode"),
+        flags.get("advice_requested"),
+        flags.get("comparative"),
+        flags.get("percent_requested"),
+        flags.get("future_year"),
+    ])
 
 
 def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
