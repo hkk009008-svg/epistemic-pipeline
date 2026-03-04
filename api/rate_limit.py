@@ -32,6 +32,20 @@ def _cleanup_expired(now: float, window: float) -> None:
         del _requests[ip]
 
 
+def _extract_client_ip(request: Request) -> str:
+    """Safely extract the real client IP from the request.
+
+    PaaS load balancers (Railway, Heroku, etc.) append the real client IP
+    to the *end* of the X-Forwarded-For chain.  Taking the first entry
+    (index 0) trusts user-supplied headers and allows trivial IP spoofing.
+    We take the *last* entry (rightmost) which is set by the ingress proxy.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[-1].strip()
+    return request.client.host if request.client else "unknown"
+
+
 def get_rate_limit_info(request: Request) -> dict:
     """Return current rate limit usage for the request IP without consuming a slot."""
     limit = config.RATE_LIMIT_PER_MINUTE
@@ -39,8 +53,7 @@ def get_rate_limit_info(request: Request) -> dict:
     now = time.time()
     cutoff = now - window
 
-    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    ip = forwarded or (request.client.host if request.client else "unknown")
+    ip = _extract_client_ip(request)
 
     with _lock:
         timestamps = _requests.get(ip, [])
@@ -59,9 +72,8 @@ def rate_limit_dependency(request: Request) -> None:
     now = time.time()
     cutoff = now - window
 
-    # Resolve client IP (respect X-Forwarded-For behind a reverse proxy).
-    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    ip = forwarded or (request.client.host if request.client else "unknown")
+    # Resolve client IP — use rightmost X-Forwarded-For entry (set by ingress proxy).
+    ip = _extract_client_ip(request)
 
     with _lock:
         # Prune timestamps outside the current window for this IP.

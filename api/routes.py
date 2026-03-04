@@ -12,6 +12,7 @@ import json
 import os
 import time
 from collections import defaultdict
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -30,34 +31,56 @@ from api.ui import UI_HTML
 router = APIRouter()
 
 
-# Allowed base URL patterns for custom provider endpoints.
-# Prevents SSRF by restricting stage base_url to known-safe hosts.
-_ALLOWED_BASE_URL_PREFIXES = [
-    "https://openrouter.ai/",
-    "https://api.openai.com/",
-    "https://api.anthropic.com/",
-    "http://localhost:",
-    "http://127.0.0.1:",
-    "http://host.docker.internal:",
-]
+# Allowed hostnames for custom provider endpoints.
+# Uses strict hostname parsing to prevent SSRF via URL authority bypass
+# (e.g. http://localhost:password@attacker.com would pass a prefix check
+#  but route to attacker.com).
+_ALLOWED_HOSTS: set[str] = {
+    "openrouter.ai",
+    "api.openai.com",
+    "api.anthropic.com",
+    "localhost",
+    "127.0.0.1",
+    "host.docker.internal",
+}
 
-# Allow extending via env var (comma-separated prefixes)
+# Allow extending via env var (comma-separated URLs or hostnames)
 _extra = os.getenv("ALLOWED_BASE_URLS", "")
 if _extra:
-    _ALLOWED_BASE_URL_PREFIXES.extend(p.strip() for p in _extra.split(",") if p.strip())
+    for _p in _extra.split(","):
+        _p = _p.strip()
+        if not _p:
+            continue
+        try:
+            _h = urlparse(_p).hostname
+            if _h:
+                _ALLOWED_HOSTS.add(_h.lower())
+        except Exception:
+            pass
 
 
 def _validate_base_url(url: str):
-    """Reject base_url values that don't match the allowlist."""
-    url_lower = url.strip().lower()
-    if any(url_lower.startswith(prefix.lower()) for prefix in _ALLOWED_BASE_URL_PREFIXES):
-        return
+    """Reject base_url values whose hostname is not in the allowlist.
+
+    Uses proper URL parsing instead of string prefix matching to prevent
+    SSRF via URL authority/userinfo bypass attacks.
+    """
+    try:
+        parsed = urlparse(url.strip())
+        hostname = (parsed.hostname or "").lower()
+        if hostname and (
+            hostname in _ALLOWED_HOSTS
+            or any(hostname.endswith("." + h) for h in _ALLOWED_HOSTS)
+        ):
+            return
+    except Exception:
+        pass
     raise HTTPException(
         status_code=400,
         detail=(
-            f"base_url not in allowlist. Allowed prefixes: "
-            f"{', '.join(_ALLOWED_BASE_URL_PREFIXES[:4])}... "
-            f"Set ALLOWED_BASE_URLS env var to add custom prefixes."
+            f"base_url hostname not in allowlist. Allowed hosts: "
+            f"{', '.join(sorted(list(_ALLOWED_HOSTS)[:6]))}... "
+            f"Set ALLOWED_BASE_URLS env var to add custom hosts."
         ),
     )
 

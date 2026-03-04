@@ -115,6 +115,11 @@ def _base_response(state: PipelineState, **overrides) -> PipelineResponse:
     base.update(state.get("search_kwargs", {}))
     base.update(state.get("decomp_kwargs", {}))
     base.update(overrides)
+
+    # Strip internal sanitizer/epistemic markers before returning to users
+    if "final_result" in base and base["final_result"]:
+        base["final_result"] = clean_for_display(base["final_result"])
+
     return PipelineResponse(**base)
 
 

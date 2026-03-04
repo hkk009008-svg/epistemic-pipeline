@@ -375,13 +375,26 @@ import concurrent.futures
 _nli_process_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
 
 
+def _init_nli_worker():
+    """Pre-load the NLI model in each worker process at spawn time.
+
+    Without this initializer, the 22M-param DeBERTa model is loaded lazily
+    on the first inference request, causing a large latency spike.
+    """
+    _get_nli_pipeline()
+
+
 def _get_nli_process_pool() -> concurrent.futures.ProcessPoolExecutor:
     """Lazily create a ProcessPoolExecutor for NLI inference."""
     global _nli_process_pool
     if _nli_process_pool is None:
         # 2 workers: enough for concurrent claims without exhausting memory
-        # (each worker loads a separate copy of the 22M param model)
-        _nli_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=2)
+        # (each worker loads a separate copy of the 22M param model).
+        # initializer pre-loads the model so the first request isn't slow.
+        _nli_process_pool = concurrent.futures.ProcessPoolExecutor(
+            max_workers=2,
+            initializer=_init_nli_worker,
+        )
     return _nli_process_pool
 
 
