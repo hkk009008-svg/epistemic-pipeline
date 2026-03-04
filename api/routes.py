@@ -1,8 +1,8 @@
 """FastAPI route definitions for the epistemic verification pipeline.
 
 Provides both sync (ThreadPoolExecutor) and async (native asyncio) pipeline paths.
-The V3 /api/pipeline uses the async path by default, falling back to the sync path
-if run_pipeline_async is not available. The V2 endpoints are kept for backward compat.
+The /api/pipeline uses the async path by default for both streaming and non-streaming.
+The V2 endpoints are kept for backward compat.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import time
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -241,12 +242,11 @@ _PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "90"))
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 def _stream_pipeline(req: PipelineRequest):
-    """Run pipeline and yield true stage-based NDJSON events.
+    """Sync streaming fallback — used by V2 endpoints.
 
     Uses a thread-safe queue to receive real stage_start / stage_complete
     events emitted by the orchestrator's ``emit`` callback.
     """
-    import time
     import threading
     import queue
 
@@ -299,24 +299,68 @@ def _stream_pipeline(req: PipelineRequest):
         yield json.dumps({"type": "result", "data": result_holder[0].model_dump()}) + "\n"
 
 
+async def _stream_pipeline_async(req: PipelineRequest):
+    """Native async event streaming — uses run_pipeline_async without blocking threads.
+
+    Uses an asyncio.Queue to receive stage events from the emit callback.
+    The emit callback is called from within the async pipeline coroutine
+    (same event loop), so put_nowait is safe.
+    """
+    event_q: asyncio.Queue = asyncio.Queue()
+    start = time.monotonic()
+
+    def _emit(event: dict):
+        """Callback passed to run_pipeline_async for real stage events."""
+        event["elapsed"] = round(time.monotonic() - start, 1)
+        event_q.put_nowait(event)
+
+    # Launch the async pipeline as a concurrent task
+    pipeline_task = asyncio.create_task(run_pipeline_async(req, emit=_emit))
+
+    deadline = time.monotonic() + _PIPELINE_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pipeline_task.cancel()
+            yield json.dumps({"type": "error", "detail": f"Pipeline timed out after {_PIPELINE_TIMEOUT}s.", "status_code": 504}) + "\n"
+            return
+
+        try:
+            event = await asyncio.wait_for(event_q.get(), timeout=min(remaining, 0.5))
+            yield json.dumps(event) + "\n"
+        except asyncio.TimeoutError:
+            # No event within 0.5s — check if pipeline finished
+            if pipeline_task.done():
+                # Drain remaining events
+                while not event_q.empty():
+                    yield json.dumps(event_q.get_nowait()) + "\n"
+                break
+
+    # Yield the final result or error
+    try:
+        result = await pipeline_task
+        yield json.dumps({"type": "result", "data": result.model_dump()}) + "\n"
+    except PipelineError as e:
+        yield json.dumps({"type": "error", "detail": e.detail, "status_code": e.status_code}) + "\n"
+    except Exception as e:
+        yield json.dumps({"type": "error", "detail": str(e), "status_code": 500}) + "\n"
+
+
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 async def pipeline_endpoint(req: PipelineRequest, request: Request):
     """Main pipeline endpoint — uses native async I/O (V4).
 
-    The async path uses AsyncOpenAI/AsyncAnthropic clients and structured
-    outputs, allowing a single instance to handle far more concurrent
-    requests without tying up OS threads.
-
-    Falls back to the sync ThreadPoolExecutor path on error.
+    Both streaming and non-streaming modes use the async pipeline,
+    avoiding ThreadPoolExecutor entirely. Falls back to sync on error.
     """
-    # SSE streaming mode (still uses sync pipeline + thread for event queue)
+    # Native async streaming — uses asyncio.Queue, no OS threads
     if getattr(req, "stream", False):
         return StreamingResponse(
-            _stream_pipeline(req),
+            _stream_pipeline_async(req),
             media_type="application/x-ndjson",
         )
 
-    # Native async path (V4) — no ThreadPoolExecutor, no thread locks
+    # Native async path — no ThreadPoolExecutor, no thread locks
     try:
         result = await asyncio.wait_for(
             run_pipeline_async(req),

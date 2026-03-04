@@ -23,6 +23,7 @@ def parse_gpt3(raw: str):
                 action=e.get("action", ""),
                 target=e.get("target", ""),
                 replacement=e.get("replacement", ""),
+                target_id=e.get("target_id", ""),
             )
             for e in edits_raw
         ]
@@ -33,16 +34,22 @@ def parse_gpt3(raw: str):
 
 
 def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
-    """Apply GPT-3 edit instructions to GPT-1 output for rewrite prompt."""
+    """Apply GPT-3 edit instructions to GPT-1 output for rewrite prompt.
+
+    Supports both legacy text-based targeting and ID-based targeting.
+    When target_id is present, includes the claim ID in the instruction
+    for more precise targeting.
+    """
     instructions = []
     for e in edits:
+        id_tag = f" [claim_id={e.target_id}]" if getattr(e, "target_id", "") else ""
         if e.action == "DELETE":
-            instructions.append(f'DELETE the following text: "{e.target}"')
+            instructions.append(f'DELETE the following text{id_tag}: "{e.target}"')
         elif e.action == "REWRITE":
-            instructions.append(f'REWRITE "{e.target}" to: "{e.replacement}"')
+            instructions.append(f'REWRITE{id_tag} "{e.target}" to: "{e.replacement}"')
         elif e.action == "MOVE_TO_UNKNOWN":
             instructions.append(
-                f'MOVE the following to the Unknowns section: "{e.target}" '
+                f'MOVE the following to the Unknowns section{id_tag}: "{e.target}" '
                 f'\u2014 reframe as: "{e.replacement}"'
             )
     edit_block = "\n".join(f"- {inst}" for inst in instructions)
@@ -53,6 +60,58 @@ def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
         f"{edit_block}\n\n"
         f"Output the corrected response in full."
     )
+
+
+def apply_edits_by_id(
+    atomic_claims: List[dict],
+    edits: List[EditEntry],
+) -> tuple[List[dict], str]:
+    """Deterministically apply arbiter edits to atomic claims by UUID.
+
+    This is the V5 ID-based approach: instead of relying on GPT-1 to find
+    and replace text, we modify the claim JSON directly. This eliminates
+    linguistic fragility from the rewrite loop.
+
+    Args:
+        atomic_claims: List of claim dicts with "claim_id" and "text" fields.
+        edits: List of EditEntry with target_id set.
+
+    Returns:
+        (modified_claims, summary): The edited claim list and a human-readable
+        summary of what changed (for logging/metrics).
+    """
+    # Build a lookup by claim_id
+    claims_by_id = {c.get("claim_id", ""): c for c in atomic_claims if c.get("claim_id")}
+    applied = []
+    modified_claims = list(atomic_claims)
+
+    for e in edits:
+        target_id = getattr(e, "target_id", "")
+        if not target_id or target_id not in claims_by_id:
+            # Fall back to text-based matching if no ID or ID not found
+            continue
+
+        claim = claims_by_id[target_id]
+        idx = next((i for i, c in enumerate(modified_claims) if c.get("claim_id") == target_id), None)
+        if idx is None:
+            continue
+
+        if e.action == "DELETE":
+            modified_claims.pop(idx)
+            applied.append(f"DELETED claim {target_id}: {claim['text'][:60]}...")
+        elif e.action == "REWRITE":
+            modified_claims[idx] = {**claim, "text": e.replacement}
+            applied.append(f"REWROTE claim {target_id}")
+        elif e.action == "MOVE_TO_UNKNOWN":
+            modified_claims[idx] = {
+                **claim,
+                "text": e.replacement or f"Unknown(Actionable): {claim['text']}",
+                "is_unknown": True,
+            }
+            applied.append(f"MOVED claim {target_id} to Unknown")
+
+    summary = "; ".join(applied) if applied else "No ID-based edits applied"
+    return modified_claims, summary
 
 
 def parse_gpt3_structured(parsed: GPT3ResponseSchema):
@@ -71,6 +130,7 @@ def parse_gpt3_structured(parsed: GPT3ResponseSchema):
                 action=e.action,
                 target=e.target,
                 replacement=e.replacement,
+                target_id=getattr(e, "target_id", ""),
             )
             for e in parsed.edits_for_gpt1
         ]

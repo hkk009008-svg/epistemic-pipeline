@@ -32,7 +32,7 @@ from pipeline.decomposer import decompose_claims, check_decomposition_quality
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
 from pipeline.meta_verify import meta_verify_pass, meta_verify_fail, is_high_stakes
 from pipeline.metrics import PipelineMetrics, record_run
-from pipeline.best_of_n import generate_best_of_n
+from pipeline.best_of_n import generate_best_of_n, generate_best_of_n_async
 
 
 def _date_context() -> str:
@@ -1150,10 +1150,16 @@ async def run_pipeline_async(
         rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
     )
 
-    # ---- Step 1: GPT-1 Generate (async, plain text) ----
+    # ---- Step 1: GPT-1 Generate (async, with optional best-of-N) ----
     _emit_stage_start(emit, "gpt1", data={"provider": gpt1_cfg.get("provider", ""), "model": gpt1_cfg.get("model", "")})
     gpt1_sm = metrics.start_stage("gpt1", gpt1_cfg.get("provider", ""), gpt1_cfg.get("model", ""))
-    gpt1_output = await call_llm_async(gpt1_cfg, gpt1_system, gpt1_user_content)
+    best_of_n_count = getattr(config, "BEST_OF_N", 1)
+    if best_of_n_count >= 2:
+        gpt1_output, bon_info = await generate_best_of_n_async(
+            gpt1_cfg, gpt1_system, gpt1_user_content, flags, n=best_of_n_count,
+        )
+    else:
+        gpt1_output = await call_llm_async(gpt1_cfg, gpt1_system, gpt1_user_content)
     metrics.end_stage(gpt1_sm)
     _emit_stage_complete(emit, "gpt1")
 

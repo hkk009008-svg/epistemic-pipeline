@@ -34,6 +34,7 @@ class EditEntry(BaseModel):
     action: str
     target: str
     replacement: str
+    target_id: str = ""  # UUID from decomposer — enables deterministic edits
 
 
 class GroundingInfo(BaseModel):
@@ -221,10 +222,16 @@ class GPT2ResponseSchema(BaseModel):
 
 
 class ArbiterEditSchema(BaseModel):
-    """A single edit instruction from GPT-3 Arbiter."""
+    """A single edit instruction from GPT-3 Arbiter.
+
+    Supports both text-based targeting (legacy) and ID-based targeting (V5).
+    When target_id is set, Python applies the edit directly to the claim JSON
+    without relying on GPT-1 to find and replace strings.
+    """
     action: Literal["DELETE", "REWRITE", "MOVE_TO_UNKNOWN"]
     target: str
     replacement: str = ""
+    target_id: str = ""  # UUID from decomposer — enables deterministic edits
 
 
 class GPT3ResponseSchema(BaseModel):
