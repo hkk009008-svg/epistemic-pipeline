@@ -34,8 +34,10 @@ _JURISDICTION_RE = re.compile(
     r"|Wyoming|Vermont|Maine|New Hampshire|Rhode Island"
     r"|South Dakota|North Dakota|Delaware|West Virginia|Alaska)\b"
 )
-# Match any 4-digit year (2000+) for runtime comparisons
-_YEAR_RE = re.compile(r"\b(\d{4})\b")
+# Match plausible 4-digit years (1900-2199) for runtime comparisons.
+# Narrower than \d{4} to avoid false positives on ZIP codes (90210),
+# port numbers (8080), or other non-temporal 4-digit sequences.
+_YEAR_RE = re.compile(r"\b((?:19|20|21)\d{2})\b")
 _CURRENT_EVENTS_RE = re.compile(
     r"(?i)\b(?:current|latest|recent|right now|today|now|this year"
     r"|as of|who is the|what is the current|new|newest|updated)\b"

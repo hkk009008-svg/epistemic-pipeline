@@ -1,6 +1,7 @@
 """Simple in-memory per-IP rate limiter using a sliding window."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import defaultdict
@@ -16,6 +17,12 @@ _lock = threading.Lock()
 # How often (in seconds) to purge expired entries from the dict.
 _CLEANUP_INTERVAL = 60.0
 _last_cleanup: float = 0.0
+
+# Number of trusted reverse proxies between the client and this server.
+# With depth=1 (default: single proxy like Railway), we take the last
+# X-Forwarded-For entry. With depth=2 (e.g. Cloudflare → Railway),
+# we take the second-to-last entry.
+_TRUSTED_PROXY_DEPTH = int(os.getenv("TRUSTED_PROXY_DEPTH", "1"))
 
 
 def _cleanup_expired(now: float, window: float) -> None:
@@ -38,11 +45,18 @@ def _extract_client_ip(request: Request) -> str:
     PaaS load balancers (Railway, Heroku, etc.) append the real client IP
     to the *end* of the X-Forwarded-For chain.  Taking the first entry
     (index 0) trusts user-supplied headers and allows trivial IP spoofing.
-    We take the *last* entry (rightmost) which is set by the ingress proxy.
+
+    TRUSTED_PROXY_DEPTH controls how many proxy-appended entries to skip
+    from the right:
+    - depth=1 (default, single proxy): take [-1] (the proxy-appended IP)
+    - depth=2 (CDN + proxy): take [-2] (CDN-appended IP, skipping proxy)
     """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[-1].strip()
+        parts = [p.strip() for p in forwarded.split(",")]
+        # Pick the entry at position -(depth), clamped to the first entry
+        idx = max(0, len(parts) - _TRUSTED_PROXY_DEPTH)
+        return parts[idx]
     return request.client.host if request.client else "unknown"
 
 

@@ -44,6 +44,10 @@ _ALLOWED_HOSTS: set[str] = {
     "host.docker.internal",
 }
 
+# Hosts that should never allow subdomain matching.
+# e.g. "evil.localhost" could resolve to an attacker-controlled IP.
+_NO_SUBDOMAIN_HOSTS: set[str] = {"localhost", "127.0.0.1"}
+
 # Allow extending via env var (comma-separated URLs or hostnames)
 _extra = os.getenv("ALLOWED_BASE_URLS", "")
 if _extra:
@@ -64,17 +68,47 @@ def _validate_base_url(url: str):
 
     Uses proper URL parsing instead of string prefix matching to prevent
     SSRF via URL authority/userinfo bypass attacks.
+
+    Additional hardening:
+    - Subdomain matching is disabled for localhost/127.0.0.1 to prevent
+      DNS rebinding via evil.localhost.
+    - HTTPS is required for non-local hosts to prevent credential leakage.
     """
     try:
         parsed = urlparse(url.strip())
         hostname = (parsed.hostname or "").lower()
-        if hostname and (
-            hostname in _ALLOWED_HOSTS
-            or any(hostname.endswith("." + h) for h in _ALLOWED_HOSTS)
-        ):
+        scheme = (parsed.scheme or "").lower()
+
+        if not hostname:
+            raise ValueError("empty hostname")
+
+        # Exact match always accepted
+        if hostname in _ALLOWED_HOSTS:
+            # Non-local hosts must use HTTPS
+            if hostname not in _NO_SUBDOMAIN_HOSTS and hostname != "host.docker.internal":
+                if scheme != "https":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"External base_url must use HTTPS (got {scheme}://).",
+                    )
             return
+
+        # Subdomain match (e.g. staging.api.openai.com → api.openai.com)
+        # but NOT for localhost-class hosts (evil.localhost is dangerous)
+        subdomain_hosts = _ALLOWED_HOSTS - _NO_SUBDOMAIN_HOSTS
+        if any(hostname.endswith("." + h) for h in subdomain_hosts):
+            if scheme != "https":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"External base_url must use HTTPS (got {scheme}://).",
+                )
+            return
+
+    except HTTPException:
+        raise
     except Exception:
         pass
+
     raise HTTPException(
         status_code=400,
         detail=(

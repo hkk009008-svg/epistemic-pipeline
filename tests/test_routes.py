@@ -316,3 +316,107 @@ class TestStressValidation:
         """Stress should fail gracefully without API key."""
         r = client.post("/api/stress", json={})
         assert r.status_code in (200, 400, 429)
+
+
+# ===================================================================
+# Regression: SSRF prevention via URL authority bypass
+# ===================================================================
+
+class TestSSRFPrevention:
+    """Verify that URL authority/userinfo bypass attacks are blocked."""
+
+    def test_ssrf_authority_bypass_rejected(self):
+        """http://localhost:password@attacker.com must be rejected.
+
+        Regression: old prefix-based check saw 'http://localhost:' and allowed it,
+        but the actual HTTP request would go to attacker.com.
+        """
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "ollama",
+            "api_key": "test",
+            "model": "llama3",
+            "base_url": "http://localhost:password@attacker.com/v1",
+        })
+        assert r.status_code == 400
+
+    def test_ssrf_evil_subdomain_of_localhost_rejected(self):
+        """evil.localhost should be rejected (DNS rebinding risk)."""
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "ollama",
+            "api_key": "test",
+            "model": "llama3",
+            "base_url": "http://evil.localhost:11434/v1",
+        })
+        assert r.status_code == 400
+
+    def test_valid_subdomain_of_allowed_host_accepted(self):
+        """staging.api.openai.com should be accepted via subdomain matching."""
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "openai",
+            "api_key": "sk-test",
+            "model": "gpt-4o",
+            "base_url": "https://staging.api.openai.com/v1",
+        })
+        assert r.status_code == 200
+
+    def test_http_external_host_rejected(self):
+        """Non-HTTPS external base_url should be rejected."""
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "openai",
+            "api_key": "sk-test",
+            "model": "gpt-4o",
+            "base_url": "http://api.openai.com/v1",
+        })
+        assert r.status_code == 400
+
+    def test_localhost_http_allowed(self):
+        """Localhost can use HTTP (local dev)."""
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "ollama",
+            "api_key": "ollama",
+            "model": "llama3",
+            "base_url": "http://localhost:11434/v1",
+        })
+        assert r.status_code == 200
+
+    def test_127_0_0_1_http_allowed(self):
+        """127.0.0.1 can use HTTP (local dev)."""
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "ollama",
+            "api_key": "ollama",
+            "model": "llama3",
+            "base_url": "http://127.0.0.1:11434/v1",
+        })
+        assert r.status_code == 200
+
+
+# ===================================================================
+# Regression: IP extraction for rate limiting
+# ===================================================================
+
+class TestIPExtraction:
+    """Verify IP extraction uses rightmost X-Forwarded-For entry."""
+
+    def test_rate_limit_uses_rightmost_ip(self):
+        """Rate limit info should use the proxy-appended (rightmost) IP."""
+        r = client.get(
+            "/api/rate-limit",
+            headers={"X-Forwarded-For": "spoofed-ip, real-ip"},
+        )
+        assert r.status_code == 200
+        # The response should work without error — we can't directly
+        # verify which IP was used, but the endpoint must not crash
+
+    def test_rate_limit_single_forwarded_ip(self):
+        """Single X-Forwarded-For entry should be used as-is."""
+        r = client.get(
+            "/api/rate-limit",
+            headers={"X-Forwarded-For": "1.2.3.4"},
+        )
+        assert r.status_code == 200
