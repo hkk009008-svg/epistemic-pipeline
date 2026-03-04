@@ -108,15 +108,22 @@ def should_search(flags: dict) -> bool:
 
 
 def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
-    """Re-rank search sources by authority score (descending), then by snippet length as tiebreaker.
+    """Re-rank search sources by a combined relevance + authority score.
 
-    Authority score replaces the Tavily relevance score on s.score, so
-    we use snippet length as a secondary signal — longer snippets
-    typically contain more useful context for grounding.
+    Combines the provider's original relevance score with domain authority,
+    rather than discarding relevance entirely.  This prevents
+    authoritative-but-irrelevant sources from drowning out niche-but-
+    relevant ones.
+
+    Combined score = 0.5 * relevance + 0.4 * authority + 0.1 * snippet_signal
+    where snippet_signal = min(len(snippet) / 500, 1.0)
     """
     for s in sources:
-        s.score = compute_source_authority(s.url)
-    return sorted(sources, key=lambda s: (-s.score, -len(s.snippet)))
+        relevance = max(0.0, min(1.0, s.score))  # clamp provider score
+        authority = compute_source_authority(s.url)
+        snippet_signal = min(len(s.snippet) / 500.0, 1.0)
+        s.score = round(0.5 * relevance + 0.4 * authority + 0.1 * snippet_signal, 4)
+    return sorted(sources, key=lambda s: -s.score)
 
 
 def compute_search_quality(sources: list[SearchSource]) -> dict:
@@ -163,6 +170,69 @@ def refine_search_query(original_query: str, unsupported_claims: list[str]) -> s
     return refined[:500]  # Cap to avoid overly long queries
 
 
+def fetch_claim_evidence(
+    claims: list[dict],
+    existing_sources: list[SearchSource],
+    max_per_claim: int = 2,
+) -> list[SearchSource]:
+    """Fetch evidence for specific claims that lack support.
+
+    Performs per-claim search queries for claims that don't have NLI
+    support or keyword overlap with existing sources.  Returns new
+    sources (deduplicated against *existing_sources*).
+
+    This is the "claim-conditional retrieval" step: retrieval is driven
+    by verification needs rather than the original prompt alone.
+    """
+    client = _get_tavily_client()
+    if client is None:
+        return []
+
+    existing_urls = {s.url for s in existing_sources}
+    new_sources: list[SearchSource] = []
+
+    # Only search for unsupported claims (limit total queries)
+    unsupported = []
+    for c in claims:
+        nli = c.get("nli_result", {})
+        if nli.get("supported"):
+            continue  # already grounded
+        text = c.get("text", "").strip()
+        if len(text) >= 20:
+            unsupported.append(text)
+
+    # Limit to 3 claim queries to control latency/cost
+    for claim_text in unsupported[:3]:
+        try:
+            response = client.search(
+                query=claim_text[:200],
+                search_depth="basic",
+                max_results=max_per_claim,
+                include_answer=False,
+                topic="general",
+            )
+        except Exception:
+            continue
+
+        for r in response.get("results", []):
+            url = r.get("url", "")
+            if url in existing_urls:
+                continue
+            existing_urls.add(url)
+            src = SearchSource(
+                title=r.get("title", ""),
+                url=url,
+                snippet=r.get("content", ""),
+                score=r.get("score", 0.0),
+            )
+            new_sources.append(src)
+
+    if new_sources:
+        new_sources = rank_sources(new_sources)
+
+    return new_sources
+
+
 def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSource], str]:
     """Call Tavily search API. Returns (sources, raw_context_string).
 
@@ -198,10 +268,11 @@ def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSou
 
     context_lines = []
     for i, s in enumerate(sources, 1):
+        authority = compute_source_authority(s.url)
         authority_label = ""
-        if s.score >= 1.0:
+        if authority >= 1.0:
             authority_label = " [HIGH AUTHORITY - gov/edu]"
-        elif s.score >= 0.9:
+        elif authority >= 0.9:
             authority_label = " [TRUSTED SOURCE]"
         context_lines.append(
             f"[{i}] {s.title}{authority_label}\n"

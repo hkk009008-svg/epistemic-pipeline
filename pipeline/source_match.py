@@ -10,11 +10,17 @@ Two corrections:
   2. filter_findings_with_sources — remove T1/T7 findings on source-backed content
 
 After both, the caller recomputes the verdict from the corrected findings.
+
+Evidence strength: keyword overlap alone is treated as *weak evidence*.
+When NLI scores are available (via enriched atomic claims), entailment
+scores are used for stronger upgrades. The justification field always
+records the match method ("keyword_overlap" vs "nli_entailment") so
+downstream consumers can distinguish.
 """
 from __future__ import annotations
 
 import re
-from typing import List
+from typing import List, Optional
 
 from pipeline.models import ClaimEntry, SearchSource
 
@@ -36,8 +42,15 @@ _STOP_WORDS = frozenset(
 # Minimum number of meaningful keywords a claim must have to attempt matching
 _MIN_KEYWORDS = 2
 
-# Minimum fraction of claim keywords found in a source to count as a match
+# Minimum fraction of claim keywords found in a source to count as a keyword match
 _MATCH_THRESHOLD = 0.5
+
+# Stricter threshold for keyword-only upgrades (no NLI)
+# Requires higher overlap when entailment can't be verified
+_STRICT_MATCH_THRESHOLD = 0.65
+
+# NLI entailment threshold for source-match upgrades
+_NLI_ENTAILMENT_THRESHOLD = 0.5
 
 # Finding types that should be removed when their target is source-backed
 _SOURCE_OVERRIDABLE_TYPES = {
@@ -74,15 +87,41 @@ def build_source_keyword_sets(sources: List[SearchSource]) -> list[set[str]]:
     return [_extract_keywords(f"{s.title} {s.snippet}") for s in sources]
 
 
+def _find_nli_support(claim_text: str, nli_claims: list[dict]) -> Optional[dict]:
+    """Find NLI results for a claim by matching text.
+
+    Returns the nli_result dict if the claim has strong entailment support,
+    otherwise None.
+    """
+    if not nli_claims:
+        return None
+    claim_lower = claim_text.lower().strip()
+    for ac in nli_claims:
+        ac_text = ac.get("text", "").lower().strip()
+        nli = ac.get("nli_result")
+        if not nli:
+            continue
+        # Match by text similarity (exact or substring)
+        if ac_text == claim_lower or ac_text in claim_lower or claim_lower in ac_text:
+            if nli.get("best_entailment", 0.0) >= _NLI_ENTAILMENT_THRESHOLD:
+                return nli
+    return None
+
+
 def recategorize_with_sources(
     claim_table: List[ClaimEntry],
     sources: List[SearchSource],
     source_keyword_sets: list[set[str]] | None = None,
+    nli_claims: list[dict] | None = None,
 ) -> List[ClaimEntry]:
     """Re-categorize Unsupported claims that are supported by search source snippets.
 
     Returns a new list of ClaimEntry objects (leaves originals unchanged).
     Only upgrades "Unsupported" → "Observed".  Never downgrades.
+
+    When *nli_claims* are provided (from decompose + NLI verification),
+    NLI entailment scores are used for stronger evidence.  Keyword-only
+    matches use a stricter threshold and are labeled as such.
 
     Pass pre-computed *source_keyword_sets* to avoid redundant extraction
     when calling both recategorize_with_sources and filter_findings_with_sources.
@@ -104,6 +143,23 @@ def recategorize_with_sources(
             result.append(entry)
             continue
 
+        # Check NLI entailment first (stronger evidence)
+        nli_match = _find_nli_support(entry.claim, nli_claims) if nli_claims else None
+        if nli_match:
+            best_src_idx = nli_match.get("best_source_idx", 0)
+            ent_score = nli_match.get("best_entailment", 0.0)
+            src_title = sources[best_src_idx].title if 0 <= best_src_idx < len(sources) else "evidence"
+            result.append(ClaimEntry(
+                claim=entry.claim,
+                category="Observed",
+                justification=(
+                    f"NLI-verified (entailment={ent_score:.2f}) against source "
+                    f"[{best_src_idx + 1}]: {src_title} [match_method=nli_entailment]"
+                ),
+            ))
+            continue
+
+        # Fallback: keyword overlap with stricter threshold
         best_overlap = 0.0
         best_source_idx = -1
         for i, src_kw in enumerate(source_keyword_sets):
@@ -113,12 +169,17 @@ def recategorize_with_sources(
                 best_overlap = ratio
                 best_source_idx = i
 
-        if best_overlap >= _MATCH_THRESHOLD:
+        # Use stricter threshold for keyword-only matches
+        threshold = _STRICT_MATCH_THRESHOLD if nli_claims else _MATCH_THRESHOLD
+        if best_overlap >= threshold:
             src = sources[best_source_idx]
             result.append(ClaimEntry(
                 claim=entry.claim,
                 category="Observed",
-                justification=f"Content-matched to source [{best_source_idx + 1}]: {src.title}",
+                justification=(
+                    f"Content-matched to source [{best_source_idx + 1}]: {src.title} "
+                    f"(overlap={best_overlap:.0%}) [match_method=keyword_overlap]"
+                ),
             ))
         else:
             result.append(entry)

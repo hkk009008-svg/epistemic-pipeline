@@ -33,11 +33,14 @@ class TestStageConfig:
         assert cfg["provider"] == "openai"
         assert cfg["model"] == config.get_model()
 
-    def test_fallback_when_stage_has_empty_key(self):
+    def test_merge_when_stage_has_empty_key(self):
         config.set_stage_config("gpt1", "anthropic", "", "claude-3-opus")
         cfg = config.get_stage_config("gpt1")
-        # Falls back to global because api_key is empty
-        assert cfg["provider"] == "openai"
+        # Provider and model are merged from stage config (v2 merge semantics).
+        # api_key falls back to global since stage key is empty.
+        assert cfg["provider"] == "anthropic"
+        assert cfg["model"] == "claude-3-opus"
+        assert cfg["api_key"] == config.get_api_key()  # inherits global key
 
     def test_invalid_stage_raises(self):
         with pytest.raises(AssertionError, match="Invalid stage"):

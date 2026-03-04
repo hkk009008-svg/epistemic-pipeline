@@ -24,6 +24,38 @@ from api.ui import UI_HTML
 router = APIRouter()
 
 
+# Allowed base URL patterns for custom provider endpoints.
+# Prevents SSRF by restricting stage base_url to known-safe hosts.
+_ALLOWED_BASE_URL_PREFIXES = [
+    "https://openrouter.ai/",
+    "https://api.openai.com/",
+    "https://api.anthropic.com/",
+    "http://localhost:",
+    "http://127.0.0.1:",
+    "http://host.docker.internal:",
+]
+
+# Allow extending via env var (comma-separated prefixes)
+_extra = os.getenv("ALLOWED_BASE_URLS", "")
+if _extra:
+    _ALLOWED_BASE_URL_PREFIXES.extend(p.strip() for p in _extra.split(",") if p.strip())
+
+
+def _validate_base_url(url: str):
+    """Reject base_url values that don't match the allowlist."""
+    url_lower = url.strip().lower()
+    if any(url_lower.startswith(prefix.lower()) for prefix in _ALLOWED_BASE_URL_PREFIXES):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"base_url not in allowlist. Allowed prefixes: "
+            f"{', '.join(_ALLOWED_BASE_URL_PREFIXES[:4])}... "
+            f"Set ALLOWED_BASE_URLS env var to add custom prefixes."
+        ),
+    )
+
+
 def _require_admin(request: Request):
     """Verify admin token on config-mutation endpoints.
 
@@ -49,7 +81,34 @@ def ui():
 
 @router.get("/health")
 def health():
-    return {"status": "ok"}
+    from pipeline.nli import is_nli_available, NLI_SERVICE_URL
+    return {
+        "status": "ok",
+        "key_set": config.has_api_key(),
+        "tavily_enabled": config.is_tavily_enabled(),
+        "nli_available": is_nli_available(),
+        "nli_mode": "remote" if NLI_SERVICE_URL else ("local" if is_nli_available() else "disabled"),
+    }
+
+
+# ---- NLI status ----
+
+@router.get("/api/nli/status")
+def nli_status():
+    """Return NLI verification layer availability and configuration."""
+    from pipeline.nli import is_nli_available, NLI_SERVICE_URL, NLI_MODEL
+    from pipeline.nli import ENTAILMENT_THRESHOLD, CONTRADICTION_THRESHOLD
+    available = is_nli_available()
+    return {
+        "available": available,
+        "mode": "remote" if NLI_SERVICE_URL else ("local" if available else "disabled"),
+        "model": NLI_MODEL if available and not NLI_SERVICE_URL else None,
+        "remote_url_set": bool(NLI_SERVICE_URL),
+        "thresholds": {
+            "entailment": ENTAILMENT_THRESHOLD,
+            "contradiction": CONTRADICTION_THRESHOLD,
+        },
+    }
 
 
 # ---- OpenAI config ----
@@ -110,9 +169,12 @@ def toggle_tavily(enabled: bool = True):
 
 # ---- Per-stage model config ----
 
-@router.post("/api/stage/config")
+@router.post("/api/stage/config", dependencies=[Depends(_require_admin)])
 def set_stage_config_endpoint(cfg: StageConfig):
     clean_key = cfg.api_key.strip().encode("ascii", errors="ignore").decode("ascii").replace(" ", "")
+    # Validate base_url against allowlist to prevent SSRF
+    if cfg.base_url:
+        _validate_base_url(cfg.base_url)
     config.set_stage_config(cfg.stage, cfg.provider, clean_key, cfg.model, cfg.base_url)
     return {"status": "ok", "stage": cfg.stage, "provider": cfg.provider}
 
@@ -174,54 +236,62 @@ _PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "90"))
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 def _stream_pipeline(req: PipelineRequest):
-    """Run pipeline and yield NDJSON progress events."""
+    """Run pipeline and yield true stage-based NDJSON events.
+
+    Uses a thread-safe queue to receive real stage_start / stage_complete
+    events emitted by the orchestrator's ``emit`` callback.
+    """
     import time
     import threading
     import queue
 
-    result_q: queue.Queue = queue.Queue()
+    event_q: queue.Queue = queue.Queue()
+    result_holder: list = []
     error_holder: list = []
+    start = time.monotonic()
+
+    def _emit(event: dict):
+        """Callback passed to run_pipeline for real stage events."""
+        event["elapsed"] = round(time.monotonic() - start, 1)
+        event_q.put(event)
 
     def _run():
         try:
-            result = run_pipeline(req)
-            result_q.put(result)
+            result = run_pipeline(req, emit=_emit)
+            result_holder.append(result)
         except Exception as e:
             error_holder.append(e)
-            result_q.put(None)
+        finally:
+            event_q.put(None)  # sentinel: pipeline finished
 
     t = threading.Thread(target=_run, daemon=True)
-    start = time.monotonic()
     t.start()
 
-    # Emit progress events while pipeline runs
-    stages = ["routing", "search", "gpt1", "decomposition", "nli", "gpt2", "gpt3", "rewrite"]
-    stage_idx = 0
-    emitted = set()
+    # Drain events until pipeline completes (sentinel = None)
+    timeout = _PIPELINE_TIMEOUT
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            yield json.dumps({"type": "error", "detail": f"Pipeline timed out after {timeout}s.", "status_code": 504}) + "\n"
+            return
+        try:
+            event = event_q.get(timeout=min(remaining, 1.0))
+        except queue.Empty:
+            continue
+        if event is None:
+            break  # pipeline done
+        yield json.dumps(event) + "\n"
 
-    while t.is_alive():
-        elapsed = time.monotonic() - start
-        # Emit stage estimates based on typical timing
-        stage_times = [0.1, 1.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0]
-        while stage_idx < len(stages) and elapsed > stage_times[stage_idx]:
-            stage_name = stages[stage_idx]
-            if stage_name not in emitted:
-                emitted.add(stage_name)
-                yield json.dumps({"type": "stage", "stage": stage_name, "elapsed": round(elapsed, 1)}) + "\n"
-            stage_idx += 1
-        t.join(timeout=0.5)
-
-    # Emit final result
+    # Emit final result or error
     if error_holder:
         e = error_holder[0]
         if isinstance(e, PipelineError):
             yield json.dumps({"type": "error", "detail": e.detail, "status_code": e.status_code}) + "\n"
         else:
             yield json.dumps({"type": "error", "detail": str(e), "status_code": 500}) + "\n"
-    else:
-        result = result_q.get_nowait()
-        if result:
-            yield json.dumps({"type": "result", "data": result.model_dump()}) + "\n"
+    elif result_holder:
+        yield json.dumps({"type": "result", "data": result_holder[0].model_dump()}) + "\n"
 
 
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
@@ -247,6 +317,67 @@ async def pipeline_endpoint(req: PipelineRequest, request: Request):
         )
     except PipelineError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.post("/v2/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
+async def v2_pipeline_endpoint(req: PipelineRequest, request: Request):
+    """V2 pipeline endpoint with true stage streaming and verdict labels.
+
+    Returns:
+    - JSON (non-stream): full PipelineResponse with ``verdict_label`` field.
+    - NDJSON (stream=true): real stage events emitted from the orchestrator.
+    """
+    if getattr(req, "stream", False):
+        return StreamingResponse(
+            _stream_pipeline(req),
+            media_type="application/x-ndjson",
+        )
+
+    loop = asyncio.get_event_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(_executor, run_pipeline, req),
+            timeout=_PIPELINE_TIMEOUT,
+        )
+        return result
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Pipeline timed out after {_PIPELINE_TIMEOUT}s. Try a simpler query or disable web search.",
+        )
+    except PipelineError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+# ---- V2 admin config (requires auth) ----
+
+@router.post("/v2/admin/config", dependencies=[Depends(_require_admin)])
+def v2_admin_config(cfg: StageConfig):
+    """Admin-only configuration endpoint (v2).
+
+    Identical behavior to /api/stage/config but namespaced under /v2/admin.
+    """
+    clean_key = cfg.api_key.strip().encode("ascii", errors="ignore").decode("ascii").replace(" ", "")
+    if cfg.base_url:
+        _validate_base_url(cfg.base_url)
+    config.set_stage_config(cfg.stage, cfg.provider, clean_key, cfg.model, cfg.base_url)
+    return {"status": "ok", "stage": cfg.stage, "provider": cfg.provider}
+
+
+@router.get("/v2/public/capabilities")
+def v2_public_capabilities():
+    """Public endpoint: available providers, NLI status (no secrets)."""
+    from pipeline.nli import is_nli_available, NLI_SERVICE_URL
+    return {
+        "providers": sorted(config.PROVIDERS),
+        "stages": ["gpt1", "gpt2", "gpt3"],
+        "tiers": ["strict", "standard", "light"],
+        "output_formats": ["auto", "structured", "annotated", "concise"],
+        "nli_available": is_nli_available(),
+        "nli_mode": "remote" if NLI_SERVICE_URL else ("local" if is_nli_available() else "disabled"),
+        "tavily_enabled": config.is_tavily_enabled(),
+        "max_prompt_length": config.MAX_PROMPT_LENGTH,
+    }
 
 
 @router.get("/api/rate-limit")

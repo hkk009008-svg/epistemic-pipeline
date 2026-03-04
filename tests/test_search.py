@@ -67,10 +67,11 @@ class TestSourceAuthority:
 
 class TestRankSources:
     def test_gov_ranked_first(self):
+        """CDC (authority 1.0) should rank above lower-authority sources."""
         sources = [
-            SearchSource(title="Blog", url="https://blog.example.com", snippet="x"),
-            SearchSource(title="CDC", url="https://www.cdc.gov/page", snippet="y"),
-            SearchSource(title="News", url="https://www.reuters.com/article", snippet="z"),
+            SearchSource(title="Blog", url="https://blog.example.com", snippet="x", score=0.5),
+            SearchSource(title="CDC", url="https://www.cdc.gov/page", snippet="y", score=0.5),
+            SearchSource(title="News", url="https://www.reuters.com/article", snippet="z", score=0.5),
         ]
         ranked = rank_sources(sources)
         assert ranked[0].title == "CDC"
@@ -79,6 +80,23 @@ class TestRankSources:
 
     def test_empty_list(self):
         assert rank_sources([]) == []
+
+    def test_combines_relevance_and_authority(self):
+        """A highly relevant but low-authority source should compete with high-authority."""
+        sources = [
+            SearchSource(title="HighAuth", url="https://www.cdc.gov/page", snippet="short", score=0.1),
+            SearchSource(title="HighRel", url="https://blog.example.com", snippet="x" * 500, score=0.95),
+        ]
+        ranked = rank_sources(sources)
+        # HighRel: 0.5*0.95 + 0.4*0.5 + 0.1*1.0 = 0.475 + 0.2 + 0.1 = 0.775
+        # HighAuth: 0.5*0.1 + 0.4*1.0 + 0.1*(5/500) = 0.05 + 0.4 + 0.001 = 0.451
+        assert ranked[0].title == "HighRel"
+
+    def test_score_clamped(self):
+        """Provider scores outside 0-1 should be clamped."""
+        sources = [SearchSource(title="A", url="https://example.com", snippet="x", score=5.0)]
+        ranked = rank_sources(sources)
+        assert ranked[0].score <= 1.0
 
 
 # ---------------------------------------------------------------------------

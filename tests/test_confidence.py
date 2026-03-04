@@ -1,8 +1,8 @@
-"""Tests for compute_confidence() — upgraded with NLI grounding rate."""
+"""Tests for compute_confidence() and verdict labels — upgraded with NLI grounding rate."""
 from __future__ import annotations
 
 from pipeline.orchestrator import compute_confidence
-from pipeline.models import ClaimEntry
+from pipeline.models import ClaimEntry, ConfidenceBreakdown, PipelineResponse, compute_verdict_label
 
 
 def _claims(categories: list[str]) -> list[ClaimEntry]:
@@ -184,3 +184,41 @@ class TestComputeConfidenceUnsupportedSpans:
         result = compute_confidence(claims)
         assert result.observed_pct == 30.0
         assert result.unsupported_pct == 70.0
+
+
+class TestVerdictLabels:
+    """Test human-readable verdict label generation."""
+
+    def test_pass_high_is_verified(self):
+        assert compute_verdict_label("PASS", "High") == "Verified with evidence"
+
+    def test_pass_medium_is_partial(self):
+        assert compute_verdict_label("PASS", "Medium") == "Partially supported"
+
+    def test_pass_low_is_insufficient(self):
+        assert compute_verdict_label("PASS", "Low") == "Insufficient evidence"
+
+    def test_fail_high_is_blocked(self):
+        assert compute_verdict_label("FAIL", "High") == "Blocked due to fabrication risk"
+
+    def test_fail_medium_is_contradicted(self):
+        assert compute_verdict_label("FAIL", "Medium") == "Contradicted by evidence"
+
+    def test_unknown_combo_defaults(self):
+        # Unknown combos should still return something sensible
+        label = compute_verdict_label("PASS", "SomeOther")
+        assert label == "Verified with evidence"  # default for PASS
+
+    def test_verdict_label_auto_computed_on_response(self):
+        """PipelineResponse should auto-compute verdict_label."""
+        resp = PipelineResponse(
+            gpt1_input="test", gpt1_output="output", bypassed=False,
+            gpt2_raw="", claim_table=[], violations=[], gpt2_verdict="PASS",
+            arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
+            arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
+            rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
+            rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
+            final_verdict="PASS", final_result="ok",
+            confidence=ConfidenceBreakdown(confidence_label="High"),
+        )
+        assert resp.verdict_label == "Verified with evidence"
