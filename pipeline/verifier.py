@@ -1,13 +1,15 @@
 """GPT-2 Verifier: parses verification output and recomputes verdicts.
 
 Supports Audit v7 tripwire types (T1-T7) and legacy finding type names.
+Provides both legacy text parsing (parse_gpt2) and structured output
+parsing (parse_gpt2_structured) for the V4 async pipeline.
 """
 from __future__ import annotations
 
 import re
 from typing import List, Optional
 
-from pipeline.models import ClaimEntry
+from pipeline.models import ClaimEntry, GPT2ResponseSchema
 from pipeline.helpers import extract_json
 
 # Module-level compiled regex for outcome-promise keywords
@@ -203,5 +205,90 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
             ["GPT-2 parse error: could not extract valid JSON from response"],
             "FAIL",
             [{"type": "GPT-2 parse error", "severity": "hard", "detail": "could not extract valid JSON"}],
+            [],
+        )
+
+
+def parse_gpt2_structured(
+    parsed: GPT2ResponseSchema,
+    flags: Optional[dict] = None,
+    tier: str = "strict",
+):
+    """Parse a structured GPT-2 response (Pydantic model) into the same 5-tuple.
+
+    This is the V4 equivalent of parse_gpt2() — it skips JSON extraction
+    since the response is already validated by the structured output API.
+
+    Returns 5 values: (claim_table, violations, verdict, findings, reasoning_trace)
+    """
+    try:
+        reasoning_trace = [str(s) for s in parsed.reasoning_trace]
+
+        claim_table = [
+            ClaimEntry(
+                claim=c.get("claim", ""),
+                category=c.get("category", "Unknown"),
+                justification=c.get("justification", ""),
+            )
+            for c in parsed.claim_table
+        ]
+
+        # Convert FindingSchema objects to dicts for processing
+        raw_findings = [
+            {"type": f.type, "severity": f.severity, "detail": f.detail}
+            for f in parsed.findings
+        ]
+
+        # Resolve severity map and skip-set for the active tier
+        severity_map = _TIER_SEVERITY.get(tier, _TIER_SEVERITY["strict"])
+        skip_types = _SKIP_TYPES.get(tier, set())
+
+        findings = []
+        for f in raw_findings:
+            ftype = f.get("type", "")
+            severity = f.get("severity", "soft").lower()
+            detail = f.get("detail", "")
+
+            if ftype in skip_types:
+                continue
+
+            if ftype in severity_map:
+                severity = severity_map[ftype]
+
+            if (
+                flags
+                and flags.get("advice_requested")
+                and ftype in _PRESCRIPTIVE_TYPES
+                and severity == "soft"
+                and not _OUTCOME_KW.search(detail)
+            ):
+                continue
+
+            if (
+                flags
+                and flags.get("jurisdiction_present")
+                and ftype in ("Missing jurisdiction",)
+            ):
+                continue
+
+            findings.append({"type": ftype, "severity": severity, "detail": detail})
+
+        violations = [f["type"] for f in findings]
+
+        hard_count = sum(1 for f in findings if f["severity"] == "hard")
+        soft_count = sum(1 for f in findings if f["severity"] == "soft")
+        soft_threshold = _SOFT_THRESHOLD.get(tier, 3)
+        if hard_count > 0 or soft_count >= soft_threshold:
+            verdict = "FAIL"
+        else:
+            verdict = "PASS"
+
+        return claim_table, violations, verdict, findings, reasoning_trace
+    except Exception:
+        return (
+            [],
+            ["GPT-2 structured parse error"],
+            "FAIL",
+            [{"type": "GPT-2 parse error", "severity": "hard", "detail": "structured parse failed"}],
             [],
         )

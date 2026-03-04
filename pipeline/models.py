@@ -194,3 +194,51 @@ class FeedbackRequest(BaseModel):
     verdict_correct: Optional[bool] = None
     confidence_correct: Optional[bool] = None
     comment: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Structured Output Schemas — used with OpenAI's response_format parameter
+# to enforce guaranteed JSON output from GPT-2 and GPT-3.
+# ---------------------------------------------------------------------------
+
+class FindingSchema(BaseModel):
+    """A single verification finding from GPT-2."""
+    type: str
+    severity: Literal["hard", "soft"]
+    detail: str
+
+
+class GPT2ResponseSchema(BaseModel):
+    """Structured output schema for GPT-2 Verifier responses.
+
+    Used with OpenAI's response_format to mathematically enforce valid JSON,
+    eliminating the need for extract_json() regex parsing and retry loops.
+    """
+    reasoning_trace: List[str] = []
+    claim_table: List[dict] = []
+    findings: List[FindingSchema] = []
+    verdict: Literal["PASS", "FAIL"]
+
+
+class ArbiterEditSchema(BaseModel):
+    """A single edit instruction from GPT-3 Arbiter."""
+    action: Literal["DELETE", "REWRITE", "MOVE_TO_UNKNOWN"]
+    target: str
+    replacement: str = ""
+
+
+class GPT3ResponseSchema(BaseModel):
+    """Structured output schema for GPT-3 Arbiter responses.
+
+    Used with OpenAI's response_format to mathematically enforce valid JSON,
+    eliminating the need for extract_json() regex parsing and retry loops.
+    """
+    arbiter_decision: Literal["BLOCK", "ALLOW_WITH_EDITS", "ALLOW_AS_UNKNOWN_ONLY"]
+    rationale: List[str] = []
+    edits_for_gpt1: List[ArbiterEditSchema] = []
+    final_policy_notes: List[str] = []
+
+
+class DecomposerResponseSchema(BaseModel):
+    """Structured output schema for claim decomposition."""
+    claims: List[dict] = []

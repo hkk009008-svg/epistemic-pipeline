@@ -1,4 +1,9 @@
-"""FastAPI route definitions for the epistemic verification pipeline."""
+"""FastAPI route definitions for the epistemic verification pipeline.
+
+Provides both sync (ThreadPoolExecutor) and async (native asyncio) pipeline paths.
+The V3 /api/pipeline uses the async path by default, falling back to the sync path
+if run_pipeline_async is not available. The V2 endpoints are kept for backward compat.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +20,7 @@ from api.rate_limit import rate_limit_dependency, get_rate_limit_info
 import config
 from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, StressRequest, FeedbackRequest
 from pipeline.helpers import PipelineError
-from pipeline.orchestrator import run_pipeline
+from pipeline.orchestrator import run_pipeline, run_pipeline_async
 from pipeline.stress import generate_stress_results
 from pipeline.metrics import get_aggregate
 from pipeline.feedback import FeedbackEntry, get_feedback_store
@@ -296,17 +301,25 @@ def _stream_pipeline(req: PipelineRequest):
 
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 async def pipeline_endpoint(req: PipelineRequest, request: Request):
-    # SSE streaming mode
+    """Main pipeline endpoint — uses native async I/O (V4).
+
+    The async path uses AsyncOpenAI/AsyncAnthropic clients and structured
+    outputs, allowing a single instance to handle far more concurrent
+    requests without tying up OS threads.
+
+    Falls back to the sync ThreadPoolExecutor path on error.
+    """
+    # SSE streaming mode (still uses sync pipeline + thread for event queue)
     if getattr(req, "stream", False):
         return StreamingResponse(
             _stream_pipeline(req),
             media_type="application/x-ndjson",
         )
 
-    loop = asyncio.get_event_loop()
+    # Native async path (V4) — no ThreadPoolExecutor, no thread locks
     try:
         result = await asyncio.wait_for(
-            loop.run_in_executor(_executor, run_pipeline, req),
+            run_pipeline_async(req),
             timeout=_PIPELINE_TIMEOUT,
         )
         return result
@@ -317,6 +330,22 @@ async def pipeline_endpoint(req: PipelineRequest, request: Request):
         )
     except PipelineError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except Exception:
+        # Fallback to sync path if async pipeline fails unexpectedly
+        loop = asyncio.get_event_loop()
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(_executor, run_pipeline, req),
+                timeout=_PIPELINE_TIMEOUT,
+            )
+            return result
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail=f"Pipeline timed out after {_PIPELINE_TIMEOUT}s. Try a simpler query or disable web search.",
+            )
+        except PipelineError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
 @router.post("/v2/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])

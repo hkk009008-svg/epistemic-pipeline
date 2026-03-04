@@ -1,9 +1,13 @@
-"""GPT-3 Arbiter: parses arbiter decisions and applies edits."""
+"""GPT-3 Arbiter: parses arbiter decisions and applies edits.
+
+Provides both legacy text parsing (parse_gpt3) and structured output
+parsing (parse_gpt3_structured) for the V4 async pipeline.
+"""
 from __future__ import annotations
 
 from typing import List
 
-from pipeline.models import EditEntry
+from pipeline.models import EditEntry, GPT3ResponseSchema
 from pipeline.helpers import extract_json
 
 
@@ -49,3 +53,28 @@ def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
         f"{edit_block}\n\n"
         f"Output the corrected response in full."
     )
+
+
+def parse_gpt3_structured(parsed: GPT3ResponseSchema):
+    """Parse a structured GPT-3 response (Pydantic model) into the same 4-tuple.
+
+    This is the V4 equivalent of parse_gpt3() — it skips JSON extraction
+    since the response is already validated by the structured output API.
+
+    Returns: (decision, rationale, edits, policy_notes)
+    """
+    try:
+        decision = parsed.arbiter_decision.upper()
+        rationale = parsed.rationale
+        edits = [
+            EditEntry(
+                action=e.action,
+                target=e.target,
+                replacement=e.replacement,
+            )
+            for e in parsed.edits_for_gpt1
+        ]
+        policy_notes = parsed.final_policy_notes
+        return decision, rationale, edits, policy_notes
+    except Exception:
+        return "BLOCK", ["GPT-3 structured parse error"], [], []

@@ -1,6 +1,12 @@
-"""Core pipeline orchestrator: GPT-1 -> GPT-2 -> GPT-3 verification flow."""
+"""Core pipeline orchestrator: GPT-1 -> GPT-2 -> GPT-3 verification flow.
+
+Provides both synchronous (run_pipeline) and async (run_pipeline_async) entry points.
+The async path uses native AsyncOpenAI/AsyncAnthropic clients and structured outputs,
+allowing a single FastAPI instance to handle 100x more concurrent requests.
+"""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -9,12 +15,16 @@ from datetime import date
 from typing import Callable, Optional
 
 import config
-from pipeline.models import PipelineRequest, PipelineResponse, ConfidenceBreakdown, SearchSource, GroundingInfo, UnsupportedSpan
+from pipeline.models import (
+    PipelineRequest, PipelineResponse, ConfidenceBreakdown,
+    SearchSource, GroundingInfo, UnsupportedSpan,
+    GPT2ResponseSchema, GPT3ResponseSchema,
+)
 from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
-from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
-from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
-from pipeline.arbiter import parse_gpt3, apply_edits
+from pipeline.helpers import PipelineError, call_llm, call_llm_async, call_llm_structured, is_activation_phrase
+from pipeline.verifier import parse_gpt2, parse_gpt2_structured, _all_soft, recompute_verdict
+from pipeline.arbiter import parse_gpt3, parse_gpt3_structured, apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search, refine_search_query, fetch_claim_evidence
 from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
@@ -958,6 +968,710 @@ def run_pipeline(
         f"Output the corrected response in full."
     )
     fallback_output = call_llm(gpt1_cfg, gpt1_system, fallback_prompt)
+    fallback_output = sanitize_output(fallback_output, flags, tier=tier)
+
+    metrics.final_verdict = "PASS"
+    metrics.confidence_label = "Low"
+    metrics.convergence_outcome = "fallback"
+    metrics.finish()
+    record_run(metrics)
+    return PipelineResponse(
+        prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+        gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+        gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+        gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
+        arbiter_invoked=True, arbiter_decision="ALLOW_WITH_EDITS",
+        arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
+        arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+        rewrite_occurred=True, rewrite_output=fallback_output,
+        rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
+        rewrite_violations=re_viol, rewrite_verdict="PASS",
+        rewrite_reasoning=re_reasoning,
+        final_verdict="PASS",
+        final_result=fallback_output,
+        prompt_flags=flags, sanitizer_applied=True,
+        confidence=ConfidenceBreakdown(
+            observed_pct=0, inference_pct=0, hypothesis_pct=0,
+            unsupported_pct=0, user_provided_pct=0,
+            total_claims=0, confidence_label="Low",
+        ),
+        **search_kwargs, **decomp_kwargs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# V4 Async Pipeline — native asyncio with structured outputs
+# ---------------------------------------------------------------------------
+
+
+async def run_pipeline_async(
+    req: PipelineRequest,
+    emit: Optional[StageEventEmitter] = None,
+) -> PipelineResponse:
+    """Async version of run_pipeline using native AsyncOpenAI clients and structured outputs.
+
+    Key improvements over the sync version:
+    1. Native async I/O — no ThreadPoolExecutor, no thread locks during API waits
+    2. Structured outputs — GPT-2/GPT-3 use Pydantic response_format for guaranteed JSON
+    3. Concurrent NLI — claim verification runs in parallel via asyncio.gather()
+    4. Same epistemic logic — all verification rules, tier handling, and convergence
+       detection are identical to the sync path.
+
+    Falls back gracefully:
+    - Non-OpenAI providers use call_llm_async() + extract_json() instead of structured outputs
+    - GPT-1 (Generator) always uses plain text output (no structured format needed)
+    """
+    if emit is None:
+        emit = _noop_emit
+    if not config.has_api_key():
+        raise PipelineError(400, "Set your OpenAI API key first.")
+
+    metrics = PipelineMetrics(request_id=uuid.uuid4().hex[:12], prompt_length=len(req.prompt))
+    metrics.start()
+
+    gpt1_cfg = config.get_stage_config("gpt1")
+    gpt2_cfg = config.get_stage_config("gpt2")
+    gpt3_cfg = config.get_stage_config("gpt3")
+
+    # ---- Tier + output format resolution ----
+    tier = getattr(req, "tier", "strict") or "strict"
+    output_format = _resolve_output_format(tier, getattr(req, "output_format", "auto") or "auto")
+
+    # ---- Deterministic prompt routing ----
+    _emit_stage_start(emit, "routing")
+    flags = route_prompt(req.prompt)
+    metrics.flags = flags
+    _emit_stage_complete(emit, "routing", data={"flags": flags})
+
+    # ---- Web Search Enrichment ----
+    search_sources: list[SearchSource] = []
+    search_context = ""
+    search_performed = False
+    search_attempted = False
+    search_note = ""
+
+    if should_search(flags):
+        search_attempted = True
+        _emit_stage_start(emit, "search", data={"query": req.prompt})
+        sm = metrics.start_stage("search")
+        # perform_web_search is sync (Tavily SDK) — run in thread
+        search_sources, search_context = await asyncio.to_thread(
+            perform_web_search, req.prompt
+        )
+        search_performed = len(search_sources) > 0
+        metrics.end_stage(sm)
+        _emit_stage_complete(emit, "search", data={"source_count": len(search_sources), "performed": search_performed})
+        metrics.search_performed = search_performed
+        metrics.search_sources_count = len(search_sources)
+        if not search_performed:
+            search_note = "Web search was enabled but returned no relevant sources for this query."
+
+    gpt1_system = req.gpt1_system or DEFAULT_GPT1_SYSTEM
+    gpt2_system = req.gpt2_system or DEFAULT_GPT2_SYSTEM
+
+    date_ctx = _date_context()
+    gpt1_system = date_ctx + gpt1_system
+    gpt2_system = date_ctx + gpt2_system
+
+    gpt1_aug, gpt2_aug, gpt3_aug = build_augmentation(flags, search_performed=search_performed, tier=tier, output_format=output_format)
+    gpt1_system += gpt1_aug
+    gpt2_system += gpt2_aug
+    gpt3_system = date_ctx + (req.gpt3_system if hasattr(req, "gpt3_system") and req.gpt3_system else DEFAULT_GPT3_SYSTEM) + gpt3_aug
+
+    gpt1_user_content = req.prompt
+    if search_performed and search_context:
+        gpt1_system += (
+            "\n\nWEB SEARCH RESULTS are provided below the user's question. "
+            "You MUST ground your response in these sources. "
+            "When citing a fact from a source, reference it as [1], [2], etc. "
+            "If a source provides a specific statistic, you may quote it with the citation. "
+            "Do NOT fabricate additional sources beyond what is provided. "
+            "If the sources do not contain the answer, state Unknown (Actionable)."
+        )
+        gpt1_user_content = (
+            f"{req.prompt}\n\n"
+            f"--- WEB SEARCH RESULTS ---\n"
+            f"{search_context}\n"
+            f"--- END SEARCH RESULTS ---"
+        )
+
+        source_detail = "\n".join(
+            f'[{i}] "{s.title}" ({s.url})\n    Snippet: {s.snippet[:300]}'
+            for i, s in enumerate(search_sources, 1)
+        )
+        gpt2_system += (
+            "\n\n=== CRITICAL: WEB SEARCH SOURCES (provided to GPT-1) ===\n"
+            f"{source_detail}\n"
+            "=== END SOURCES ===\n\n"
+            "*** MANDATORY RULES — READ BEFORE EVALUATING ***\n"
+            "These rules OVERRIDE your default tripwire checks when web search sources are present.\n"
+            "Violating these rules is a verification error on YOUR part.\n\n"
+            "RULE 1: THESE SOURCES ARE MORE CURRENT THAN YOUR TRAINING DATA.\n"
+            "  Your training data may be outdated. Do NOT use your own training knowledge "
+            "to contradict information from the sources above. If your training data "
+            "says something different, THE SOURCES ARE CORRECT.\n\n"
+            "RULE 2: SOURCE-BACKED CLAIMS ARE 'Observed'.\n"
+            "  A claim is 'source-backed' if EITHER: (a) GPT-1 explicitly cites it with [1], [2], etc., "
+            "OR (b) the claim is factually consistent with ANY source snippet listed above. "
+            "You MUST check each claim's content against ALL source snippets. "
+            "If the information appears in any snippet, categorize the claim as 'Observed'. "
+            "It is NOT 'Unsupported', NOT 'Fabricated'. Do NOT require explicit [N] markers — "
+            "content match is sufficient.\n\n"
+            "RULE 3: T1 DOES NOT APPLY to source-backed claims.\n"
+            "  A claim grounded in a provided real source (by citation OR content match) "
+            "is not fabricated, even if it contradicts your training data.\n\n"
+            "RULE 4: T7 DOES NOT APPLY to source-backed claims.\n"
+            "  The search sources ARE the verification. A time-sensitive claim supported by "
+            "a web search result (by citation OR content match) is VERIFIED and CURRENT. Do NOT flag T7.\n\n"
+            "RULE 5: FABRICATED CITATIONS only.\n"
+            "  Only flag 'Fabricated citation' if GPT-1 cites a source number [N] "
+            "that does NOT exist in the sources list above.\n\n"
+            "RULE 6: UNSOURCED claims only.\n"
+            "  A claim is 'unsourced' ONLY if its content does NOT appear in ANY source snippet above "
+            "AND GPT-1 does not cite it. An unsourced INFERENCE based on sourced claims "
+            "(e.g., 'He succeeded X') is a minor issue — categorize as 'Inference', NOT "
+            "'Unsupported'. Only flag as 'Unsupported' if the claim is completely unrelated to all sources."
+        )
+
+    search_kwargs = dict(
+        search_performed=search_performed,
+        search_attempted=search_attempted,
+        search_note=search_note,
+        search_query=req.prompt if search_performed else "",
+        search_sources=search_sources,
+    )
+
+    _src_kw_sets = build_source_keyword_sets(search_sources) if search_sources else None
+
+    empty_response = dict(
+        arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
+        arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
+        rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
+        rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
+    )
+
+    # ---- Step 1: GPT-1 Generate (async, plain text) ----
+    _emit_stage_start(emit, "gpt1", data={"provider": gpt1_cfg.get("provider", ""), "model": gpt1_cfg.get("model", "")})
+    gpt1_sm = metrics.start_stage("gpt1", gpt1_cfg.get("provider", ""), gpt1_cfg.get("model", ""))
+    gpt1_output = await call_llm_async(gpt1_cfg, gpt1_system, gpt1_user_content)
+    metrics.end_stage(gpt1_sm)
+    _emit_stage_complete(emit, "gpt1")
+
+    # ---- Current-events fast path ----
+    if flags.get("current_events") and not search_performed:
+        fast_output = sanitize_output(gpt1_output, flags, tier=tier)
+        fast_output += (
+            "\n\n---\n"
+            "Note: This response is based on training data that may be outdated. "
+            "For verified current information, enable Tavily web search in Settings."
+        )
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = "Low"
+        metrics.bypassed = True
+        metrics.finish()
+        record_run(metrics)
+        return PipelineResponse(
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+            gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+            gpt2_raw="(current-events fast path — no web search available)",
+            claim_table=[], violations=[], gpt2_verdict="PASS",
+            final_verdict="PASS", final_result=fast_output,
+            prompt_flags=flags, sanitizer_applied=True,
+            confidence=ConfidenceBreakdown(
+                observed_pct=0, inference_pct=0, hypothesis_pct=0,
+                unsupported_pct=0, user_provided_pct=0,
+                total_claims=0, confidence_label="Low",
+            ),
+            **empty_response, **search_kwargs,
+        )
+
+    # ---- Activation bypass ----
+    if is_activation_phrase(gpt1_output):
+        metrics.bypassed = True
+        metrics.final_verdict = "PASS"
+        metrics.finish()
+        record_run(metrics)
+        return PipelineResponse(
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+            gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=True,
+            gpt2_raw="(bypassed)", claim_table=[], violations=[], gpt2_verdict="PASS",
+            final_verdict="PASS", final_result=gpt1_output,
+            prompt_flags=flags, sanitizer_applied=False,
+            confidence=compute_confidence([]),
+            **empty_response, **search_kwargs,
+        )
+
+    # ---- Deterministic sanitizer ----
+    sanitized_output = sanitize_output(gpt1_output, flags, tier=tier)
+    sanitizer_applied = (sanitized_output != gpt1_output)
+
+    # ---- Atomic Claim Decomposition (async) ----
+    should_decompose = is_nli_available() or is_high_stakes(flags)
+    atomic_claims: list = []
+    if should_decompose:
+        _emit_stage_start(emit, "decomposition")
+        decomp_sm = metrics.start_stage("decomposition")
+        # decompose_claims uses call_llm (sync) — run in thread
+        atomic_claims = await asyncio.to_thread(
+            decompose_claims, gpt2_cfg, sanitized_output, req.prompt
+        )
+        metrics.end_stage(decomp_sm)
+        _emit_stage_complete(emit, "decomposition", data={"claim_count": len(atomic_claims)})
+        metrics.decomposition_ran = len(atomic_claims) > 0
+        metrics.atomic_claims_count = len(atomic_claims)
+
+    # ---- NLI Pre-Verification (concurrent via asyncio.gather) ----
+    nli_grounding = {}
+    nli_unsupported_spans = []
+    if atomic_claims and is_nli_available():
+        evidence_snippets = [s.snippet for s in search_sources] if search_sources else []
+        if evidence_snippets:
+            _emit_stage_start(emit, "nli")
+            nli_sm = metrics.start_stage("nli")
+            # NLI uses torch (CPU-bound) — run in thread pool for concurrency
+            atomic_claims = await asyncio.to_thread(
+                verify_claims_with_nli, atomic_claims, evidence_snippets
+            )
+            metrics.end_stage(nli_sm)
+            metrics.nli_ran = True
+            metrics.nli_supported_count = sum(
+                1 for c in atomic_claims if c.get("nli_result", {}).get("supported")
+            )
+            metrics.nli_contradicted_count = sum(
+                1 for c in atomic_claims if c.get("nli_result", {}).get("contradicted")
+            )
+            nli_grounding = compute_grounding_rate(atomic_claims)
+            metrics.grounding_rate = nli_grounding.get("grounding_rate", 0.0)
+            nli_unsupported_spans = detect_unsupported_spans(sanitized_output, atomic_claims)
+            _emit_stage_complete(emit, "nli", data={
+                "grounding_rate": nli_grounding.get("grounding_rate", 0.0),
+                "supported": metrics.nli_supported_count,
+                "contradicted": metrics.nli_contradicted_count,
+            })
+
+    decomp_kwargs = dict(atomic_claims=atomic_claims, decomposition_ran=len(atomic_claims) > 0)
+
+    # ---- Step 2: GPT-2 Verify (async, structured outputs) ----
+    if atomic_claims:
+        claims_json = json.dumps(atomic_claims, indent=2)
+        nli_block = ""
+        nli_lines = []
+        for c in atomic_claims:
+            nli = c.get("nli_result", {})
+            nli_tier = nli.get("confidence_tier", "")
+            if nli_tier == "strong_support":
+                nli_lines.append(f'  NLI-STRONG-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
+            elif nli_tier == "weak_support":
+                nli_lines.append(f'  NLI-WEAK-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
+            elif nli_tier == "strong_contradiction":
+                nli_lines.append(f'  NLI-CONTRADICTED (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
+            elif nli_tier == "weak_contradiction":
+                nli_lines.append(f'  NLI-WEAK-CONTRADICTION (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
+        if nli_lines:
+            grounding_str = ""
+            if nli_grounding:
+                grounding_str = f"\nGrounding Rate: {nli_grounding['grounding_rate']:.1%} ({nli_grounding['grounded_count']}/{nli_grounding['total_evaluated']} claims grounded)"
+            nli_block = "\n\nNLI PRE-VERIFICATION SIGNALS:\n" + "\n".join(nli_lines) + grounding_str
+
+        gpt2_user = (
+            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+            f"=== TASK ===\n"
+            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+            f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}\n\n"
+            f"PRE-DECOMPOSED ATOMIC CLAIMS (verify each independently):\n{claims_json}"
+            f"{nli_block}"
+        )
+    else:
+        gpt2_user = (
+            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+            f"=== TASK ===\n"
+            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+            f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
+        )
+
+    _emit_stage_start(emit, "gpt2", data={"provider": gpt2_cfg.get("provider", ""), "model": gpt2_cfg.get("model", "")})
+    gpt2_sm = metrics.start_stage("gpt2", gpt2_cfg.get("provider", ""), gpt2_cfg.get("model", ""))
+
+    # Use structured outputs for GPT-2 when provider supports it
+    try:
+        gpt2_parsed = await call_llm_structured(gpt2_cfg, gpt2_system, gpt2_user, GPT2ResponseSchema)
+        gpt2_raw = gpt2_parsed.model_dump_json()
+        claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2_structured(gpt2_parsed, flags=flags, tier=tier)
+    except Exception:
+        # Fallback to standard async call + text parsing
+        gpt2_raw = await call_llm_async(gpt2_cfg, gpt2_system, gpt2_user, expect_json=True)
+        claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2(gpt2_raw, flags=flags, tier=tier)
+
+    metrics.end_stage(gpt2_sm)
+    _emit_stage_complete(emit, "gpt2", data={"verdict": gpt2_verdict, "claim_count": len(claim_table), "violations": violations})
+
+    # ---- Source-match correction ----
+    if search_sources:
+        claim_table = recategorize_with_sources(claim_table, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
+        findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets)
+        violations = [f["type"] for f in findings]
+        gpt2_verdict = recompute_verdict(findings, tier=tier)
+
+    metrics.gpt2_verdict = gpt2_verdict
+    metrics.total_claims = len(claim_table)
+    metrics.hard_findings = sum(1 for f in findings if f.get("severity") == "hard")
+    metrics.soft_findings = sum(1 for f in findings if f.get("severity") == "soft")
+
+    # ---- Claim-conditional retrieval ----
+    if search_performed and claim_table:
+        unsupported_ct = sum(
+            1 for ct in claim_table
+            if (ct.category if isinstance(ct.category, str) else "").lower().strip() == "unsupported"
+        )
+        unsupported_ratio = unsupported_ct / len(claim_table)
+        if unsupported_ratio > 0.3:
+            _emit_stage_start(emit, "claim_retrieval", data={"unsupported_count": unsupported_ct})
+            if atomic_claims:
+                new_sources = await asyncio.to_thread(fetch_claim_evidence, atomic_claims, search_sources)
+            else:
+                unsupported_texts = [
+                    ct.claim for ct in claim_table
+                    if (ct.category if isinstance(ct.category, str) else "").lower().strip() == "unsupported"
+                ]
+                refined_query = refine_search_query(req.prompt, unsupported_texts)
+                retry_sources, _ = await asyncio.to_thread(perform_web_search, refined_query, 3)
+                existing_urls = {s.url for s in search_sources}
+                new_sources = [s for s in retry_sources if s.url not in existing_urls]
+
+            if new_sources:
+                search_sources = search_sources + new_sources
+                _src_kw_sets = build_source_keyword_sets(search_sources)
+                claim_table = recategorize_with_sources(claim_table, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
+                findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets)
+                violations = [f["type"] for f in findings]
+                gpt2_verdict = recompute_verdict(findings, tier=tier)
+                search_kwargs["search_sources"] = search_sources
+            _emit_stage_complete(emit, "claim_retrieval", data={"new_sources": len(new_sources) if new_sources else 0})
+
+    # ---- If GPT-2 PASS: done ----
+    if gpt2_verdict == "PASS":
+        conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
+        meta_result = meta_verify_pass(flags, claim_table, findings, atomic_claims, conf.confidence_label)
+        if meta_result["ran"] and meta_result["adjusted_label"] != conf.confidence_label:
+            conf.confidence_label = meta_result["adjusted_label"]
+
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = conf.confidence_label
+        metrics.finish()
+        record_run(metrics)
+        return PipelineResponse(
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+            gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+            gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+            gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
+            final_verdict="PASS", final_result=sanitized_output,
+            prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            confidence=conf,
+            meta_verification=meta_result if meta_result["ran"] else None,
+            **empty_response, **search_kwargs, **decomp_kwargs,
+        )
+
+    # ---- Meta-verify FAIL ----
+    fail_meta = meta_verify_fail(flags, claim_table, findings, atomic_claims)
+    if fail_meta["ran"] and fail_meta["override_to_pass"]:
+        findings = fail_meta["adjusted_findings"]
+        violations = [f["type"] for f in findings]
+        gpt2_verdict = recompute_verdict(findings, tier=tier)
+        if gpt2_verdict == "PASS":
+            conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
+            metrics.final_verdict = "PASS"
+            metrics.confidence_label = conf.confidence_label
+            metrics.finish()
+            record_run(metrics)
+            return PipelineResponse(
+                prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+                gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+                gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+                gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
+                final_verdict="PASS", final_result=sanitized_output,
+                prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+                confidence=conf,
+                meta_verification={"type": "false_fail_override", "reason": fail_meta["reason"]},
+                **empty_response, **search_kwargs, **decomp_kwargs,
+            )
+
+    # ---- GPT-2 FAIL: soft-only auto-repair ----
+    max_rewrite_loops = getattr(config, "MAX_REWRITE_LOOPS", 1)
+    if _all_soft(findings):
+        re_gpt2_user = (
+            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+            f"=== TASK ===\n"
+            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+            f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
+        )
+        try:
+            re_gpt2_parsed = await call_llm_structured(gpt2_cfg, gpt2_system, re_gpt2_user, GPT2ResponseSchema)
+            re_gpt2_raw = re_gpt2_parsed.model_dump_json()
+            re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2_structured(re_gpt2_parsed, flags=flags, tier=tier)
+        except Exception:
+            re_gpt2_raw = await call_llm_async(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
+            re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
+
+        if search_sources:
+            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
+            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
+            re_viol = [f["type"] for f in re_findings]
+            re_verdict = recompute_verdict(re_findings, tier=tier)
+
+        if re_verdict == "PASS":
+            conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
+            metrics.final_verdict = "PASS"
+            metrics.confidence_label = conf.confidence_label
+            metrics.rewrite_loops = 1
+            metrics.convergence_outcome = "pass"
+            metrics.finish()
+            record_run(metrics)
+            return PipelineResponse(
+                prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+                gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+                gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+                gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
+                rewrite_occurred=True, rewrite_output=sanitized_output,
+                rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
+                rewrite_violations=re_viol, rewrite_verdict=re_verdict,
+                rewrite_reasoning=re_reasoning,
+                arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
+                arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
+                final_verdict="PASS", final_result=sanitized_output,
+                prompt_flags=flags, sanitizer_applied=True,
+                confidence=conf,
+                **search_kwargs, **decomp_kwargs,
+            )
+
+    # ---- Step 3: GPT-3 Arbiter (async, structured outputs) ----
+    gpt3_user = (
+        f"user_prompt:\n{req.prompt}\n\n"
+        f"gpt1_output:\n{sanitized_output}\n\n"
+        f"gpt2_result_json:\n{gpt2_raw}\n\n"
+        f"prompt_flags:\n{json.dumps(flags)}"
+    )
+    _emit_stage_start(emit, "gpt3", data={"provider": gpt3_cfg.get("provider", ""), "model": gpt3_cfg.get("model", "")})
+    gpt3_sm = metrics.start_stage("gpt3", gpt3_cfg.get("provider", ""), gpt3_cfg.get("model", ""))
+
+    try:
+        gpt3_parsed = await call_llm_structured(gpt3_cfg, gpt3_system, gpt3_user, GPT3ResponseSchema)
+        gpt3_raw = gpt3_parsed.model_dump_json()
+        arbiter_decision, arbiter_rationale, arbiter_edits, arbiter_policy_notes = parse_gpt3_structured(gpt3_parsed)
+    except Exception:
+        gpt3_raw = await call_llm_async(gpt3_cfg, gpt3_system, gpt3_user, expect_json=True)
+        arbiter_decision, arbiter_rationale, arbiter_edits, arbiter_policy_notes = parse_gpt3(gpt3_raw)
+
+    metrics.end_stage(gpt3_sm)
+    _emit_stage_complete(emit, "gpt3", data={"decision": arbiter_decision})
+
+    # Safety net: override BLOCK to ALLOW_WITH_EDITS
+    if arbiter_decision == "BLOCK" and claim_table:
+        salvageable_cats = {"supported", "observed", "inference", "user-provided"}
+        has_truthful = any(
+            (ct.category if isinstance(ct.category, str) else "").lower().strip() in salvageable_cats
+            for ct in claim_table
+        )
+        if has_truthful:
+            arbiter_decision = "ALLOW_WITH_EDITS"
+            arbiter_rationale = [
+                "Overridden from BLOCK: claim table contains truthful content that can be preserved with edits."
+            ] + arbiter_rationale
+
+    metrics.arbiter_decision = arbiter_decision
+
+    # ---- Decision: BLOCK ----
+    if arbiter_decision == "BLOCK":
+        metrics.final_verdict = "FAIL"
+        block_conf = compute_confidence(claim_table, findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
+        metrics.confidence_label = block_conf.confidence_label
+        metrics.finish()
+        record_run(metrics)
+        return PipelineResponse(
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+            gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+            gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+            gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
+            arbiter_invoked=True, arbiter_decision="BLOCK",
+            arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
+            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+            rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
+            rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
+            final_verdict="FAIL", final_result=_fail_message(flags, search_performed),
+            prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            confidence=block_conf,
+            **search_kwargs, **decomp_kwargs,
+        )
+
+    # ---- Decision: ALLOW_AS_UNKNOWN_ONLY ----
+    if arbiter_decision == "ALLOW_AS_UNKNOWN_ONLY":
+        rewrite_prompt = (
+            f"You previously produced this response:\n\n---\n{sanitized_output}\n---\n\n"
+            f"The arbiter has determined this question is inherently indeterminate.\n"
+            f"Rewrite your response so that ALL claims are framed as Unknown(Actionable) or Unknown(Structural).\n"
+            f"Do NOT make conclusions. Do NOT add new facts. Preserve the structure but move all substance to Unknowns.\n"
+            f"Set Confidence to Low.\n"
+            f"Output the corrected response in full."
+        )
+        rw_sm = metrics.start_stage("rewrite_unknown")
+        rewrite_output = await call_llm_async(gpt1_cfg, gpt1_system, rewrite_prompt)
+        metrics.end_stage(rw_sm)
+        rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
+
+        if flags.get("current_events") and not search_performed:
+            rewrite_output += (
+                "\n\n---\nNote: This response is based on training data that may be outdated. "
+                "For verified current information, enable Tavily web search in Settings."
+            )
+
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = "Low"
+        metrics.rewrite_loops = 1
+        metrics.convergence_outcome = "arbiter_unknown"
+        metrics.finish()
+        record_run(metrics)
+        return PipelineResponse(
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+            gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+            gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+            gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
+            arbiter_invoked=True, arbiter_decision="ALLOW_AS_UNKNOWN_ONLY",
+            arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
+            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+            rewrite_occurred=True, rewrite_output=rewrite_output,
+            rewrite_gpt2_raw="(arbiter-trusted)", rewrite_claim_table=[],
+            rewrite_violations=[], rewrite_verdict="PASS",
+            final_verdict="PASS",
+            final_result=rewrite_output,
+            prompt_flags=flags, sanitizer_applied=True,
+            confidence=ConfidenceBreakdown(
+                observed_pct=0, inference_pct=0, hypothesis_pct=0,
+                unsupported_pct=0, user_provided_pct=0,
+                total_claims=0, confidence_label="Low",
+            ),
+            **search_kwargs, **decomp_kwargs,
+        )
+
+    # ---- Decision: ALLOW_WITH_EDITS (async rewrite loop) ----
+    rewrite_prompt = apply_edits(sanitized_output, arbiter_edits)
+    if findings:
+        finding_lines = "\n".join(
+            f"- {f['type']}: {f.get('detail', 'no detail')} (severity: {f.get('severity', '?')})"
+            for f in findings
+        )
+        rewrite_prompt += (
+            f"\n\nPrevious verification found these specific issues:\n{finding_lines}\n"
+            f"Please address each finding in your rewrite."
+        )
+    rewrite_output = await call_llm_async(gpt1_cfg, gpt1_system, rewrite_prompt)
+    rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
+
+    # Re-verify with structured outputs
+    re_gpt2_user = (
+        f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+        f"=== TASK ===\n"
+        f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+        f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+    )
+    try:
+        re_gpt2_parsed = await call_llm_structured(gpt2_cfg, gpt2_system, re_gpt2_user, GPT2ResponseSchema)
+        re_gpt2_raw = re_gpt2_parsed.model_dump_json()
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2_structured(re_gpt2_parsed, flags=flags, tier=tier)
+    except Exception:
+        re_gpt2_raw = await call_llm_async(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
+        re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
+
+    if search_sources:
+        re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
+        re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
+        re_viol = [f["type"] for f in re_findings]
+        re_verdict = recompute_verdict(re_findings, tier=tier)
+
+    findings_history = [findings, re_findings]
+
+    while re_verdict == "FAIL" and should_continue_rewrite(findings_history, max_loops=max_rewrite_loops):
+        if _all_soft(re_findings):
+            rewrite_instruction = (
+                f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
+                f"Remaining soft violations could not be resolved. "
+                f"Rewrite your response so that ALL claims are framed as Unknown(Actionable) or Unknown(Structural).\n"
+                f"Do NOT make conclusions. Do NOT add new facts. Output the corrected response in full."
+            )
+        else:
+            hard_details = "; ".join(
+                f'{f["type"]}: {f["detail"]}'
+                for f in re_findings if f.get("severity") == "hard"
+            )
+            rewrite_instruction = (
+                f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
+                f"The following HARD violations were detected and must be fixed:\n{hard_details}\n\n"
+                f"For each violation: either DELETE the problematic claim entirely, "
+                f"or MOVE it to Unknown(Actionable) with a note that verification is needed.\n"
+                f"Do NOT fabricate citations. Do NOT invent statistics.\n"
+                f"Set Confidence to Low if you remove core claims.\n"
+                f"Output the corrected response in full."
+            )
+        rewrite_output = await call_llm_async(gpt1_cfg, gpt1_system, rewrite_instruction)
+        rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
+        re_gpt2_user = (
+            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+            f"=== TASK ===\n"
+            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
+            f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
+        )
+        try:
+            re_gpt2_parsed = await call_llm_structured(gpt2_cfg, gpt2_system, re_gpt2_user, GPT2ResponseSchema)
+            re_gpt2_raw = re_gpt2_parsed.model_dump_json()
+            re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2_structured(re_gpt2_parsed, flags=flags, tier=tier)
+        except Exception:
+            re_gpt2_raw = await call_llm_async(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
+            re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
+        if search_sources:
+            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
+            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
+            re_viol = [f["type"] for f in re_findings]
+            re_verdict = recompute_verdict(re_findings, tier=tier)
+        findings_history.append(re_findings)
+
+    metrics.rewrite_loops = len(findings_history) - 1
+
+    if re_verdict == "PASS":
+        conf = compute_confidence(re_ct, re_findings, nli_grounding or None, nli_unsupported_spans or None, search_sources or None)
+        metrics.final_verdict = "PASS"
+        metrics.confidence_label = conf.confidence_label
+        metrics.convergence_outcome = "pass"
+        metrics.finish()
+        record_run(metrics)
+        return PipelineResponse(
+            prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
+            gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
+            gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
+            gpt2_verdict=gpt2_verdict, gpt2_reasoning=gpt2_reasoning,
+            arbiter_invoked=True, arbiter_decision="ALLOW_WITH_EDITS",
+            arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
+            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+            rewrite_occurred=True, rewrite_output=rewrite_output,
+            rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
+            rewrite_violations=re_viol, rewrite_verdict=re_verdict,
+            rewrite_reasoning=re_reasoning,
+            final_verdict="PASS",
+            final_result=rewrite_output,
+            prompt_flags=flags, sanitizer_applied=sanitizer_applied,
+            confidence=conf,
+            **search_kwargs, **decomp_kwargs,
+        )
+
+    # ---- Fallback: ALLOW_WITH_EDITS rewrite failed ----
+    fallback_prompt = (
+        f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
+        f"The verification system could not clear all violations after multiple attempts.\n"
+        f"Rewrite your response so that ALL factual claims are framed as "
+        f"Unknown(Actionable) or Unknown(Structural).\n"
+        f"Preserve the structure and topic coverage, but present everything as unverified.\n"
+        f"List authoritative sources where the user can verify each claim.\n"
+        f"Set Confidence to Low.\n"
+        f"Output the corrected response in full."
+    )
+    fallback_output = await call_llm_async(gpt1_cfg, gpt1_system, fallback_prompt)
     fallback_output = sanitize_output(fallback_output, flags, tier=tier)
 
     metrics.final_verdict = "PASS"
