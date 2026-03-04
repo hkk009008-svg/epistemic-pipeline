@@ -1,6 +1,6 @@
-# FULL SOURCE DUMP — Epistemic Verification Pipeline V4
+# FULL SOURCE DUMP — Epistemic Verification Pipeline V4.1
 # Generated from 59 source files
-# Version: 4.0.0 (V4 Async + Structured Outputs)
+# Version: 4.1.0 (Async Leaks Fixed + UUID Claims + ProcessPool NLI)
 
 ========== FILE: .env.example (55 lines) ==========
 ```
@@ -627,13 +627,13 @@ def rate_limit_dependency(request: Request) -> None:
         _cleanup_expired(now, window)
 ```
 
-========== FILE: api/routes.py (455 lines) ==========
+========== FILE: api/routes.py (499 lines) ==========
 ```python
 """FastAPI route definitions for the epistemic verification pipeline.
 
 Provides both sync (ThreadPoolExecutor) and async (native asyncio) pipeline paths.
-The V3 /api/pipeline uses the async path by default, falling back to the sync path
-if run_pipeline_async is not available. The V2 endpoints are kept for backward compat.
+The /api/pipeline uses the async path by default for both streaming and non-streaming.
+The V2 endpoints are kept for backward compat.
 """
 from __future__ import annotations
 
@@ -641,6 +641,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import time
 from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -872,12 +873,11 @@ _PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "90"))
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
 
 def _stream_pipeline(req: PipelineRequest):
-    """Run pipeline and yield true stage-based NDJSON events.
+    """Sync streaming fallback — used by V2 endpoints.
 
     Uses a thread-safe queue to receive real stage_start / stage_complete
     events emitted by the orchestrator's ``emit`` callback.
     """
-    import time
     import threading
     import queue
 
@@ -930,24 +930,68 @@ def _stream_pipeline(req: PipelineRequest):
         yield json.dumps({"type": "result", "data": result_holder[0].model_dump()}) + "\n"
 
 
+async def _stream_pipeline_async(req: PipelineRequest):
+    """Native async event streaming — uses run_pipeline_async without blocking threads.
+
+    Uses an asyncio.Queue to receive stage events from the emit callback.
+    The emit callback is called from within the async pipeline coroutine
+    (same event loop), so put_nowait is safe.
+    """
+    event_q: asyncio.Queue = asyncio.Queue()
+    start = time.monotonic()
+
+    def _emit(event: dict):
+        """Callback passed to run_pipeline_async for real stage events."""
+        event["elapsed"] = round(time.monotonic() - start, 1)
+        event_q.put_nowait(event)
+
+    # Launch the async pipeline as a concurrent task
+    pipeline_task = asyncio.create_task(run_pipeline_async(req, emit=_emit))
+
+    deadline = time.monotonic() + _PIPELINE_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pipeline_task.cancel()
+            yield json.dumps({"type": "error", "detail": f"Pipeline timed out after {_PIPELINE_TIMEOUT}s.", "status_code": 504}) + "\n"
+            return
+
+        try:
+            event = await asyncio.wait_for(event_q.get(), timeout=min(remaining, 0.5))
+            yield json.dumps(event) + "\n"
+        except asyncio.TimeoutError:
+            # No event within 0.5s — check if pipeline finished
+            if pipeline_task.done():
+                # Drain remaining events
+                while not event_q.empty():
+                    yield json.dumps(event_q.get_nowait()) + "\n"
+                break
+
+    # Yield the final result or error
+    try:
+        result = await pipeline_task
+        yield json.dumps({"type": "result", "data": result.model_dump()}) + "\n"
+    except PipelineError as e:
+        yield json.dumps({"type": "error", "detail": e.detail, "status_code": e.status_code}) + "\n"
+    except Exception as e:
+        yield json.dumps({"type": "error", "detail": str(e), "status_code": 500}) + "\n"
+
+
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 async def pipeline_endpoint(req: PipelineRequest, request: Request):
     """Main pipeline endpoint — uses native async I/O (V4).
 
-    The async path uses AsyncOpenAI/AsyncAnthropic clients and structured
-    outputs, allowing a single instance to handle far more concurrent
-    requests without tying up OS threads.
-
-    Falls back to the sync ThreadPoolExecutor path on error.
+    Both streaming and non-streaming modes use the async pipeline,
+    avoiding ThreadPoolExecutor entirely. Falls back to sync on error.
     """
-    # SSE streaming mode (still uses sync pipeline + thread for event queue)
+    # Native async streaming — uses asyncio.Queue, no OS threads
     if getattr(req, "stream", False):
         return StreamingResponse(
-            _stream_pipeline(req),
+            _stream_pipeline_async(req),
             media_type="application/x-ndjson",
         )
 
-    # Native async path (V4) — no ThreadPoolExecutor, no thread locks
+    # Native async path — no ThreadPoolExecutor, no thread locks
     try:
         result = await asyncio.wait_for(
             run_pipeline_async(req),
@@ -3894,7 +3938,7 @@ def get_stage_config(stage: str) -> dict:
 from pipeline.orchestrator import run_pipeline as run_pipeline
 ```
 
-========== FILE: pipeline/arbiter.py (81 lines) ==========
+========== FILE: pipeline/arbiter.py (141 lines) ==========
 ```python
 """GPT-3 Arbiter: parses arbiter decisions and applies edits.
 
@@ -3921,6 +3965,7 @@ def parse_gpt3(raw: str):
                 action=e.get("action", ""),
                 target=e.get("target", ""),
                 replacement=e.get("replacement", ""),
+                target_id=e.get("target_id", ""),
             )
             for e in edits_raw
         ]
@@ -3931,16 +3976,22 @@ def parse_gpt3(raw: str):
 
 
 def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
-    """Apply GPT-3 edit instructions to GPT-1 output for rewrite prompt."""
+    """Apply GPT-3 edit instructions to GPT-1 output for rewrite prompt.
+
+    Supports both legacy text-based targeting and ID-based targeting.
+    When target_id is present, includes the claim ID in the instruction
+    for more precise targeting.
+    """
     instructions = []
     for e in edits:
+        id_tag = f" [claim_id={e.target_id}]" if getattr(e, "target_id", "") else ""
         if e.action == "DELETE":
-            instructions.append(f'DELETE the following text: "{e.target}"')
+            instructions.append(f'DELETE the following text{id_tag}: "{e.target}"')
         elif e.action == "REWRITE":
-            instructions.append(f'REWRITE "{e.target}" to: "{e.replacement}"')
+            instructions.append(f'REWRITE{id_tag} "{e.target}" to: "{e.replacement}"')
         elif e.action == "MOVE_TO_UNKNOWN":
             instructions.append(
-                f'MOVE the following to the Unknowns section: "{e.target}" '
+                f'MOVE the following to the Unknowns section{id_tag}: "{e.target}" '
                 f'\u2014 reframe as: "{e.replacement}"'
             )
     edit_block = "\n".join(f"- {inst}" for inst in instructions)
@@ -3951,6 +4002,58 @@ def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
         f"{edit_block}\n\n"
         f"Output the corrected response in full."
     )
+
+
+def apply_edits_by_id(
+    atomic_claims: List[dict],
+    edits: List[EditEntry],
+) -> tuple[List[dict], str]:
+    """Deterministically apply arbiter edits to atomic claims by UUID.
+
+    This is the V5 ID-based approach: instead of relying on GPT-1 to find
+    and replace text, we modify the claim JSON directly. This eliminates
+    linguistic fragility from the rewrite loop.
+
+    Args:
+        atomic_claims: List of claim dicts with "claim_id" and "text" fields.
+        edits: List of EditEntry with target_id set.
+
+    Returns:
+        (modified_claims, summary): The edited claim list and a human-readable
+        summary of what changed (for logging/metrics).
+    """
+    # Build a lookup by claim_id
+    claims_by_id = {c.get("claim_id", ""): c for c in atomic_claims if c.get("claim_id")}
+    applied = []
+    modified_claims = list(atomic_claims)
+
+    for e in edits:
+        target_id = getattr(e, "target_id", "")
+        if not target_id or target_id not in claims_by_id:
+            # Fall back to text-based matching if no ID or ID not found
+            continue
+
+        claim = claims_by_id[target_id]
+        idx = next((i for i, c in enumerate(modified_claims) if c.get("claim_id") == target_id), None)
+        if idx is None:
+            continue
+
+        if e.action == "DELETE":
+            modified_claims.pop(idx)
+            applied.append(f"DELETED claim {target_id}: {claim['text'][:60]}...")
+        elif e.action == "REWRITE":
+            modified_claims[idx] = {**claim, "text": e.replacement}
+            applied.append(f"REWROTE claim {target_id}")
+        elif e.action == "MOVE_TO_UNKNOWN":
+            modified_claims[idx] = {
+                **claim,
+                "text": e.replacement or f"Unknown(Actionable): {claim['text']}",
+                "is_unknown": True,
+            }
+            applied.append(f"MOVED claim {target_id} to Unknown")
+
+    summary = "; ".join(applied) if applied else "No ID-based edits applied"
+    return modified_claims, summary
 
 
 def parse_gpt3_structured(parsed: GPT3ResponseSchema):
@@ -3969,6 +4072,7 @@ def parse_gpt3_structured(parsed: GPT3ResponseSchema):
                 action=e.action,
                 target=e.target,
                 replacement=e.replacement,
+                target_id=getattr(e, "target_id", ""),
             )
             for e in parsed.edits_for_gpt1
         ]
@@ -3978,12 +4082,16 @@ def parse_gpt3_structured(parsed: GPT3ResponseSchema):
         return "BLOCK", ["GPT-3 structured parse error"], [], []
 ```
 
-========== FILE: pipeline/best_of_n.py (132 lines) ==========
+========== FILE: pipeline/best_of_n.py (183 lines) ==========
 ```python
 """Best-of-N generation — generate multiple GPT-1 responses and select the best.
 
 Generates N candidate responses and uses lightweight heuristics to pick the
 most factually grounded one, without requiring full GPT-2 verification.
+
+Provides both sync (generate_best_of_n) and async (generate_best_of_n_async)
+entry points. The async version fires all N requests concurrently via
+asyncio.gather(), drastically reducing generation time.
 
 Heuristics used for scoring:
 1. Citation density: responses with proper citations score higher
@@ -3993,9 +4101,10 @@ Heuristics used for scoring:
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
-from pipeline.helpers import call_llm
+from pipeline.helpers import call_llm, call_llm_async
 
 # Citation patterns (proper sourcing)
 _CITATION_RE = re.compile(r"(?:\[[^\]]{1,50}\]|\([^)]{3,50}\))")
@@ -4111,6 +4220,52 @@ def generate_best_of_n(
         "selected_index": best_idx,
         "score_spread": round(score_spread, 1),
     }
+
+
+async def generate_best_of_n_async(
+    stage_config: dict,
+    system_prompt: str,
+    user_content: str,
+    flags: dict,
+    n: int = 2,
+) -> tuple[str, dict]:
+    """Async best-of-N: fire all N requests concurrently via asyncio.gather().
+
+    Returns (best_response, selection_info) — same interface as generate_best_of_n.
+    Concurrent generation drastically reduces wall-clock time from N*latency to ~1*latency.
+    """
+    if n < 2:
+        output = await call_llm_async(stage_config, system_prompt, user_content)
+        return output, {
+            "candidates_generated": 1,
+            "scores": [score_response(output, flags)],
+            "selected_index": 0,
+            "score_spread": 0.0,
+        }
+
+    async def _generate_one():
+        try:
+            return await call_llm_async(stage_config, system_prompt, user_content)
+        except Exception:
+            return None
+
+    # Fire all N requests concurrently
+    results = await asyncio.gather(*[_generate_one() for _ in range(n)])
+    candidates = [r for r in results if r is not None]
+
+    if not candidates:
+        raise ValueError("All candidate generations failed")
+
+    scores = [score_response(c, flags) for c in candidates]
+    best_idx = scores.index(max(scores))
+    score_spread = max(scores) - min(scores) if len(scores) > 1 else 0.0
+
+    return candidates[best_idx], {
+        "candidates_generated": len(candidates),
+        "scores": [round(s, 1) for s in scores],
+        "selected_index": best_idx,
+        "score_spread": round(score_spread, 1),
+    }
 ```
 
 ========== FILE: pipeline/convergence.py (86 lines) ==========
@@ -4202,7 +4357,7 @@ def should_continue_rewrite(history: List[List[dict]], max_loops: int = 3) -> bo
     return latest_delta["improved"]
 ```
 
-========== FILE: pipeline/decomposer.py (199 lines) ==========
+========== FILE: pipeline/decomposer.py (207 lines) ==========
 ```python
 """Atomic claim decomposition — breaks GPT-1 output into individual verifiable claims.
 
@@ -4210,6 +4365,7 @@ Runs as a separate LLM call BEFORE GPT-2 verification.
 Each claim is a single factual assertion that can be independently verified.
 
 Features:
+- UUID-based claim IDs for deterministic arbiter targeting
 - Quality validation (completeness, correctness checks)
 - Compound claim detection and splitting
 - Decomposition quality metrics
@@ -4217,6 +4373,7 @@ Features:
 from __future__ import annotations
 
 import re
+import uuid
 from typing import List
 
 from pipeline.helpers import extract_json, call_llm
@@ -4251,13 +4408,19 @@ _MIN_CLAIM_LENGTH = 8
 
 
 def _validate_claim(c: dict) -> dict | None:
-    """Validate and normalize a single claim dict. Returns None if invalid."""
+    """Validate and normalize a single claim dict. Returns None if invalid.
+
+    Each validated claim receives a deterministic UUID (claim_id) for
+    downstream targeting by the Arbiter. This enables ID-based edits
+    instead of brittle text-matching.
+    """
     if not isinstance(c, dict) or "text" not in c:
         return None
     text = str(c["text"]).strip()
     if len(text) < _MIN_CLAIM_LENGTH:
         return None
     return {
+        "claim_id": c.get("claim_id") or uuid.uuid4().hex[:8],
         "text": text,
         "has_citation": bool(c.get("has_citation", False)),
         "is_unknown": bool(c.get("is_unknown", False)),
@@ -5517,7 +5680,7 @@ def record_run(m: PipelineMetrics) -> None:
     _aggregate.record(m)
 ```
 
-========== FILE: pipeline/models.py (245 lines) ==========
+========== FILE: pipeline/models.py (252 lines) ==========
 ```python
 """Pydantic models for pipeline requests, responses, and internal data."""
 from __future__ import annotations
@@ -5555,6 +5718,7 @@ class EditEntry(BaseModel):
     action: str
     target: str
     replacement: str
+    target_id: str = ""  # UUID from decomposer — enables deterministic edits
 
 
 class GroundingInfo(BaseModel):
@@ -5742,10 +5906,16 @@ class GPT2ResponseSchema(BaseModel):
 
 
 class ArbiterEditSchema(BaseModel):
-    """A single edit instruction from GPT-3 Arbiter."""
+    """A single edit instruction from GPT-3 Arbiter.
+
+    Supports both text-based targeting (legacy) and ID-based targeting (V5).
+    When target_id is set, Python applies the edit directly to the claim JSON
+    without relying on GPT-1 to find and replace strings.
+    """
     action: Literal["DELETE", "REWRITE", "MOVE_TO_UNKNOWN"]
     target: str
     replacement: str = ""
+    target_id: str = ""  # UUID from decomposer — enables deterministic edits
 
 
 class GPT3ResponseSchema(BaseModel):
@@ -5765,7 +5935,7 @@ class DecomposerResponseSchema(BaseModel):
     claims: List[dict] = []
 ```
 
-========== FILE: pipeline/nli.py (429 lines) ==========
+========== FILE: pipeline/nli.py (470 lines) ==========
 ```python
 """NLI (Natural Language Inference) verification layer using DeBERTa-v3.
 
@@ -6132,8 +6302,36 @@ def _batch_classify_nli_remote(pairs: List[Tuple[str, str]]) -> List[Optional[di
 
 
 # ---------------------------------------------------------------------------
-# V4: Concurrent NLI verification via asyncio
+# V4: Concurrent NLI verification via asyncio + ProcessPoolExecutor
 # ---------------------------------------------------------------------------
+
+# ProcessPoolExecutor for CPU-bound torch inference.
+# Avoids the GIL trap: Python threads share the GIL, so multiple
+# concurrent asyncio.to_thread(batch_classify_nli) calls would serialize
+# under the GIL when PyTorch runs CPU-bound C++ kernels. A process pool
+# gives each inference its own GIL and CPU cache, eliminating thread thrashing.
+import concurrent.futures
+_nli_process_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
+
+
+def _get_nli_process_pool() -> concurrent.futures.ProcessPoolExecutor:
+    """Lazily create a ProcessPoolExecutor for NLI inference."""
+    global _nli_process_pool
+    if _nli_process_pool is None:
+        # 2 workers: enough for concurrent claims without exhausting memory
+        # (each worker loads a separate copy of the 22M param model)
+        _nli_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=2)
+    return _nli_process_pool
+
+
+def _nli_worker(pairs: List[Tuple[str, str]]) -> List[Optional[dict]]:
+    """Process-pool worker: run batch NLI classification in an isolated process.
+
+    This function is invoked in a child process, avoiding GIL contention
+    with the main event loop and other inference tasks.
+    """
+    return batch_classify_nli(pairs)
+
 
 async def verify_claims_concurrently(
     claims: List[dict],
@@ -6141,17 +6339,19 @@ async def verify_claims_concurrently(
 ) -> List[dict]:
     """Run NLI verification on atomic claims concurrently using asyncio.
 
-    For each claim, offloads CPU-bound DeBERTa inference to a thread pool
-    via asyncio.to_thread(), allowing multiple claims to be verified in
-    parallel. This can slash NLI latency by 40-60% on multi-claim responses.
+    Uses ProcessPoolExecutor for local torch inference to avoid the GIL trap.
+    For remote NLI services (NLI_SERVICE_URL set), uses asyncio.to_thread()
+    since the work is I/O-bound (HTTP), not CPU-bound.
 
-    Falls back to the sequential verify_claims_with_nli() if asyncio is
-    not available or NLI is not available.
+    Falls back to the sequential verify_claims_with_nli() on any error.
     """
     import asyncio
 
     if not claims or not evidence_snippets or not is_nli_available():
         return claims
+
+    # Choose executor based on whether NLI is local (CPU-bound) or remote (I/O-bound)
+    use_process_pool = not NLI_SERVICE_URL
 
     async def _verify_single_claim(claim: dict) -> dict:
         claim_text = claim.get("text", "")
@@ -6159,8 +6359,19 @@ async def verify_claims_concurrently(
             return claim
 
         pairs = [(snippet, claim_text) for snippet in evidence_snippets]
-        # Offload CPU-bound torch inference to thread pool
-        results = await asyncio.to_thread(batch_classify_nli, pairs)
+
+        try:
+            if use_process_pool:
+                # CPU-bound: use ProcessPoolExecutor to bypass GIL
+                loop = asyncio.get_running_loop()
+                pool = _get_nli_process_pool()
+                results = await loop.run_in_executor(pool, _nli_worker, pairs)
+            else:
+                # I/O-bound (remote service): thread pool is fine
+                results = await asyncio.to_thread(batch_classify_nli, pairs)
+        except Exception:
+            # Fallback to sync in-process if process pool fails
+            results = batch_classify_nli(pairs)
 
         best_entailment = 0.0
         worst_contradiction = 0.0
@@ -6197,7 +6408,7 @@ async def verify_claims_concurrently(
     return list(enriched)
 ```
 
-========== FILE: pipeline/orchestrator.py (1704 lines) ==========
+========== FILE: pipeline/orchestrator.py (1710 lines) ==========
 ```python
 """Core pipeline orchestrator: GPT-1 -> GPT-2 -> GPT-3 verification flow.
 
@@ -6233,7 +6444,7 @@ from pipeline.decomposer import decompose_claims, check_decomposition_quality
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
 from pipeline.meta_verify import meta_verify_pass, meta_verify_fail, is_high_stakes
 from pipeline.metrics import PipelineMetrics, record_run
-from pipeline.best_of_n import generate_best_of_n
+from pipeline.best_of_n import generate_best_of_n, generate_best_of_n_async
 
 
 def _date_context() -> str:
@@ -7351,10 +7562,16 @@ async def run_pipeline_async(
         rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
     )
 
-    # ---- Step 1: GPT-1 Generate (async, plain text) ----
+    # ---- Step 1: GPT-1 Generate (async, with optional best-of-N) ----
     _emit_stage_start(emit, "gpt1", data={"provider": gpt1_cfg.get("provider", ""), "model": gpt1_cfg.get("model", "")})
     gpt1_sm = metrics.start_stage("gpt1", gpt1_cfg.get("provider", ""), gpt1_cfg.get("model", ""))
-    gpt1_output = await call_llm_async(gpt1_cfg, gpt1_system, gpt1_user_content)
+    best_of_n_count = getattr(config, "BEST_OF_N", 1)
+    if best_of_n_count >= 2:
+        gpt1_output, bon_info = await generate_best_of_n_async(
+            gpt1_cfg, gpt1_system, gpt1_user_content, flags, n=best_of_n_count,
+        )
+    else:
+        gpt1_output = await call_llm_async(gpt1_cfg, gpt1_system, gpt1_user_content)
     metrics.end_stage(gpt1_sm)
     _emit_stage_complete(emit, "gpt1")
 
@@ -14820,4 +15037,4 @@ class TestParseGpt2TierSeverity:
         assert verdict == "PASS"
 ```
 
-# END OF DUMP — 59 files, 14,639 lines, 576,876 chars
+# END OF DUMP — 59 files, 14,856 lines, 585,613 chars
