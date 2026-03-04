@@ -3,6 +3,10 @@
 Generates N candidate responses and uses lightweight heuristics to pick the
 most factually grounded one, without requiring full GPT-2 verification.
 
+Provides both sync (generate_best_of_n) and async (generate_best_of_n_async)
+entry points. The async version fires all N requests concurrently via
+asyncio.gather(), drastically reducing generation time.
+
 Heuristics used for scoring:
 1. Citation density: responses with proper citations score higher
 2. Hedging language: appropriate hedging on uncertain claims
@@ -11,9 +15,10 @@ Heuristics used for scoring:
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
-from pipeline.helpers import call_llm
+from pipeline.helpers import call_llm, call_llm_async
 
 # Citation patterns (proper sourcing)
 _CITATION_RE = re.compile(r"(?:\[[^\]]{1,50}\]|\([^)]{3,50}\))")
@@ -115,6 +120,52 @@ def generate_best_of_n(
         except Exception:
             # If a generation fails, continue with what we have
             break
+
+    if not candidates:
+        raise ValueError("All candidate generations failed")
+
+    scores = [score_response(c, flags) for c in candidates]
+    best_idx = scores.index(max(scores))
+    score_spread = max(scores) - min(scores) if len(scores) > 1 else 0.0
+
+    return candidates[best_idx], {
+        "candidates_generated": len(candidates),
+        "scores": [round(s, 1) for s in scores],
+        "selected_index": best_idx,
+        "score_spread": round(score_spread, 1),
+    }
+
+
+async def generate_best_of_n_async(
+    stage_config: dict,
+    system_prompt: str,
+    user_content: str,
+    flags: dict,
+    n: int = 2,
+) -> tuple[str, dict]:
+    """Async best-of-N: fire all N requests concurrently via asyncio.gather().
+
+    Returns (best_response, selection_info) — same interface as generate_best_of_n.
+    Concurrent generation drastically reduces wall-clock time from N*latency to ~1*latency.
+    """
+    if n < 2:
+        output = await call_llm_async(stage_config, system_prompt, user_content)
+        return output, {
+            "candidates_generated": 1,
+            "scores": [score_response(output, flags)],
+            "selected_index": 0,
+            "score_spread": 0.0,
+        }
+
+    async def _generate_one():
+        try:
+            return await call_llm_async(stage_config, system_prompt, user_content)
+        except Exception:
+            return None
+
+    # Fire all N requests concurrently
+    results = await asyncio.gather(*[_generate_one() for _ in range(n)])
+    candidates = [r for r in results if r is not None]
 
     if not candidates:
         raise ValueError("All candidate generations failed")

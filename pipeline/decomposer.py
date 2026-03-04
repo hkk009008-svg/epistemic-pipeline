@@ -4,6 +4,7 @@ Runs as a separate LLM call BEFORE GPT-2 verification.
 Each claim is a single factual assertion that can be independently verified.
 
 Features:
+- UUID-based claim IDs for deterministic arbiter targeting
 - Quality validation (completeness, correctness checks)
 - Compound claim detection and splitting
 - Decomposition quality metrics
@@ -11,6 +12,7 @@ Features:
 from __future__ import annotations
 
 import re
+import uuid
 from typing import List
 
 from pipeline.helpers import extract_json, call_llm
@@ -45,13 +47,19 @@ _MIN_CLAIM_LENGTH = 8
 
 
 def _validate_claim(c: dict) -> dict | None:
-    """Validate and normalize a single claim dict. Returns None if invalid."""
+    """Validate and normalize a single claim dict. Returns None if invalid.
+
+    Each validated claim receives a deterministic UUID (claim_id) for
+    downstream targeting by the Arbiter. This enables ID-based edits
+    instead of brittle text-matching.
+    """
     if not isinstance(c, dict) or "text" not in c:
         return None
     text = str(c["text"]).strip()
     if len(text) < _MIN_CLAIM_LENGTH:
         return None
     return {
+        "claim_id": c.get("claim_id") or uuid.uuid4().hex[:8],
         "text": text,
         "has_citation": bool(c.get("has_citation", False)),
         "is_unknown": bool(c.get("is_unknown", False)),

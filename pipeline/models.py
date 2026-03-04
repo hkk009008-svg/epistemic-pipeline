@@ -34,6 +34,7 @@ class EditEntry(BaseModel):
     action: str
     target: str
     replacement: str
+    target_id: str = ""  # UUID from decomposer — enables deterministic edits
 
 
 class GroundingInfo(BaseModel):
@@ -91,6 +92,27 @@ class PipelineRequest(BaseModel):
             object.__setattr__(self, "gpt3_system", "")
 
 
+# Maps (final_verdict, confidence_label) to human-readable verdict descriptions
+_VERDICT_LABELS = {
+    ("PASS", "High"): "Verified with evidence",
+    ("PASS", "Medium"): "Partially supported",
+    ("PASS", "Low"): "Insufficient evidence",
+    ("PASS", "Unknown"): "Insufficient evidence",
+    ("FAIL", "High"): "Blocked due to fabrication risk",
+    ("FAIL", "Medium"): "Contradicted by evidence",
+    ("FAIL", "Low"): "Blocked due to fabrication risk",
+    ("FAIL", "Unknown"): "Blocked due to fabrication risk",
+}
+
+
+def compute_verdict_label(final_verdict: str, confidence_label: str) -> str:
+    """Return a human-readable verdict label."""
+    return _VERDICT_LABELS.get(
+        (final_verdict, confidence_label),
+        "Verified with evidence" if final_verdict == "PASS" else "Blocked due to fabrication risk",
+    )
+
+
 class PipelineResponse(BaseModel):
     prompt_version: str = ""
     gpt1_input: str
@@ -120,6 +142,8 @@ class PipelineResponse(BaseModel):
     # Final
     final_verdict: str
     final_result: str
+    # Human-readable verdict label (e.g. "Verified with evidence")
+    verdict_label: str = ""
     # Prompt routing / sanitizer metadata
     prompt_flags: Optional[dict] = None
     sanitizer_applied: bool = False
@@ -139,6 +163,14 @@ class PipelineResponse(BaseModel):
     # Tier and output format metadata
     tier: str = "strict"
     output_format: str = "structured"
+
+    def model_post_init(self, __context):
+        # Auto-compute verdict_label if not explicitly set
+        if not self.verdict_label:
+            object.__setattr__(
+                self, "verdict_label",
+                compute_verdict_label(self.final_verdict, self.confidence.confidence_label),
+            )
 
 
 class StageConfig(BaseModel):
@@ -163,3 +195,57 @@ class FeedbackRequest(BaseModel):
     verdict_correct: Optional[bool] = None
     confidence_correct: Optional[bool] = None
     comment: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Structured Output Schemas — used with OpenAI's response_format parameter
+# to enforce guaranteed JSON output from GPT-2 and GPT-3.
+# ---------------------------------------------------------------------------
+
+class FindingSchema(BaseModel):
+    """A single verification finding from GPT-2."""
+    type: str
+    severity: Literal["hard", "soft"]
+    detail: str
+
+
+class GPT2ResponseSchema(BaseModel):
+    """Structured output schema for GPT-2 Verifier responses.
+
+    Used with OpenAI's response_format to mathematically enforce valid JSON,
+    eliminating the need for extract_json() regex parsing and retry loops.
+    """
+    reasoning_trace: List[str] = []
+    claim_table: List[dict] = []
+    findings: List[FindingSchema] = []
+    verdict: Literal["PASS", "FAIL"]
+
+
+class ArbiterEditSchema(BaseModel):
+    """A single edit instruction from GPT-3 Arbiter.
+
+    Supports both text-based targeting (legacy) and ID-based targeting (V5).
+    When target_id is set, Python applies the edit directly to the claim JSON
+    without relying on GPT-1 to find and replace strings.
+    """
+    action: Literal["DELETE", "REWRITE", "MOVE_TO_UNKNOWN"]
+    target: str
+    replacement: str = ""
+    target_id: str = ""  # UUID from decomposer — enables deterministic edits
+
+
+class GPT3ResponseSchema(BaseModel):
+    """Structured output schema for GPT-3 Arbiter responses.
+
+    Used with OpenAI's response_format to mathematically enforce valid JSON,
+    eliminating the need for extract_json() regex parsing and retry loops.
+    """
+    arbiter_decision: Literal["BLOCK", "ALLOW_WITH_EDITS", "ALLOW_AS_UNKNOWN_ONLY"]
+    rationale: List[str] = []
+    edits_for_gpt1: List[ArbiterEditSchema] = []
+    final_policy_notes: List[str] = []
+
+
+class DecomposerResponseSchema(BaseModel):
+    """Structured output schema for claim decomposition."""
+    claims: List[dict] = []

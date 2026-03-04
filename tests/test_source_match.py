@@ -4,6 +4,7 @@ from __future__ import annotations
 from pipeline.models import ClaimEntry, SearchSource
 from pipeline.source_match import (
     _extract_keywords,
+    _find_nli_support,
     recategorize_with_sources,
     filter_findings_with_sources,
 )
@@ -174,3 +175,88 @@ class TestFilterFindingsWithSources:
         assert len(result) == 2
         assert result[0]["type"] == "T5"
         assert result[1]["type"] == "T7"
+
+
+# ---------------------------------------------------------------------------
+# NLI-backed recategorization
+# ---------------------------------------------------------------------------
+
+class TestNLIBackedRecategorization:
+    def test_nli_entailment_upgrades_claim(self):
+        """Claims with strong NLI entailment should be upgraded."""
+        sources = [_src("BTS", "BTS debuted on June 12 2013")]
+        claims = [_claim("BTS debuted on June 12, 2013")]
+        nli_claims = [{
+            "text": "BTS debuted on June 12, 2013",
+            "nli_result": {
+                "best_entailment": 0.85,
+                "worst_contradiction": 0.1,
+                "supported": True,
+                "best_source_idx": 0,
+                "confidence_tier": "strong_support",
+            },
+        }]
+        result = recategorize_with_sources(claims, sources, nli_claims=nli_claims)
+        assert result[0].category == "Observed"
+        assert "nli_entailment" in result[0].justification
+
+    def test_nli_weak_entailment_not_upgraded(self):
+        """Claims with weak NLI entailment and low keyword overlap should not be upgraded."""
+        sources = [_src("Weather", "The weather in Tokyo is rainy and cold")]
+        claims = [_claim("The stadium capacity holds 50000 spectators")]
+        nli_claims = [{
+            "text": "The stadium capacity holds 50000 spectators",
+            "nli_result": {
+                "best_entailment": 0.3,
+                "worst_contradiction": 0.1,
+                "supported": False,
+                "best_source_idx": 0,
+            },
+        }]
+        result = recategorize_with_sources(claims, sources, nli_claims=nli_claims)
+        # Should stay unsupported — NLI too weak and no keyword overlap
+        assert result[0].category == "Unsupported"
+
+    def test_justification_records_match_method(self):
+        """Justification should record whether match was keyword or NLI."""
+        sources = [_src("BTS Wikipedia", "BTS is a South Korean boy band formed by Big Hit Entertainment")]
+        claims = [_claim("BTS is a South Korean boy band")]
+        # Without NLI, uses keyword match
+        result = recategorize_with_sources(claims, sources)
+        assert result[0].category == "Observed"
+        assert "keyword_overlap" in result[0].justification
+
+
+# ---------------------------------------------------------------------------
+# _find_nli_support
+# ---------------------------------------------------------------------------
+
+class TestFindNLISupport:
+    def test_exact_match_with_support(self):
+        nli_claims = [{
+            "text": "BTS has seven members",
+            "nli_result": {"best_entailment": 0.9, "supported": True},
+        }]
+        result = _find_nli_support("BTS has seven members", nli_claims)
+        assert result is not None
+        assert result["best_entailment"] == 0.9
+
+    def test_no_match_returns_none(self):
+        nli_claims = [{
+            "text": "Weather is sunny",
+            "nli_result": {"best_entailment": 0.9},
+        }]
+        result = _find_nli_support("BTS has seven members", nli_claims)
+        assert result is None
+
+    def test_empty_nli_claims(self):
+        assert _find_nli_support("any text", []) is None
+        assert _find_nli_support("any text", None) is None
+
+    def test_below_threshold_returns_none(self):
+        nli_claims = [{
+            "text": "BTS has seven members",
+            "nli_result": {"best_entailment": 0.3},
+        }]
+        result = _find_nli_support("BTS has seven members", nli_claims)
+        assert result is None

@@ -140,14 +140,27 @@ def set_stage_config(stage: str, provider: str = "openai", api_key: str = "",
 
 
 def get_stage_config(stage: str) -> dict:
-    """Return config for a stage. Falls back to global OpenAI config."""
-    with _stage_lock:
-        if stage in _stage_configs and _stage_configs[stage].get("api_key"):
-            return _stage_configs[stage]
-    # Fallback to global
-    return {
+    """Return config for a stage, merging with global defaults.
+
+    Stage overrides are always applied for any field that has a non-empty
+    value.  Missing fields inherit from the global OpenAI config.  This
+    allows "model-only" overrides without duplicating the API key.
+    """
+    global_defaults = {
         "provider": "openai",
         "api_key": get_api_key(),
         "model": get_model(),
         "base_url": "",
+    }
+    with _stage_lock:
+        stage_cfg = _stage_configs.get(stage)
+        if not stage_cfg:
+            return global_defaults
+
+    # Merge: stage values override globals when non-empty
+    return {
+        "provider": stage_cfg.get("provider") or global_defaults["provider"],
+        "api_key": stage_cfg.get("api_key") or global_defaults["api_key"],
+        "model": stage_cfg.get("model") or global_defaults["model"],
+        "base_url": stage_cfg.get("base_url") or global_defaults["base_url"],
     }

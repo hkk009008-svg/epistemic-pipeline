@@ -360,3 +360,110 @@ def _batch_classify_nli_remote(pairs: List[Tuple[str, str]]) -> List[Optional[di
         return resp.json()
     except Exception:
         return [None] * len(pairs)
+
+
+# ---------------------------------------------------------------------------
+# V4: Concurrent NLI verification via asyncio + ProcessPoolExecutor
+# ---------------------------------------------------------------------------
+
+# ProcessPoolExecutor for CPU-bound torch inference.
+# Avoids the GIL trap: Python threads share the GIL, so multiple
+# concurrent asyncio.to_thread(batch_classify_nli) calls would serialize
+# under the GIL when PyTorch runs CPU-bound C++ kernels. A process pool
+# gives each inference its own GIL and CPU cache, eliminating thread thrashing.
+import concurrent.futures
+_nli_process_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
+
+
+def _get_nli_process_pool() -> concurrent.futures.ProcessPoolExecutor:
+    """Lazily create a ProcessPoolExecutor for NLI inference."""
+    global _nli_process_pool
+    if _nli_process_pool is None:
+        # 2 workers: enough for concurrent claims without exhausting memory
+        # (each worker loads a separate copy of the 22M param model)
+        _nli_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=2)
+    return _nli_process_pool
+
+
+def _nli_worker(pairs: List[Tuple[str, str]]) -> List[Optional[dict]]:
+    """Process-pool worker: run batch NLI classification in an isolated process.
+
+    This function is invoked in a child process, avoiding GIL contention
+    with the main event loop and other inference tasks.
+    """
+    return batch_classify_nli(pairs)
+
+
+async def verify_claims_concurrently(
+    claims: List[dict],
+    evidence_snippets: List[str],
+) -> List[dict]:
+    """Run NLI verification on atomic claims concurrently using asyncio.
+
+    Uses ProcessPoolExecutor for local torch inference to avoid the GIL trap.
+    For remote NLI services (NLI_SERVICE_URL set), uses asyncio.to_thread()
+    since the work is I/O-bound (HTTP), not CPU-bound.
+
+    Falls back to the sequential verify_claims_with_nli() on any error.
+    """
+    import asyncio
+
+    if not claims or not evidence_snippets or not is_nli_available():
+        return claims
+
+    # Choose executor based on whether NLI is local (CPU-bound) or remote (I/O-bound)
+    use_process_pool = not NLI_SERVICE_URL
+
+    async def _verify_single_claim(claim: dict) -> dict:
+        claim_text = claim.get("text", "")
+        if not claim_text:
+            return claim
+
+        pairs = [(snippet, claim_text) for snippet in evidence_snippets]
+
+        try:
+            if use_process_pool:
+                # CPU-bound: use ProcessPoolExecutor to bypass GIL
+                loop = asyncio.get_running_loop()
+                pool = _get_nli_process_pool()
+                results = await loop.run_in_executor(pool, _nli_worker, pairs)
+            else:
+                # I/O-bound (remote service): thread pool is fine
+                results = await asyncio.to_thread(batch_classify_nli, pairs)
+        except Exception:
+            # Fallback to sync in-process if process pool fails
+            results = batch_classify_nli(pairs)
+
+        best_entailment = 0.0
+        worst_contradiction = 0.0
+        best_source_idx = -1
+        all_scores = []
+
+        for i, r in enumerate(results):
+            if r is None:
+                continue
+            ent_score = r["scores"].get("entailment", 0.0)
+            con_score = r["scores"].get("contradiction", 0.0)
+            all_scores.append({"source_idx": i, "entailment": ent_score, "contradiction": con_score})
+            if ent_score > best_entailment:
+                best_entailment = ent_score
+                best_source_idx = i
+            if con_score > worst_contradiction:
+                worst_contradiction = con_score
+
+        confidence_tier = _compute_confidence_tier(best_entailment, worst_contradiction)
+
+        claim["nli_result"] = {
+            "best_entailment": round(best_entailment, 4),
+            "worst_contradiction": round(worst_contradiction, 4),
+            "best_source_idx": best_source_idx,
+            "supported": best_entailment > ENTAILMENT_THRESHOLD,
+            "contradicted": worst_contradiction > CONTRADICTION_THRESHOLD,
+            "confidence_tier": confidence_tier,
+            "per_source_scores": all_scores,
+        }
+        return claim
+
+    # Run all claims concurrently
+    enriched = await asyncio.gather(*[_verify_single_claim(c) for c in claims])
+    return list(enriched)

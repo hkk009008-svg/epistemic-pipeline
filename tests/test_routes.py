@@ -194,6 +194,120 @@ class TestStageConfig:
 
 
 # ===================================================================
+# NLI status endpoint
+# ===================================================================
+
+class TestNLIStatus:
+    def test_nli_status_returns_structure(self):
+        r = client.get("/api/nli/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert "available" in data
+        assert "mode" in data
+        assert "thresholds" in data
+        assert "entailment" in data["thresholds"]
+
+    def test_health_includes_nli(self):
+        r = client.get("/health")
+        data = r.json()
+        assert "nli_available" in data
+        assert "nli_mode" in data
+
+
+# ===================================================================
+# V2 pipeline endpoint
+# ===================================================================
+
+class TestV2Pipeline:
+    def test_v2_pipeline_validation(self):
+        """V2 pipeline rejects empty prompt same as v1."""
+        r = client.post("/v2/pipeline", json={})
+        assert r.status_code == 422
+
+    def test_v2_pipeline_exists(self):
+        """V2 pipeline is reachable and returns error (no API key)."""
+        r = client.post("/v2/pipeline", json={"prompt": "test"})
+        assert r.status_code in (200, 400, 429)
+
+
+# ===================================================================
+# V2 admin and public capabilities
+# ===================================================================
+
+class TestV2Admin:
+    def test_v2_admin_config_accepted_no_auth(self):
+        """Without ADMIN_TOKEN set, admin endpoints are open."""
+        r = client.post("/v2/admin/config", json={
+            "stage": "gpt1",
+            "provider": "openai",
+            "api_key": "sk-test",
+            "model": "gpt-4o",
+        })
+        assert r.status_code == 200
+
+    def test_v2_admin_rejects_bad_base_url(self):
+        """base_url not in allowlist should be rejected."""
+        r = client.post("/v2/admin/config", json={
+            "stage": "gpt1",
+            "provider": "ollama",
+            "api_key": "ollama",
+            "model": "llama3",
+            "base_url": "http://evil.example.com/v1",
+        })
+        assert r.status_code == 400
+
+    def test_v2_admin_allows_localhost_base_url(self):
+        """Localhost base_url should be allowed."""
+        r = client.post("/v2/admin/config", json={
+            "stage": "gpt1",
+            "provider": "ollama",
+            "api_key": "ollama",
+            "model": "llama3",
+            "base_url": "http://localhost:11434/v1",
+        })
+        assert r.status_code == 200
+
+
+class TestV2PublicCapabilities:
+    def test_capabilities_returns_structure(self):
+        r = client.get("/v2/public/capabilities")
+        assert r.status_code == 200
+        data = r.json()
+        assert "providers" in data
+        assert "stages" in data
+        assert "tiers" in data
+        assert "nli_available" in data
+        assert "tavily_enabled" in data
+
+
+# ===================================================================
+# Stage config base_url validation
+# ===================================================================
+
+class TestBaseUrlValidation:
+    def test_stage_config_rejects_bad_base_url(self):
+        """base_url not in allowlist should be rejected."""
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "ollama",
+            "api_key": "ollama",
+            "model": "llama3",
+            "base_url": "http://internal-server.local/v1",
+        })
+        assert r.status_code == 400
+
+    def test_stage_config_accepts_openrouter_url(self):
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt1",
+            "provider": "openrouter",
+            "api_key": "or-test",
+            "model": "mix",
+            "base_url": "https://openrouter.ai/api/v1",
+        })
+        assert r.status_code == 200
+
+
+# ===================================================================
 # Stress endpoint - validation only
 # ===================================================================
 
