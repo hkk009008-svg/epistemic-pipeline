@@ -54,7 +54,7 @@ async def get_openai_client(app_state) -> openai.AsyncOpenAI:
 
 app = FastAPI(
     title="Epistemic Verification Pipeline",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
