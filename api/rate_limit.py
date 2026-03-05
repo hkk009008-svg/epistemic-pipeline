@@ -1,6 +1,7 @@
 """Simple in-memory per-IP rate limiter using a sliding window."""
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import defaultdict
@@ -17,6 +18,12 @@ _lock = threading.Lock()
 _CLEANUP_INTERVAL = 60.0
 _last_cleanup: float = 0.0
 
+# Number of trusted reverse proxies between the client and this server.
+# With depth=1 (default: single proxy like Railway), we take the last
+# X-Forwarded-For entry. With depth=2 (e.g. Cloudflare → Railway),
+# we take the second-to-last entry.
+_TRUSTED_PROXY_DEPTH = int(os.getenv("TRUSTED_PROXY_DEPTH", "1"))
+
 
 def _cleanup_expired(now: float, window: float) -> None:
     """Remove IPs whose timestamps are all older than the window."""
@@ -32,6 +39,27 @@ def _cleanup_expired(now: float, window: float) -> None:
         del _requests[ip]
 
 
+def _extract_client_ip(request: Request) -> str:
+    """Safely extract the real client IP from the request.
+
+    PaaS load balancers (Railway, Heroku, etc.) append the real client IP
+    to the *end* of the X-Forwarded-For chain.  Taking the first entry
+    (index 0) trusts user-supplied headers and allows trivial IP spoofing.
+
+    TRUSTED_PROXY_DEPTH controls how many proxy-appended entries to skip
+    from the right:
+    - depth=1 (default, single proxy): take [-1] (the proxy-appended IP)
+    - depth=2 (CDN + proxy): take [-2] (CDN-appended IP, skipping proxy)
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        parts = [p.strip() for p in forwarded.split(",")]
+        # Pick the entry at position -(depth), clamped to the first entry
+        idx = max(0, len(parts) - _TRUSTED_PROXY_DEPTH)
+        return parts[idx]
+    return request.client.host if request.client else "unknown"
+
+
 def get_rate_limit_info(request: Request) -> dict:
     """Return current rate limit usage for the request IP without consuming a slot."""
     limit = config.RATE_LIMIT_PER_MINUTE
@@ -39,8 +67,7 @@ def get_rate_limit_info(request: Request) -> dict:
     now = time.time()
     cutoff = now - window
 
-    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    ip = forwarded or (request.client.host if request.client else "unknown")
+    ip = _extract_client_ip(request)
 
     with _lock:
         timestamps = _requests.get(ip, [])
@@ -59,9 +86,8 @@ def rate_limit_dependency(request: Request) -> None:
     now = time.time()
     cutoff = now - window
 
-    # Resolve client IP (respect X-Forwarded-For behind a reverse proxy).
-    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    ip = forwarded or (request.client.host if request.client else "unknown")
+    # Resolve client IP — use rightmost X-Forwarded-For entry (set by ingress proxy).
+    ip = _extract_client_ip(request)
 
     with _lock:
         # Prune timestamps outside the current window for this IP.

@@ -34,16 +34,10 @@ _JURISDICTION_RE = re.compile(
     r"|Wyoming|Vermont|Maine|New Hampshire|Rhode Island"
     r"|South Dakota|North Dakota|Delaware|West Virginia|Alaska)\b"
 )
-def _build_future_year_re() -> re.Pattern:
-    """Build a regex matching years strictly after the current year.
-
-    Dynamic so it stays correct across year boundaries without code changes.
-    """
-    next_year = date.today().year + 1  # 2027 when current year is 2026
-    # Match next_year through 9999
-    return re.compile(rf"\b(?:{next_year}|20[3-9]\d|2[1-9]\d{{2}}|[3-9]\d{{3}})\b")
-
-_FUTURE_YEAR_RE = _build_future_year_re()
+# Match plausible 4-digit years (1900-2199) for runtime comparisons.
+# Narrower than \d{4} to avoid false positives on ZIP codes (90210),
+# port numbers (8080), or other non-temporal 4-digit sequences.
+_YEAR_RE = re.compile(r"\b((?:19|20|21)\d{2})\b")
 _CURRENT_EVENTS_RE = re.compile(
     r"(?i)\b(?:current|latest|recent|right now|today|now|this year"
     r"|as of|who is the|what is the current|new|newest|updated)\b"
@@ -61,12 +55,16 @@ _COMPARATIVE_RE = re.compile(
 
 def route_prompt(prompt: str) -> dict:
     """Deterministic heuristic router -- classifies prompt features for downstream use."""
+    current_year = date.today().year
+    future_year = any(
+        int(m.group(1)) > current_year for m in _YEAR_RE.finditer(prompt)
+    )
     return {
         "advice_requested": bool(_ADVICE_RE.search(prompt)),
         "percent_requested": bool(_PERCENT_RE.search(prompt)),
         "legal_mode": bool(_LEGAL_RE.search(prompt)),
         "jurisdiction_present": bool(_JURISDICTION_RE.search(prompt)),
-        "future_year": bool(_FUTURE_YEAR_RE.search(prompt)),
+        "future_year": future_year,
         "current_events": bool(_CURRENT_EVENTS_RE.search(prompt)),
         "comparative": bool(_COMPARATIVE_RE.search(prompt)),
     }
@@ -130,27 +128,13 @@ _OUTCOME_PROMISE_RE = re.compile(
     r"|could help|could assist|may improve|may help|could potentially)\b"
 )
 
-def _build_stale_date_re() -> re.Pattern:
-    """Build a regex matching 'as of [Month] YYYY' where YYYY < current year.
-
-    Dynamic so it catches last year's dates without annual code changes.
-    E.g. in 2026 this matches 2000-2025; in 2027 it matches 2000-2026.
-    """
-    last_year = date.today().year - 1  # 2025 when current year is 2026
-    last_digit = last_year % 10
-    # Match 2000 through last_year:
-    # 200[0-9] covers 2000-2009
-    # 201[0-9] covers 2010-2019
-    # 202[0-{last_digit}] covers 2020-202X
-    year_pattern = rf"20[0-1]\d|202[0-{last_digit}]"
-    return re.compile(
-        r"(?i)\bas of\s+(?:January|February|March|April|May|June|July|August"
-        r"|September|October|November|December)?\s*(?:" + year_pattern + r")\b"
-    )
-
 # Stale date qualifier — "as of [Month] [Year]" where year is before current year
-# Used when current_events flag is set to catch stale time-sensitive claims
-_STALE_DATE_RE = _build_stale_date_re()
+# Used when current_events flag is set to catch stale time-sensitive claims.
+# Captures the year for runtime comparison instead of fragile regex math.
+_STALE_DATE_BASE_RE = re.compile(
+    r"(?i)\bas of\s+(?:January|February|March|April|May|June|July|August"
+    r"|September|October|November|December)?\s*(20\d{2})\b"
+)
 
 # Pre-compiled whitespace cleanup patterns (avoid re.sub recompilation per call)
 _MULTI_SPACE_RE = re.compile(r"  +")
@@ -201,9 +185,14 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
     # ---- G6: Stale dates (strict and standard only) ----
     if tier in ("strict", "standard"):
         if flags.get("current_events"):
-            result = _STALE_DATE_RE.sub(
-                "[Stale — verify current status from an authoritative source]", result
-            )
+            current_year = date.today().year
+
+            def _replace_stale(match: re.Match) -> str:
+                if int(match.group(1)) < current_year:
+                    return "[Stale — verify current status from an authoritative source]"
+                return match.group(0)
+
+            result = _STALE_DATE_BASE_RE.sub(_replace_stale, result)
 
     # ---- Legal mode extra (strict and standard only) ----
     if tier in ("strict", "standard"):

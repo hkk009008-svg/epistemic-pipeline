@@ -497,3 +497,86 @@ class TestSanitizeTierGating:
         text = "Hello   world   today."
         result = sanitize_output(text, flags_all_false, tier="light")
         assert "  " not in result
+
+
+# ===================================================================
+# Regression: temporal detection (year regex hardening)
+# ===================================================================
+
+class TestFutureYearRegression:
+    """Verify runtime year comparison catches all future years without gaps."""
+
+    def test_year_2028_detected_as_future(self):
+        """Regression: old regex had a gap for 2028-2029."""
+        flags = route_prompt("What happens in 2028?")
+        assert flags["future_year"] is True
+
+    def test_year_2029_detected_as_future(self):
+        """Regression: old regex had a gap for 2028-2029."""
+        flags = route_prompt("Predictions for 2029.")
+        assert flags["future_year"] is True
+
+    def test_year_2100_detected_as_future(self):
+        """Years in the 2100s should be detected as future."""
+        flags = route_prompt("By the year 2100 what happens?")
+        assert flags["future_year"] is True
+
+    def test_zip_code_not_detected_as_future(self):
+        """ZIP codes like 90210 should NOT be detected as a year."""
+        flags = route_prompt("What's the weather in 90210?")
+        assert flags["future_year"] is False
+
+    def test_port_number_not_detected_as_future(self):
+        """Port numbers like 8080 should NOT be detected as a year."""
+        flags = route_prompt("Connect to port 8080 for the API.")
+        assert flags["future_year"] is False
+
+    def test_current_year_not_future(self):
+        """The current year should not be flagged as future."""
+        from datetime import date
+        year = date.today().year
+        flags = route_prompt(f"What is happening in {year}?")
+        assert flags["future_year"] is False
+
+    def test_past_year_not_future(self):
+        flags = route_prompt("Events of 2020.")
+        assert flags["future_year"] is False
+
+
+class TestStaleDateRegression:
+    """Verify stale date detection uses runtime comparison, not regex math."""
+
+    def test_stale_date_detected(self):
+        """A date before current year should be flagged as stale."""
+        flags = {
+            "advice_requested": False, "percent_requested": False,
+            "legal_mode": False, "jurisdiction_present": False,
+            "future_year": False, "current_events": True, "comparative": False,
+        }
+        text = "As of January 2020, the rate was 5%."
+        result = sanitize_output(text, flags, tier="strict")
+        assert "[Stale" in result
+
+    def test_current_year_not_stale(self):
+        """Current year should NOT be flagged as stale."""
+        from datetime import date
+        year = date.today().year
+        flags = {
+            "advice_requested": False, "percent_requested": False,
+            "legal_mode": False, "jurisdiction_present": False,
+            "future_year": False, "current_events": True, "comparative": False,
+        }
+        text = f"As of January {year}, the rate was 5%."
+        result = sanitize_output(text, flags, tier="strict")
+        assert "[Stale" not in result
+
+    def test_stale_not_applied_without_current_events(self):
+        """Stale detection only triggers when current_events flag is set."""
+        flags = {
+            "advice_requested": False, "percent_requested": False,
+            "legal_mode": False, "jurisdiction_present": False,
+            "future_year": False, "current_events": False, "comparative": False,
+        }
+        text = "As of January 2020, the rate was 5%."
+        result = sanitize_output(text, flags, tier="strict")
+        assert "[Stale" not in result
