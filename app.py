@@ -22,7 +22,6 @@ _client_lock = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-async def lifespan(app: FastAPI):
     """Create a shared AsyncOpenAI client at startup, close on shutdown."""
     # Initialize database tables on startup
     db.init_db()
