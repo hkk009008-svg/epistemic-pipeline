@@ -1,6 +1,6 @@
 # Epistemic Verification Pipeline
 
-A 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a **Generator → Verifier → Arbiter** architecture with the Audit v7 epistemic framework to catch hallucinations, fabricated statistics, unsupported causal claims, and prescriptive creep before they reach users.
+A 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a **Generator → Verifier → Arbiter** architecture with the Audit v8 epistemic framework to catch hallucinations, fabricated statistics, unsupported causal claims, and prescriptive creep before they reach users.
 
 ## The Problem
 
@@ -123,7 +123,7 @@ Admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>` when `ADMIN_TOKEN`
 
 | Tier | Description |
 |------|-------------|
-| **strict** | Full Audit v7 — all tripwire checks, arbiter rewrite loops, maximum scrutiny |
+| **strict** | Full Audit v8 — all tripwire checks, arbiter rewrite loops, maximum scrutiny |
 | **standard** | Balanced — core fact-checking, relaxed on stylistic violations |
 | **light** | Fast fact-check only — catches fabrications, skips prescriptive/ranking checks |
 
@@ -132,7 +132,7 @@ Admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>` when `ADMIN_TOKEN`
 ```
 pipeline/
   orchestrator.py     # Core pipeline flow with stage event emission
-  prompts.py          # Audit v7 system prompts and flag-aware augmentation
+  prompts.py          # Audit v8 system prompts and flag-aware augmentation
   sanitizer.py        # Deterministic routing (flags) and citation-aware output cleaning
   verifier.py         # GPT-2 JSON parsing, verdict computation, reasoning trace
   arbiter.py          # GPT-3 decision parsing, edit application

@@ -1,7 +1,7 @@
 """Deterministic prompt router and output sanitizer.
 
 These run before/after LLM calls to reduce nondeterminism.
-The sanitizer enforces Audit v7 global rules deterministically.
+The sanitizer enforces Audit v8 global rules deterministically.
 """
 from __future__ import annotations
 

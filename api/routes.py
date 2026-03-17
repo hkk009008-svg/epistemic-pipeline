@@ -15,7 +15,7 @@ from collections import defaultdict
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 
 from api.rate_limit import rate_limit_dependency, get_rate_limit_info
 
@@ -26,7 +26,7 @@ from pipeline.orchestrator import run_pipeline, run_pipeline_async
 from pipeline.stress import generate_stress_results
 from pipeline.metrics import get_aggregate
 from pipeline.feedback import FeedbackEntry, get_feedback_store
-from api.ui import UI_HTML
+from database.client import get_full_graph
 
 router = APIRouter()
 
@@ -135,9 +135,10 @@ def _require_admin(request: Request):
 
 # ---- UI ----
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=FileResponse)
 def ui():
-    return UI_HTML
+    # Serve the newly overhauled static HTML file
+    return FileResponse("static/html/index.html")
 
 
 # ---- Health check (for Railway / load balancers) ----
@@ -289,6 +290,14 @@ def feedback_summary():
     return get_feedback_store().get_summary()
 
 
+# ---- Ledger ----
+
+@router.get("/api/ledger")
+def get_ledger_data():
+    """Returns the full Epistemic Knowledge Graph for visualization."""
+    return get_full_graph()
+
+
 # ---- Pipeline ----
 
 # Server-side timeout (seconds) — must finish before the CDN/proxy timeout
@@ -431,7 +440,10 @@ async def pipeline_endpoint(req: PipelineRequest, request: Request):
         )
     except PipelineError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"Async pipeline failed: {e}")
+        traceback.print_exc()
         # Fallback to sync path if async pipeline fails unexpectedly
         loop = asyncio.get_event_loop()
         try:

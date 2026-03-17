@@ -12,6 +12,7 @@ import threading
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 PIPELINE_URL = os.getenv("PIPELINE_URL", "http://localhost:8000")
+DATABASE_URL = os.getenv("DATABASE_URL", "") # Add Railway Postgres Connection
 PORT = int(os.getenv("PORT", "8000"))
 MAX_REWRITE_LOOPS = 3
 MAX_PROMPT_LENGTH = 10000

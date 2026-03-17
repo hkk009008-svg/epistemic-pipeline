@@ -7,7 +7,8 @@ Using total=False so stages only need to set what they produce.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional, TypedDict
+import operator
+from typing import Any, Callable, List, Optional, TypedDict, Annotated
 
 from pipeline.models import ConfidenceBreakdown, PipelineRequest, PipelineResponse, SearchSource
 
@@ -29,7 +30,11 @@ class PipelineState(TypedDict, total=False):
 
     # -- Routing --
     flags: dict
-
+    
+    # LangGraph explicit routing flags (replacing early_return magic)
+    is_bypassed: bool
+    is_pass: bool
+    
     # -- Search --
     search_sources: List[SearchSource]
     search_context: str
@@ -94,6 +99,7 @@ class PipelineState(TypedDict, total=False):
     # -- Final --
     final_verdict: str
     final_result: str
+    final_response: PipelineResponse # LangGraph final sink
     confidence: ConfidenceBreakdown
     meta_verification: Optional[dict]
 

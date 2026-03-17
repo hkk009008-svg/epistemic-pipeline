@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-A FastAPI-based 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a Generator → Verifier → Arbiter architecture with the **Audit v7 epistemic framework** (priority stack V1-V7, global rules G1-G12, tripwire violations T1-T7). Includes Tavily web search integration, deterministic sanitization, convergence-aware rewrite loops, multi-provider LLM support, atomic claim decomposition, optional NLI verification, and a comprehensive stress-testing framework.
+A FastAPI-based 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a Generator → Verifier → Arbiter architecture with the **Audit v8 epistemic framework** (priority stack V1-V7, global rules G1-G12, tripwire violations T1-T7). Includes Tavily web search integration, deterministic sanitization, convergence-aware rewrite loops, multi-provider LLM support, atomic claim decomposition, optional NLI verification, and a comprehensive stress-testing framework.
 
-**Version:** 3.0.0 | **Python:** 3.11.11 | **Prompt Version:** 7.1.0 (Audit v7)
+**Version:** 3.0.0 | **Python:** 3.11.11 | **Prompt Version:** 7.1.0 (Audit v8)
 
 ## Repository Structure
 
@@ -27,7 +27,7 @@ api/
 pipeline/
   orchestrator.py       # Main pipeline logic: run_pipeline(), confidence scoring
   models.py             # Pydantic request/response models
-  prompts.py            # GPT-1/2/3 system prompts, Audit v7 rules, build_augmentation()
+  prompts.py            # GPT-1/2/3 system prompts, Audit v8 rules, build_augmentation()
   sanitizer.py          # Deterministic routing (route_prompt) and citation-aware output cleaning
   verifier.py           # GPT-2 JSON parsing (parse_gpt2), verdict computation, reasoning trace
   arbiter.py            # GPT-3 decision parsing (parse_gpt3), edit application
@@ -79,7 +79,7 @@ python -m pytest tests/ -v
 User Prompt
   → route_prompt()          # Deterministic flag extraction (advice, legal, current_events, etc.)
   → perform_web_search()    # Tavily search if flags warrant it (optional)
-  → GPT-1 (Generator)       # Produces response using Audit v7 + flag augmentation + search context
+  → GPT-1 (Generator)       # Produces response using Audit v8 + flag augmentation + search context
   → Activation bypass check  # Skip verification if output matches activation patterns
   → sanitize_output()       # Citation-aware: strip bare %, banned evidence, typicality; preserve cited stats
   → decompose_claims()      # Atomic claim decomposition (pre-GPT-2, best-effort)
@@ -198,6 +198,6 @@ GitHub Actions workflow (`.github/workflows/docker-image.yml`) builds a Docker i
 
 - Never commit `.env` files — they contain API keys. Use `.env.example` as a template.
 - The `ui.py` file contains a large embedded HTML string (~62KB) for the chat UI — avoid reformatting it.
-- The Audit v7 framework prompts in `prompts.py` are carefully tuned — changes to system prompts should be validated with stress tests.
+- The Audit v8 framework prompts in `prompts.py` are carefully tuned — changes to system prompts should be validated with stress tests.
 - Sanitizer rules and GPT-2 augmentation must stay in sync — if you change what the sanitizer strips, update GPT-2's awareness of those patterns.
 - The GPT-2 prompt is split: core in `DEFAULT_GPT2_SYSTEM`, detailed tripwire reference in `GPT2_TRIPWIRE_REFERENCE` (injected into user content). Keep both in sync.

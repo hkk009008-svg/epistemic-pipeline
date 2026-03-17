@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - Initial 3-stage pipeline: Generator (GPT-1) → Verifier (GPT-2) → Arbiter (GPT-3).
-- Audit v7 epistemic framework (V1-V7 priority stack, G1-G12 global rules, T1-T7 tripwire violations).
+- Audit v8 epistemic framework (V1-V7 priority stack, G1-G12 global rules, T1-T7 tripwire violations).
 - Tavily web search integration.
 - Deterministic routing and sanitization.
 - Embedded web chat UI.

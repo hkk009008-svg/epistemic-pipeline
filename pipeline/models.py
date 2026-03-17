@@ -37,6 +37,25 @@ class EditEntry(BaseModel):
     target_id: str = ""  # UUID from decomposer — enables deterministic edits
 
 
+class GraphNode(BaseModel):
+    id: str
+    name: str
+    type: str = "concept"
+    created_at: str = ""
+
+
+class GraphClaim(BaseModel):
+    id: str
+    subject_id: str
+    relation: str
+    object_id: str
+    source_id: Optional[str] = None
+    confidence: str = "High"
+    original_text: Optional[str] = None
+    ttl_expires_at: Optional[str] = None
+    created_at: str = ""
+
+
 class GroundingInfo(BaseModel):
     """NLI-backed claim grounding rate metrics."""
     grounding_rate: float = 0.0

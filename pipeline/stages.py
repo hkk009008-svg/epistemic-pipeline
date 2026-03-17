@@ -110,6 +110,13 @@ def _base_response(state: PipelineState, **overrides) -> PipelineResponse:
         gpt1_input=state["prompt"],
         gpt1_output=state.get("gpt1_output", ""),
         prompt_flags=state.get("flags", {}),
+        bypassed=state.get("is_bypassed", False),
+        gpt2_raw=state.get("gpt2_raw", ""),
+        claim_table=state.get("claim_table", []),
+        violations=state.get("violations", []),
+        gpt2_verdict=state.get("gpt2_verdict", "PASS"),
+        final_verdict=state.get("final_verdict", "PASS"),
+        final_result=state.get("final_result", state.get("gpt1_output", "")),
     )
     base.update(state.get("empty_arbiter", {}))
     base.update(state.get("search_kwargs", {}))
@@ -147,6 +154,12 @@ async def stage_init(state: PipelineState) -> dict:
         "gpt3_cfg": config.get_stage_config("gpt3"),
         "tier": tier,
         "output_format": output_format,
+        "empty_arbiter": {
+            "arbiter_invoked": False, "arbiter_decision": "", "arbiter_rationale": [],
+            "arbiter_edits": [], "arbiter_policy_notes": [], "arbiter_raw": "",
+            "rewrite_occurred": False, "rewrite_output": "", "rewrite_gpt2_raw": "",
+            "rewrite_claim_table": [], "rewrite_violations": [], "rewrite_verdict": "",
+        }
     }
 
 
@@ -363,15 +376,20 @@ async def stage_check_fast_paths(state: PipelineState) -> dict:
         metrics.bypassed = True
         metrics.finish()
         record_run(metrics)
-        return {"early_return": _base_response(
-            state, bypassed=False, gpt2_raw="(current-events fast path — no web search available)",
-            claim_table=[], violations=[], gpt2_verdict="PASS",
-            final_verdict="PASS", final_result=fast_output, sanitizer_applied=True,
-            confidence=ConfidenceBreakdown(
+        return {
+            "is_bypassed": True,
+            "final_verdict": "PASS",
+            "final_result": fast_output,
+            "sanitizer_applied": True,
+            "gpt2_raw": "(current-events fast path — no web search available)",
+            "gpt2_verdict": "PASS",
+            "claim_table": [],
+            "violations": [],
+            "confidence": ConfidenceBreakdown(
                 observed_pct=0, inference_pct=0, hypothesis_pct=0,
                 unsupported_pct=0, user_provided_pct=0, total_claims=0, confidence_label="Low",
-            ),
-        )}
+            )
+        }
 
     # Activation bypass
     if is_activation_phrase(gpt1_output):
@@ -379,12 +397,17 @@ async def stage_check_fast_paths(state: PipelineState) -> dict:
         metrics.final_verdict = "PASS"
         metrics.finish()
         record_run(metrics)
-        return {"early_return": _base_response(
-            state, bypassed=True, gpt2_raw="(bypassed)",
-            claim_table=[], violations=[], gpt2_verdict="PASS",
-            final_verdict="PASS", final_result=gpt1_output, sanitizer_applied=False,
-            confidence=compute_confidence([]),
-        )}
+        return {
+            "is_bypassed": True,
+            "final_verdict": "PASS",
+            "final_result": gpt1_output,
+            "sanitizer_applied": False,
+            "gpt2_raw": "(bypassed)",
+            "gpt2_verdict": "PASS",
+            "claim_table": [],
+            "violations": [],
+            "confidence": compute_confidence([]),
+        }
 
     return {}
 
@@ -632,15 +655,13 @@ async def stage_verify(state: PipelineState) -> dict:
         metrics.confidence_label = conf.confidence_label
         metrics.finish()
         record_run(metrics)
-        updates["early_return"] = _base_response(
-            state, bypassed=False,
-            gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
-            gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
-            final_verdict="PASS", final_result=state["sanitized_output"],
-            sanitizer_applied=state.get("sanitizer_applied", False),
-            confidence=conf,
-            meta_verification=meta_result if meta_result["ran"] else None,
-        )
+        updates.update({
+            "is_pass": True,
+            "final_verdict": "PASS",
+            "final_result": state.get("sanitized_output", ""),
+            "confidence": conf,
+            "meta_verification": meta_result if meta_result["ran"] else None,
+        })
         return updates
 
     # Meta-verify FAIL override
@@ -658,15 +679,14 @@ async def stage_verify(state: PipelineState) -> dict:
             metrics.confidence_label = conf.confidence_label
             metrics.finish()
             record_run(metrics)
-            updates["early_return"] = _base_response(
-                state, bypassed=False,
-                gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
-                gpt2_verdict="PASS", gpt2_reasoning=gpt2_reasoning,
-                final_verdict="PASS", final_result=state["sanitized_output"],
-                sanitizer_applied=state.get("sanitizer_applied", False),
-                confidence=conf,
-                meta_verification={"type": "false_fail_override", "reason": fail_meta["reason"]},
-            )
+            updates.update({
+                "is_pass": True,
+                "final_verdict": "PASS",
+                "final_result": state.get("sanitized_output", ""),
+                "confidence": conf,
+                "meta_verification": {"type": "false_fail_override", "reason": fail_meta["reason"]},
+            })
+            return updates
 
     return updates
 
@@ -697,20 +717,24 @@ async def stage_soft_retry(state: PipelineState) -> dict:
         metrics.convergence_outcome = "pass"
         metrics.finish()
         record_run(metrics)
-        return {"early_return": _base_response(
-            state, bypassed=False,
-            gpt2_raw=state["gpt2_raw"], claim_table=state["claim_table"],
-            violations=state["violations"],
-            gpt2_verdict=state["gpt2_verdict"], gpt2_reasoning=state["gpt2_reasoning"],
-            rewrite_occurred=True, rewrite_output=state["sanitized_output"],
-            rewrite_gpt2_raw=result["gpt2_raw"], rewrite_claim_table=result["claim_table"],
-            rewrite_violations=result["violations"], rewrite_verdict=result["verdict"],
-            rewrite_reasoning=result["reasoning"],
-            arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
-            arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
-            final_verdict="PASS", final_result=state["sanitized_output"],
-            sanitizer_applied=True, confidence=conf,
-        )}
+        return {
+            "is_pass": True, # Triggers early return in Graph
+            "rewrite_occurred": True,
+            "rewrite_output": state.get("sanitized_output", ""),
+            "rewrite_gpt2_raw": result["gpt2_raw"],
+            "rewrite_claim_table": result["claim_table"],
+            "rewrite_violations": result["violations"],
+            "rewrite_verdict": result["verdict"],
+            "rewrite_reasoning": result["reasoning"],
+            "arbiter_invoked": False,
+            "arbiter_decision": "",
+            "arbiter_rationale": [],
+            "arbiter_edits": [],
+            "final_verdict": "PASS",
+            "final_result": state.get("sanitized_output", ""),
+            "sanitizer_applied": True,
+            "confidence": conf,
+        }
 
     return {}
 
@@ -790,20 +814,12 @@ async def stage_arbiter(state: PipelineState) -> dict:
         metrics.confidence_label = block_conf.confidence_label
         metrics.finish()
         record_run(metrics)
-        updates["early_return"] = _base_response(
-            state, bypassed=False,
-            gpt2_raw=state["gpt2_raw"], claim_table=claim_table,
-            violations=state["violations"],
-            gpt2_verdict=state["gpt2_verdict"], gpt2_reasoning=state["gpt2_reasoning"],
-            arbiter_invoked=True, arbiter_decision="BLOCK",
-            arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
-            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
-            rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
-            rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
-            final_verdict="FAIL", final_result=_fail_message(flags, state.get("search_performed", False)),
-            sanitizer_applied=state.get("sanitizer_applied", False),
-            confidence=block_conf,
-        )
+        updates.update({
+            "is_pass": False,
+            "final_verdict": "FAIL",
+            "final_result": _fail_message(flags, state.get("search_performed", False)),
+            "confidence": block_conf,
+        })
         return updates
 
     # ---- ALLOW_AS_UNKNOWN_ONLY ----

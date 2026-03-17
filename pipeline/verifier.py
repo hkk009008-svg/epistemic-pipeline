@@ -1,6 +1,6 @@
 """GPT-2 Verifier: parses verification output and recomputes verdicts.
 
-Supports Audit v7 tripwire types (T1-T7) and legacy finding type names.
+Supports Audit v8 tripwire types (T1-T7) and legacy finding type names.
 Provides both legacy text parsing (parse_gpt2) and structured output
 parsing (parse_gpt2_structured) for the V4 async pipeline.
 """
@@ -29,7 +29,7 @@ _LEGACY_SEVERITY = {
     "Unverified current fact": "hard",
 }
 
-# Map legacy finding type names to Audit v7 tripwire codes
+# Map legacy finding type names to Audit v8 tripwire codes
 _LEGACY_TO_TRIPWIRE = {
     "Fabricated statistic": "T1",
     "Fabricated citation": "T1",

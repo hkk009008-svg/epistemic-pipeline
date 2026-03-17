@@ -31,7 +31,7 @@ The Epistemic Verification Pipeline is a technically sophisticated 3-stage LLM f
 |------|-----------|------|
 | **UI/UX** | Professional dark-mode design, collapsible details, stress test UI | No streaming, time-based fake progress, confidence not explained, no conversation history |
 | **Pipeline** | Robust 3-stage architecture, convergence detection, source matching | Sequential LLM calls (2-7 per request), no async execution, decomposer always runs |
-| **Verification** | Audit v7 framework, T1-T7 tripwires, reasoning traces | GPT-2 conflicts with source rules, NLI underutilized, meta-verify only on PASS |
+| **Verification** | Audit v8 framework, T1-T7 tripwires, reasoning traces | GPT-2 conflicts with source rules, NLI underutilized, meta-verify only on PASS |
 | **Search** | Tavily integration, authority scoring, flag-aware triggering | No fallback provider, authority ignores recency, zero-results silent fallback |
 | **Performance** | Client caching, pre-compiled regex, connection pooling | No semantic caching, no response dedup, sequential best-of-N |
 | **Testing** | 523 unit tests, 100 stress cases, 10 categories | No CI test execution, no integration tests, no latency/cost tracking in PSS |

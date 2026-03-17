@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Epistemic Verification Terminal</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+
+<div class="top-bar">
+  <h1><span class="g1">EPISTEMIC</span><span class="arr">/</span><span class="g2">VERIFICATION</span><span class="arr">/</span><span class="g3">TERMINAL</span></h1>
+  <div class="right-controls">
+    <button class="cfg-btn tab-btn active" id="tab-chat" onclick="switchTab('chat')">CHAT</button>
+    <button class="cfg-btn tab-btn" id="tab-ledger" onclick="switchTab('ledger')">LEDGER DB</button>
+    <div style="width: 1px; height: 16px; background: var(--border-subtle); margin: 0 4px;"></div>
+    <button class="cfg-btn stress-btn" onclick="stress()" title="System Diagnostic">DIAGNOSTIC</button>
+    <button class="cfg-btn" onclick="openCfg()" title="Terminal Config"><svg class="gear-icon" viewBox="0 0 24 24"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg> CONFIG</button>
+  </div>
+</div>
+
+<div class="cfg-overlay" id="cfg-overlay" onclick="closeCfg()"></div>
+<div class="cfg-drawer" id="cfg-drawer">
+  <div class="cfg-drawer-header">
+    <h2>TERMINAL_CONFIG</h2>
+    <button class="cfg-close-btn" onclick="closeCfg()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+  </div>
+  <div class="cfg-in">
+    <div class="cfg-section">
+      <div class="cfg-section-title">ENGINE: GPT-1 / GPT-2 / GPT-3</div>
+      <label>OpenAI Authentication Token</label>
+      <div class="cfg-row">
+        <input type="password" id="cfg-oai-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+        <button class="btn-s" onclick="saveOai()" id="btn-oai">AUTHORIZE</button>
+      </div>
+      <div class="cfg-st" id="st-oai">Checking node link...</div>
+    </div>
+    
+    <div class="cfg-divider"></div>
+    
+    <div class="cfg-section">
+      <div class="cfg-section-title tavily">TAVILY / WEB SEARCH NODE</div>
+      <label>Tavily Search API Key (Optional)</label>
+      <div class="cfg-row">
+        <input type="password" id="cfg-tav-key" placeholder="tvly-..." spellcheck="false" autocomplete="off">
+        <button class="btn-s" onclick="saveTav()" id="btn-tav">AUTHORIZE</button>
+      </div>
+      <div class="cfg-st" id="st-tav">Checking node link...</div>
+      <label class="tavily-toggle">
+        <input type="checkbox" id="cfg-tav-en" onchange="toggleTav(this.checked)">
+        <span>Enable live web ingestion</span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<div class="chat" id="ch">
+  <div class="ld" style="padding-top:40px;opacity:0.6" id="welcome">
+    <div style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px;font-family:monospace;color:var(--accent-emerald);">[ SYSTEM ONLINE ] EPISTEMIC TERMINAL INITIATED</div>
+    <div style="font-size:13px;color:var(--text-tertiary);">Awaiting strict analytical queries.</div>
+    <div class="welcome-examples" style="margin-top:20px;">
+      <button class="welcome-chip" onclick="tryExample(this)">Is staking income taxable in the US?</button>
+      <button class="welcome-chip" onclick="tryExample(this)">What percentage of startups fail?</button>
+    </div>
+  </div>
+</div>
+
+<div class="ledger-view" id="ledger-view" style="display: none;">
+  <div class="ledger-header">
+    <h2 style="font-size: 14px; font-weight: 600; font-family: var(--font-mono); color: var(--accent-emerald);">EPISTEMIC KNOWLEDGE GRAPH</h2>
+    <div style="font-size: 11px; color: var(--text-tertiary); max-width: 600px; margin-top: 4px;">This is the persistent ledger of verified facts extracted from successful audits. The pipeline uses this knowledge as absolute truth during the L0 Pre-Fetch and L3 Contradiction Alarm phases.</div>
+    <button class="btn-s" style="margin-top: 12px;" onclick="loadLedgerGraph()">REFRESH GRAPH</button>
+  </div>
+  <div id="kg-network"></div>
+</div>
+
+<div class="ibar" id="ibar-container">
+  <div class="tier-bar">
+    <div class="tier-group">
+      <span class="tier-label">AUDIT PROTOCOL</span>
+      <div class="tier-pills" id="tier-pills">
+        <button class="tier-pill active" data-val="strict" onclick="setTier(this)" id="t-strict">STRICT [v8]</button>
+        <button class="tier-pill" data-val="standard" onclick="setTier(this)" id="t-standard">STANDARD</button>
+      </div>
+    </div>
+  </div>
+  <div class="tier-desc" id="tier-desc" style="font-family:monospace;font-size:10px;">[v8] Full Audit rules &mdash; typicality stripped, bare stats require citations.</div>
+  
+  <div class="inp-box">
+    <textarea id="ui" placeholder="> Initiate query. Press Enter to submit string." rows="1" onkeydown="kd(event)"></textarea>
+    <button class="send-btn" id="sbtn" onclick="send()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+    </button>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

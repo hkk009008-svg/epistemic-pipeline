@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from pipeline.models import PipelineRequest
 from pipeline.orchestrator import run_pipeline
 
-# "Soft" violations -- procedural, not fabrication-level (Audit v7 T4-T6 + legacy)
+# "Soft" violations -- procedural, not fabrication-level (Audit v8 T4-T6 + legacy)
 SOFT_VIOLATIONS = {
     "Prescriptive creep", "Unsupported evidence reference", "Missing jurisdiction",
     "T4", "T5", "T6",
