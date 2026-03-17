@@ -15,6 +15,7 @@ from fastapi import HTTPException
 import config
 from api.routes import router
 import database.client as db
+from pipeline.helpers import PipelineError
 
 # Lock protecting the shared OpenAI client against concurrent key-rotation races
 _client_lock = asyncio.Lock()
@@ -116,6 +117,10 @@ async def global_exception_handler(request: Request, exc: Exception):
         detail = getattr(exc, "detail", "Internal Server Error")
         return JSONResponse(
             status_code=status_code, content={"error": True, "detail": detail}
+        )
+    if isinstance(exc, PipelineError):
+        return JSONResponse(
+            status_code=exc.status_code, content={"error": True, "detail": exc.detail}
         )
     # Never expose raw exception messages — they can leak API keys, internal URLs
     logging.exception("Unhandled exception: %s", exc)
