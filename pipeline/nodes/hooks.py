@@ -20,7 +20,7 @@ async def stage_hooks(state: GraphState) -> dict:
             state["emit"]("status", f"Search completed: {note}")
         except Exception as e:
             hook_results.append(HookResult(
-                tool_name="search",
+                tool="search",
                 data=[],
                 note=f"Search failed: {e}"
             ))

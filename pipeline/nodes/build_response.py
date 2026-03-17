@@ -11,7 +11,7 @@ async def stage_build_response(state: GraphState) -> dict:
         final_result=state.get("evaluation_result", ""),
         final_verdict=state.get("final_verdict", "FAIL"),
         verdict_label=state.get("verdict_label", "Error"),
-        reasoning=state.get("reasoning", [])
+        reasoning="\n".join(state.get("reasoning", []))
     )
 
     state["emit"]("done", "")

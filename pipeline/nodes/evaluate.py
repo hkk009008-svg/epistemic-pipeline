@@ -17,7 +17,7 @@ async def stage_evaluate(state: GraphState) -> dict:
     # Prepare context
     context = []
     for hr in hook_results:
-        context.append(f"--- Tool: {hr.tool_name} ---\nNote: {hr.note}\nData: {json.dumps(hr.data, indent=2)}")
+        context.append(f"--- Tool: {hr.tool} ---\nNote: {hr.note}\nData: {json.dumps(hr.data, indent=2)}")
     
     context_str = "\n".join(context)
 
