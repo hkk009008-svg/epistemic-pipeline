@@ -3,6 +3,7 @@
 Reads from env vars at import time, with runtime override via API.
 Thread-safe runtime config access.
 """
+
 from __future__ import annotations
 
 import os
@@ -12,7 +13,7 @@ import threading
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 PIPELINE_URL = os.getenv("PIPELINE_URL", "http://localhost:8000")
-DATABASE_URL = os.getenv("DATABASE_URL", "") # Add Railway Postgres Connection
+DATABASE_URL = os.getenv("DATABASE_URL", "")  # Add Railway Postgres Connection
 PORT = int(os.getenv("PORT", "8000"))
 MAX_REWRITE_LOOPS = 3
 MAX_PROMPT_LENGTH = 10000
@@ -35,6 +36,7 @@ def set_runtime_config(api_key: str, model: str | None = None):
     # Invalidate cached LLM clients so they pick up the new key
     try:
         from pipeline.helpers import invalidate_client_cache
+
         invalidate_client_cache()
     except ImportError:
         pass
@@ -114,8 +116,13 @@ _stage_lock = threading.Lock()
 PROVIDERS = {"openai", "anthropic", "openrouter", "ollama"}
 
 
-def set_stage_config(stage: str, provider: str = "openai", api_key: str = "",
-                     model: str = "", base_url: str = ""):
+def set_stage_config(
+    stage: str,
+    provider: str = "openai",
+    api_key: str = "",
+    model: str = "",
+    base_url: str = "",
+):
     """Configure a specific pipeline stage (gpt1, gpt2, gpt3).
 
     provider: "openai" | "anthropic" | "openrouter" | "ollama"
@@ -135,6 +142,7 @@ def set_stage_config(stage: str, provider: str = "openai", api_key: str = "",
     # Invalidate cached LLM clients so they pick up the new stage config
     try:
         from pipeline.helpers import invalidate_client_cache
+
         invalidate_client_cache()
     except ImportError:
         pass

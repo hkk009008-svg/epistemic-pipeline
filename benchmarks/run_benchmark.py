@@ -10,6 +10,7 @@ Usage:
     python benchmarks/run_benchmark.py --baseline --output results.json
     python benchmarks/run_benchmark.py --tier standard --count 5
 """
+
 from __future__ import annotations
 
 import argparse
@@ -26,13 +27,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 from pipeline.models import PipelineRequest
-from pipeline.orchestrator import run_pipeline
+from pipeline.runner import generate_pipeline
 from pipeline.helpers import call_llm
 from pipeline.stress import compute_pss_metrics, has_leaked_stats
 
 
-def load_tests(tests_path: str, category: str | None = None, count: int | None = None) -> list:
-    """Load test cases from tests.json, optionally filtering."""
+def load_tests(
+    tests_path: str, category: str | None = None, count: int | None = None
+) -> list:
+    """Load test cases from tests/tests.json, optionally filtering."""
     with open(tests_path, "r", encoding="utf-8") as f:
         tests = json.load(f)
 
@@ -55,13 +58,14 @@ def run_pipeline_test(test: dict, tier: str = "strict") -> dict:
     start = time.time()
     try:
         req = PipelineRequest(prompt=test["prompt"], tier=tier)
-        resp = run_pipeline(req)
+        resp = generate_pipeline(req)
         data = resp.model_dump()
         duration = time.time() - start
 
         rewrite_occurred = data.get("rewrite_occurred", False)
         final_violations = (
-            data.get("rewrite_violations", []) if rewrite_occurred
+            data.get("rewrite_violations", [])
+            if rewrite_occurred
             else data.get("violations", [])
         )
 
@@ -215,8 +219,12 @@ def compute_baseline_comparison(pipeline_results: list, baseline_results: list) 
         "compared": compared,
         "pipeline_bare_stat_count": pipeline_bare_stats,
         "baseline_bare_stat_count": baseline_bare_stats,
-        "pipeline_bare_stat_rate": round(pipeline_bare_stats / max(compared, 1) * 100, 1),
-        "baseline_bare_stat_rate": round(baseline_bare_stats / max(compared, 1) * 100, 1),
+        "pipeline_bare_stat_rate": round(
+            pipeline_bare_stats / max(compared, 1) * 100, 1
+        ),
+        "baseline_bare_stat_rate": round(
+            baseline_bare_stats / max(compared, 1) * 100, 1
+        ),
         "pipeline_hedging_rate": round(pipeline_hedging / max(compared, 1) * 100, 1),
         "baseline_hedging_rate": round(baseline_hedging / max(compared, 1) * 100, 1),
     }
@@ -226,8 +234,14 @@ def main():
     parser = argparse.ArgumentParser(description="Epistemic Pipeline Benchmark")
     parser.add_argument("--category", type=str, help="Filter to a specific category")
     parser.add_argument("--count", type=int, help="Max tests per category")
-    parser.add_argument("--tier", type=str, default="strict", choices=["strict", "standard", "light"])
-    parser.add_argument("--baseline", action="store_true", help="Also run raw LLM baseline for comparison")
+    parser.add_argument(
+        "--tier", type=str, default="strict", choices=["strict", "standard", "light"]
+    )
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help="Also run raw LLM baseline for comparison",
+    )
     parser.add_argument("--output", type=str, help="Save results to JSON file")
     args = parser.parse_args()
 
@@ -237,7 +251,7 @@ def main():
 
     # Locate tests.json
     project_root = Path(__file__).resolve().parent.parent
-    tests_path = project_root / "tests.json"
+    tests_path = project_root / "tests" / "tests.json"
     if not tests_path.exists():
         print(f"ERROR: {tests_path} not found.")
         sys.exit(1)
@@ -254,7 +268,11 @@ def main():
     pipeline_results = []
     start_all = time.time()
     for i, t in enumerate(tests):
-        print(f"  [{i+1}/{len(tests)}] {t['id']}: {t['prompt'][:60]}...", end=" ", flush=True)
+        print(
+            f"  [{i + 1}/{len(tests)}] {t['id']}: {t['prompt'][:60]}...",
+            end=" ",
+            flush=True,
+        )
         result = run_pipeline_test(t, tier=args.tier)
         pipeline_results.append(result)
         status = result["final_verdict"]
@@ -269,16 +287,22 @@ def main():
         print("\nRunning baseline (raw LLM, no pipeline)...")
         print("=" * 60)
         for i, t in enumerate(tests):
-            print(f"  [{i+1}/{len(tests)}] {t['id']}...", end=" ", flush=True)
+            print(f"  [{i + 1}/{len(tests)}] {t['id']}...", end=" ", flush=True)
             br = run_baseline_test(t)
             baseline_results.append(br)
             print(f"done ({br['duration_s']}s)")
 
-        baseline_comparison = compute_baseline_comparison(pipeline_results, baseline_results)
+        baseline_comparison = compute_baseline_comparison(
+            pipeline_results, baseline_results
+        )
 
     # Compute metrics
     valid = [r for r in pipeline_results if r["final_verdict"] != "ERROR"]
-    pss = compute_pss_metrics(valid) if valid else {"score": 0, "metrics": {}, "penalties": {}}
+    pss = (
+        compute_pss_metrics(valid)
+        if valid
+        else {"score": 0, "metrics": {}, "penalties": {}}
+    )
     claim_level = compute_claim_level_metrics(valid)
 
     # Category breakdown
@@ -319,19 +343,25 @@ def main():
     # Print summary
     print("\n" + "=" * 60)
     print(f"PSS Score: {pss['score']}")
-    print(f"Total: {len(pipeline_results)} | "
-          f"PASS: {sum(1 for r in pipeline_results if r['final_verdict'] == 'PASS')} | "
-          f"FAIL: {sum(1 for r in pipeline_results if r['final_verdict'] == 'FAIL')} | "
-          f"ERROR: {sum(1 for r in pipeline_results if r['final_verdict'] == 'ERROR')}")
+    print(
+        f"Total: {len(pipeline_results)} | "
+        f"PASS: {sum(1 for r in pipeline_results if r['final_verdict'] == 'PASS')} | "
+        f"FAIL: {sum(1 for r in pipeline_results if r['final_verdict'] == 'FAIL')} | "
+        f"ERROR: {sum(1 for r in pipeline_results if r['final_verdict'] == 'ERROR')}"
+    )
     print(f"Claims analyzed: {claim_level['total_claims']}")
     print(f"Duration: {round(total_duration, 1)}s")
 
     if baseline_comparison:
         print(f"\nBaseline comparison ({baseline_comparison['compared']} prompts):")
-        print(f"  Bare stats — pipeline: {baseline_comparison['pipeline_bare_stat_rate']}% | "
-              f"baseline: {baseline_comparison['baseline_bare_stat_rate']}%")
-        print(f"  Hedging    — pipeline: {baseline_comparison['pipeline_hedging_rate']}% | "
-              f"baseline: {baseline_comparison['baseline_hedging_rate']}%")
+        print(
+            f"  Bare stats — pipeline: {baseline_comparison['pipeline_bare_stat_rate']}% | "
+            f"baseline: {baseline_comparison['baseline_bare_stat_rate']}%"
+        )
+        print(
+            f"  Hedging    — pipeline: {baseline_comparison['pipeline_hedging_rate']}% | "
+            f"baseline: {baseline_comparison['baseline_hedging_rate']}%"
+        )
 
     # Save results
     if args.output:

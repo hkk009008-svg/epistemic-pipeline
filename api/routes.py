@@ -230,48 +230,6 @@ def get_stage_config_endpoint(stage: str):
     }
 
 
-# ---- Metrics ----
-
-@router.get("/api/metrics")
-def metrics_endpoint():
-    """Return aggregate pipeline metrics since startup."""
-    return get_aggregate().to_dict()
-
-
-# ---- Feedback ----
-
-@router.post("/api/feedback")
-def submit_feedback(req: FeedbackRequest):
-    """Submit user feedback on a pipeline result."""
-    if req.rating not in ("accurate", "inaccurate", "partially_accurate"):
-        raise HTTPException(status_code=400, detail="Rating must be: accurate, inaccurate, or partially_accurate")
-    import uuid
-    store = get_feedback_store()
-    entry = FeedbackEntry(
-        feedback_id=uuid.uuid4().hex,
-        request_id=req.request_id,
-        prompt=req.prompt,
-        rating=req.rating,
-        verdict_correct=req.verdict_correct,
-        confidence_correct=req.confidence_correct,
-    )
-    store.add(entry)
-    return {"status": "ok", "feedback_id": entry.feedback_id}
-
-
-@router.get("/api/feedback/summary")
-def feedback_summary():
-    """Return aggregate feedback statistics."""
-    return get_feedback_store().get_summary()
-
-
-# ---- Ledger ----
-
-@router.get("/api/ledger")
-def get_ledger_data():
-    """Returns the full Epistemic Knowledge Graph for visualization."""
-    return get_full_graph()
-
 
 # ---- Pipeline ----
 
@@ -323,40 +281,4 @@ def rate_limit_info(request: Request):
     return get_rate_limit_info(request)
 
 
-# ---- Stress test ----
 
-@router.post("/api/stress", dependencies=[Depends(rate_limit_dependency)])
-def stress_endpoint(req: StressRequest):
-    """Run stress harness inline -- returns streaming NDJSON progress + final score."""
-    if not config.has_api_key():
-        raise HTTPException(status_code=400, detail="Set your OpenAI API key first.")
-
-    # Load tests
-    tests_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tests.json")
-    if not os.path.exists(tests_path):
-        raise HTTPException(status_code=404, detail="tests.json not found")
-
-    with open(tests_path, "r", encoding="utf-8") as f:
-        tests = json.load(f)
-
-    if req.category:
-        tests = [t for t in tests if t["category"] == req.category]
-
-    if req.count:
-        by_cat = defaultdict(list)
-        for t in tests:
-            by_cat[t["category"]].append(t)
-        tests = []
-        for cat in sorted(by_cat):
-            import itertools
-            tests.extend(list(itertools.islice(by_cat[cat], req.count)))
-    if not tests:
-        raise HTTPException(status_code=400, detail="No matching test cases.")
-
-    tier = getattr(req, "tier", "strict") or "strict"
-    start_index = getattr(req, "start_index", 0) or 0
-
-    return StreamingResponse(
-        generate_stress_results(tests, tier=tier, start_index=start_index),
-        media_type="application/x-ndjson",
-    )

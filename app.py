@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     """Create a shared AsyncOpenAI client at startup, close on shutdown."""
     # Initialize database tables on startup
     db.init_db()
-    
+
     key = config.get_api_key()
     if key:
         raw_client = openai.AsyncOpenAI(api_key=key)
@@ -45,12 +45,18 @@ async def get_openai_client(app_state) -> openai.AsyncOpenAI:
     if not current_key:
         return None
     # Fast path: no key change, skip lock
-    if app_state.openai_client is not None and app_state.openai_client_key == current_key:
+    if (
+        app_state.openai_client is not None
+        and app_state.openai_client_key == current_key
+    ):
         return app_state.openai_client
     # Slow path: key changed or client missing — acquire lock to avoid race
     async with _client_lock:
         # Re-check after acquiring lock (another request may have already rotated)
-        if app_state.openai_client is not None and app_state.openai_client_key == current_key:
+        if (
+            app_state.openai_client is not None
+            and app_state.openai_client_key == current_key
+        ):
             return app_state.openai_client
         old = app_state.openai_client
         raw_client = openai.AsyncOpenAI(api_key=current_key)
@@ -70,7 +76,9 @@ app = FastAPI(
 # ---- CORS ----
 # ALLOWED_ORIGINS env var: comma-separated list of allowed origins.
 # Defaults to same-origin only (empty list) in production.
-_allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_allowed_origins = [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
 if _allowed_origins:
     app.add_middleware(
         CORSMiddleware,
@@ -89,8 +97,11 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     if os.getenv("FORCE_HTTPS", "").lower() in ("true", "1"):
-        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains"
+        )
     return response
+
 
 # ---- Static Files ----
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -103,7 +114,11 @@ async def global_exception_handler(request: Request, exc: Exception):
     if isinstance(exc, HTTPException):
         status_code = getattr(exc, "status_code", 500)
         detail = getattr(exc, "detail", "Internal Server Error")
-        return JSONResponse(status_code=status_code, content={"error": True, "detail": detail})
+        return JSONResponse(
+            status_code=status_code, content={"error": True, "detail": detail}
+        )
     # Never expose raw exception messages — they can leak API keys, internal URLs
     logging.exception("Unhandled exception: %s", exc)
-    return JSONResponse(status_code=500, content={"error": True, "detail": "Internal server error"})
+    return JSONResponse(
+        status_code=500, content={"error": True, "detail": "Internal server error"}
+    )

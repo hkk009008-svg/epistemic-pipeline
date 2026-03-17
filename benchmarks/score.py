@@ -5,6 +5,7 @@ Usage:
     python benchmarks/score.py results.json
     python benchmarks/score.py results.json --verbose
 """
+
 from __future__ import annotations
 
 import argparse
@@ -27,18 +28,30 @@ def score_results(data: dict, verbose: bool = False) -> None:
     baseline = data.get("baseline_comparison")
 
     print(f"Benchmark Report — {meta.get('timestamp', 'unknown')}")
-    print(f"Model: {meta.get('model')} | Tier: {meta.get('tier')} | Version: {meta.get('pipeline_version')}")
+    print(
+        f"Model: {meta.get('model')} | Tier: {meta.get('tier')} | Version: {meta.get('pipeline_version')}"
+    )
     print("=" * 60)
 
     # PSS
     print(f"\nPipeline Stability Score (PSS): {pss.get('score', 0)}")
     metrics = pss.get("metrics", {})
     penalties = pss.get("penalties", {})
-    print(f"  HLR (Hallucination Leakage):   {metrics.get('HLR', 0):.4f}  (penalty: {penalties.get('P1', 0):.2f})")
-    print(f"  FPF (False Positive FAIL):     {metrics.get('FPF', 0):.4f}  (penalty: {penalties.get('P2', 0):.2f})")
-    print(f"  MCP (Mundane Correct Pass):    {metrics.get('MCP', 0):.4f}  (penalty: {penalties.get('P3', 0):.2f})")
-    print(f"  RLS (Rewrite Loop Stress):     {metrics.get('RLS', 0):.4f}  (penalty: {penalties.get('P4', 0):.2f})")
-    print(f"  EOI (Enforcement Overreach):   {metrics.get('EOI', 0):.4f}  (penalty: {penalties.get('P5', 0):.2f})")
+    print(
+        f"  HLR (Hallucination Leakage):   {metrics.get('HLR', 0):.4f}  (penalty: {penalties.get('P1', 0):.2f})"
+    )
+    print(
+        f"  FPF (False Positive FAIL):     {metrics.get('FPF', 0):.4f}  (penalty: {penalties.get('P2', 0):.2f})"
+    )
+    print(
+        f"  MCP (Mundane Correct Pass):    {metrics.get('MCP', 0):.4f}  (penalty: {penalties.get('P3', 0):.2f})"
+    )
+    print(
+        f"  RLS (Rewrite Loop Stress):     {metrics.get('RLS', 0):.4f}  (penalty: {penalties.get('P4', 0):.2f})"
+    )
+    print(
+        f"  EOI (Enforcement Overreach):   {metrics.get('EOI', 0):.4f}  (penalty: {penalties.get('P5', 0):.2f})"
+    )
 
     # Verdicts
     total = len(results)
@@ -50,7 +63,9 @@ def score_results(data: dict, verbose: bool = False) -> None:
     # Claims
     print("\nClaim Analysis:")
     print(f"  Total claims: {claim_level.get('total_claims', 0)}")
-    print(f"  Violation density: {claim_level.get('violation_density', 0):.2f} per 100 claims")
+    print(
+        f"  Violation density: {claim_level.get('violation_density', 0):.2f} per 100 claims"
+    )
     tier_pcts = claim_level.get("tier_percentages", {})
     for tier_name, pct in sorted(tier_pcts.items(), key=lambda x: -x[1]):
         print(f"  {tier_name}: {pct}%")
@@ -67,8 +82,12 @@ def score_results(data: dict, verbose: bool = False) -> None:
     # Baseline
     if baseline:
         print(f"\nBaseline Comparison ({baseline['compared']} prompts):")
-        print(f"  Bare stats — pipeline: {baseline['pipeline_bare_stat_rate']}% vs baseline: {baseline['baseline_bare_stat_rate']}%")
-        print(f"  Hedging    — pipeline: {baseline['pipeline_hedging_rate']}% vs baseline: {baseline['baseline_hedging_rate']}%")
+        print(
+            f"  Bare stats — pipeline: {baseline['pipeline_bare_stat_rate']}% vs baseline: {baseline['baseline_bare_stat_rate']}%"
+        )
+        print(
+            f"  Hedging    — pipeline: {baseline['pipeline_hedging_rate']}% vs baseline: {baseline['baseline_hedging_rate']}%"
+        )
 
     # Verbose: show failures
     if verbose:
@@ -89,7 +108,9 @@ def score_results(data: dict, verbose: bool = False) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Score a benchmark run")
     parser.add_argument("results_file", type=str, help="Path to benchmark results JSON")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show individual failures")
+    parser.add_argument(
+        "--verbose", "-v", action="store_true", help="Show individual failures"
+    )
     args = parser.parse_args()
 
     path = Path(args.results_file)
