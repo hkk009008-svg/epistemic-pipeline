@@ -30,8 +30,11 @@ def perform_search_sync(query: str, max_results: int = 5) -> tuple[list[dict], s
         return [], "Search disabled or key missing."
         
     try:
+        # Tavily API has a strict 400 character limit on search queries
+        truncated_query = query[:400] if len(query) > 400 else query
+        
         response = client.search(
-            query=query,
+            query=truncated_query,
             search_depth="basic",
             max_results=max_results,
             include_answer=False,
