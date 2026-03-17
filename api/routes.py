@@ -20,13 +20,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from api.rate_limit import rate_limit_dependency, get_rate_limit_info
 
 import config
-from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, StressRequest, FeedbackRequest
+from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse
 from pipeline.helpers import PipelineError
-from pipeline.orchestrator import run_pipeline, run_pipeline_async
-from pipeline.stress import generate_stress_results
-from pipeline.metrics import get_aggregate
-from pipeline.feedback import FeedbackEntry, get_feedback_store
-from database.client import get_full_graph
+from pipeline.runner import generate_pipeline, generate_pipeline_async, generate_pipeline_stream
 
 router = APIRouter()
 
@@ -109,11 +105,14 @@ def _validate_base_url(url: str):
     except Exception:
         pass
 
+    import itertools
+    allowed_subset = list(itertools.islice(sorted(_ALLOWED_HOSTS), 6))
+    
     raise HTTPException(
         status_code=400,
         detail=(
             f"base_url hostname not in allowlist. Allowed hosts: "
-            f"{', '.join(sorted(list(_ALLOWED_HOSTS)[:6]))}... "
+            f"{', '.join(allowed_subset)}... "
             f"Set ALLOWED_BASE_URLS env var to add custom hosts."
         ),
     )
@@ -145,33 +144,10 @@ def ui():
 
 @router.get("/health")
 def health():
-    from pipeline.nli import is_nli_available, NLI_SERVICE_URL
     return {
         "status": "ok",
         "key_set": config.has_api_key(),
         "tavily_enabled": config.is_tavily_enabled(),
-        "nli_available": is_nli_available(),
-        "nli_mode": "remote" if NLI_SERVICE_URL else ("local" if is_nli_available() else "disabled"),
-    }
-
-
-# ---- NLI status ----
-
-@router.get("/api/nli/status")
-def nli_status():
-    """Return NLI verification layer availability and configuration."""
-    from pipeline.nli import is_nli_available, NLI_SERVICE_URL, NLI_MODEL
-    from pipeline.nli import ENTAILMENT_THRESHOLD, CONTRADICTION_THRESHOLD
-    available = is_nli_available()
-    return {
-        "available": available,
-        "mode": "remote" if NLI_SERVICE_URL else ("local" if available else "disabled"),
-        "model": NLI_MODEL if available and not NLI_SERVICE_URL else None,
-        "remote_url_set": bool(NLI_SERVICE_URL),
-        "thresholds": {
-            "entailment": ENTAILMENT_THRESHOLD,
-            "contradiction": CONTRADICTION_THRESHOLD,
-        },
     }
 
 
@@ -272,13 +248,12 @@ def submit_feedback(req: FeedbackRequest):
     import uuid
     store = get_feedback_store()
     entry = FeedbackEntry(
-        feedback_id=uuid.uuid4().hex[:12],
+        feedback_id=uuid.uuid4().hex,
         request_id=req.request_id,
         prompt=req.prompt,
         rating=req.rating,
         verdict_correct=req.verdict_correct,
         confidence_correct=req.confidence_correct,
-        comment=req.comment,
     )
     store.add(entry)
     return {"status": "ok", "feedback_id": entry.feedback_id}
@@ -300,205 +275,28 @@ def get_ledger_data():
 
 # ---- Pipeline ----
 
-# Server-side timeout (seconds) — must finish before the CDN/proxy timeout
-# to return a proper JSON error instead of the platform's XML/HTML error page.
-# Default 90 s accommodates arbiter + rewrite loops without false timeouts.
-_PIPELINE_TIMEOUT = int(os.getenv("PIPELINE_TIMEOUT", "90"))
-# 8 workers: allows concurrent pipelines without exhausting Railway CPU budget.
-_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-
-def _stream_pipeline(req: PipelineRequest):
-    """Sync streaming fallback — used by V2 endpoints.
-
-    Uses a thread-safe queue to receive real stage_start / stage_complete
-    events emitted by the orchestrator's ``emit`` callback.
-    """
-    import threading
-    import queue
-
-    event_q: queue.Queue = queue.Queue()
-    result_holder: list = []
-    error_holder: list = []
-    start = time.monotonic()
-
-    def _emit(event: dict):
-        """Callback passed to run_pipeline for real stage events."""
-        event["elapsed"] = round(time.monotonic() - start, 1)
-        event_q.put(event)
-
-    def _run():
-        try:
-            result = run_pipeline(req, emit=_emit)
-            result_holder.append(result)
-        except Exception as e:
-            error_holder.append(e)
-        finally:
-            event_q.put(None)  # sentinel: pipeline finished
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-
-    # Drain events until pipeline completes (sentinel = None)
-    timeout = _PIPELINE_TIMEOUT
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            yield json.dumps({"type": "error", "detail": f"Pipeline timed out after {timeout}s.", "status_code": 504}) + "\n"
-            return
-        try:
-            event = event_q.get(timeout=min(remaining, 1.0))
-        except queue.Empty:
-            continue
-        if event is None:
-            break  # pipeline done
-        yield json.dumps(event) + "\n"
-
-    # Emit final result or error
-    if error_holder:
-        e = error_holder[0]
-        if isinstance(e, PipelineError):
-            yield json.dumps({"type": "error", "detail": e.detail, "status_code": e.status_code}) + "\n"
-        else:
-            yield json.dumps({"type": "error", "detail": str(e), "status_code": 500}) + "\n"
-    elif result_holder:
-        yield json.dumps({"type": "result", "data": result_holder[0].model_dump()}) + "\n"
-
-
-async def _stream_pipeline_async(req: PipelineRequest):
-    """Native async event streaming — uses run_pipeline_async without blocking threads.
-
-    Uses an asyncio.Queue to receive stage events from the emit callback.
-    The emit callback is called from within the async pipeline coroutine
-    (same event loop), so put_nowait is safe.
-    """
-    event_q: asyncio.Queue = asyncio.Queue()
-    start = time.monotonic()
-
-    def _emit(event: dict):
-        """Callback passed to run_pipeline_async for real stage events."""
-        event["elapsed"] = round(time.monotonic() - start, 1)
-        event_q.put_nowait(event)
-
-    # Launch the async pipeline as a concurrent task
-    pipeline_task = asyncio.create_task(run_pipeline_async(req, emit=_emit))
-
-    deadline = time.monotonic() + _PIPELINE_TIMEOUT
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            pipeline_task.cancel()
-            yield json.dumps({"type": "error", "detail": f"Pipeline timed out after {_PIPELINE_TIMEOUT}s.", "status_code": 504}) + "\n"
-            return
-
-        try:
-            event = await asyncio.wait_for(event_q.get(), timeout=min(remaining, 0.5))
-            yield json.dumps(event) + "\n"
-        except asyncio.TimeoutError:
-            # No event within 0.5s — check if pipeline finished
-            if pipeline_task.done():
-                # Drain remaining events
-                while not event_q.empty():
-                    yield json.dumps(event_q.get_nowait()) + "\n"
-                break
-
-    # Yield the final result or error
-    try:
-        result = await pipeline_task
-        yield json.dumps({"type": "result", "data": result.model_dump()}) + "\n"
-    except PipelineError as e:
-        yield json.dumps({"type": "error", "detail": e.detail, "status_code": e.status_code}) + "\n"
-    except Exception as e:
-        yield json.dumps({"type": "error", "detail": str(e), "status_code": 500}) + "\n"
-
-
 @router.post("/api/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 async def pipeline_endpoint(req: PipelineRequest, request: Request):
-    """Main pipeline endpoint — uses native async I/O (V4).
-
-    Both streaming and non-streaming modes use the async pipeline,
-    avoiding ThreadPoolExecutor entirely. Falls back to sync on error.
-    """
-    # Native async streaming — uses asyncio.Queue, no OS threads
-    if getattr(req, "stream", False):
+    """Main pipeline endpoint."""
+    if req.stream:
         return StreamingResponse(
-            _stream_pipeline_async(req),
-            media_type="application/x-ndjson",
+            generate_pipeline_stream(req),
+            media_type="text/event-stream",
         )
-
-    # Native async path — no ThreadPoolExecutor, no thread locks
-    try:
-        result = await asyncio.wait_for(
-            run_pipeline_async(req),
-            timeout=_PIPELINE_TIMEOUT,
-        )
-        return result
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Pipeline timed out after {_PIPELINE_TIMEOUT}s. Try a simpler query or disable web search.",
-        )
-    except PipelineError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail)
-    except Exception as e:
-        import traceback
-        print(f"Async pipeline failed: {e}")
-        traceback.print_exc()
-        # Fallback to sync path if async pipeline fails unexpectedly
-        loop = asyncio.get_event_loop()
-        try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(_executor, run_pipeline, req),
-                timeout=_PIPELINE_TIMEOUT,
-            )
-            return result
-        except asyncio.TimeoutError:
-            raise HTTPException(
-                status_code=504,
-                detail=f"Pipeline timed out after {_PIPELINE_TIMEOUT}s. Try a simpler query or disable web search.",
-            )
-        except PipelineError as e:
-            raise HTTPException(status_code=e.status_code, detail=e.detail)
+    return await generate_pipeline_async(req)
 
 
 @router.post("/v2/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
 async def v2_pipeline_endpoint(req: PipelineRequest, request: Request):
-    """V2 pipeline endpoint with true stage streaming and verdict labels.
-
-    Returns:
-    - JSON (non-stream): full PipelineResponse with ``verdict_label`` field.
-    - NDJSON (stream=true): real stage events emitted from the orchestrator.
-    """
-    if getattr(req, "stream", False):
-        return StreamingResponse(
-            _stream_pipeline(req),
-            media_type="application/x-ndjson",
-        )
-
-    loop = asyncio.get_event_loop()
-    try:
-        result = await asyncio.wait_for(
-            loop.run_in_executor(_executor, run_pipeline, req),
-            timeout=_PIPELINE_TIMEOUT,
-        )
-        return result
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Pipeline timed out after {_PIPELINE_TIMEOUT}s. Try a simpler query or disable web search.",
-        )
-    except PipelineError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    """V2 pipeline endpoint (backward compatibility)."""
+    return await pipeline_endpoint(req, request)
 
 
 # ---- V2 admin config (requires auth) ----
 
 @router.post("/v2/admin/config", dependencies=[Depends(_require_admin)])
 def v2_admin_config(cfg: StageConfig):
-    """Admin-only configuration endpoint (v2).
-
-    Identical behavior to /api/stage/config but namespaced under /v2/admin.
-    """
+    """Admin-only configuration endpoint (v2)."""
     clean_key = cfg.api_key.strip().encode("ascii", errors="ignore").decode("ascii").replace(" ", "")
     if cfg.base_url:
         _validate_base_url(cfg.base_url)
@@ -508,15 +306,12 @@ def v2_admin_config(cfg: StageConfig):
 
 @router.get("/v2/public/capabilities")
 def v2_public_capabilities():
-    """Public endpoint: available providers, NLI status (no secrets)."""
-    from pipeline.nli import is_nli_available, NLI_SERVICE_URL
+    """Public endpoint: available providers (no secrets)."""
     return {
         "providers": sorted(config.PROVIDERS),
         "stages": ["gpt1", "gpt2", "gpt3"],
         "tiers": ["strict", "standard", "light"],
         "output_formats": ["auto", "structured", "annotated", "concise"],
-        "nli_available": is_nli_available(),
-        "nli_mode": "remote" if NLI_SERVICE_URL else ("local" if is_nli_available() else "disabled"),
         "tavily_enabled": config.is_tavily_enabled(),
         "max_prompt_length": config.MAX_PROMPT_LENGTH,
     }
@@ -553,8 +348,8 @@ def stress_endpoint(req: StressRequest):
             by_cat[t["category"]].append(t)
         tests = []
         for cat in sorted(by_cat):
-            tests.extend(by_cat[cat][:req.count])
-
+            import itertools
+            tests.extend(list(itertools.islice(by_cat[cat], req.count)))
     if not tests:
         raise HTTPException(status_code=400, detail="No matching test cases.")
 
