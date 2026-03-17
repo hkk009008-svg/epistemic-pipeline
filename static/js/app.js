@@ -159,3 +159,5 @@ async function toggleTav(en) {
   await fetch('/api/tavily/toggle?enabled='+en, {method:'POST'});
   loadConfig();
 }
+
+window.addEventListener('DOMContentLoaded', loadConfig);
