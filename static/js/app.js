@@ -442,9 +442,11 @@ function stress() {
 
 function renderSearchSources(sources) {
   if (!sources || !sources.length) return '';
-  let h = '<table class="src-tbl"><thead><tr><th>#</th><th>Title</th><th>Snippet</th></tr></thead><tbody>';
+  let h = '<table class="src-tbl"><thead><tr><th>#</th><th>Trust</th><th>Title</th><th>Snippet</th></tr></thead><tbody>';
   sources.forEach(function(s, i) {
+    let trustClass = (s.trust_tier || 'Unknown').toLowerCase();
     h += '<tr><td>[' + (i+1) + ']</td>';
+    h += '<td><span class="trust-badge ' + trustClass + '">' + esc(s.trust_tier || 'Unknown') + '</span></td>';
     h += '<td><a href="' + esc(s.url) + '" target="_blank">' + esc(s.title) + '</a></td>';
     h += '<td>' + esc(s.snippet ? s.snippet.slice(0, 180) : '') + '</td></tr>';
   });

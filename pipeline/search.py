@@ -121,6 +121,9 @@ def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
     for s in sources:
         relevance = max(0.0, min(1.0, s.score))  # clamp provider score
         authority = compute_source_authority(s.url)
+        s.authority_score = authority
+        s.trust_tier = "High" if authority >= 0.9 else ("Medium" if authority >= 0.5 else "Low")
+        
         snippet_signal = min(len(s.snippet) / 500.0, 1.0)
         s.score = round(0.5 * relevance + 0.4 * authority + 0.1 * snippet_signal, 4)
     return sorted(sources, key=lambda s: -s.score)
@@ -268,14 +271,8 @@ def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSou
 
     context_lines = []
     for i, s in enumerate(sources, 1):
-        authority = compute_source_authority(s.url)
-        authority_label = ""
-        if authority >= 1.0:
-            authority_label = " [HIGH AUTHORITY - gov/edu]"
-        elif authority >= 0.9:
-            authority_label = " [TRUSTED SOURCE]"
         context_lines.append(
-            f"[{i}] {s.title}{authority_label}\n"
+            f"[{i}] {s.title} [TRUST: {s.trust_tier}]\n"
             f"    URL: {s.url}\n"
             f"    Excerpt: {s.snippet}"
         )

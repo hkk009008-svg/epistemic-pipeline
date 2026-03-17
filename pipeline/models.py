@@ -22,6 +22,8 @@ class SearchSource(BaseModel):
     url: str
     snippet: str
     score: float = 0.0
+    authority_score: float = 0.0
+    trust_tier: str = "Unknown"
 
 
 class ClaimEntry(BaseModel):

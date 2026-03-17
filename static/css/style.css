@@ -524,6 +524,17 @@
   }
   .ct tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
   .ct tr:hover td { background: rgba(255,255,255,0.03); }
+  .b.sr .src-tbl td { border-bottom: 1px solid rgba(255,255,255,0.05); padding: 6px; }
+  .b.sr .src-tbl td a { color: var(--accent-blue); text-decoration: none; }
+  .b.sr .src-tbl td a:hover { text-decoration: underline; }
+  .b.sr .src-tbl tr:last-child td { border-bottom: none; }
+  .b.sr .src-tbl tr:hover td { background: rgba(255,255,255,0.02); }
+  
+  /* Trust Badges */
+  .trust-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+  .trust-badge.high { background: rgba(16, 185, 129, 0.15); color: #10B981; border: 1px solid rgba(16, 185, 129, 0.3); }
+  .trust-badge.medium { background: rgba(255, 255, 255, 0.1); color: #9CA3AF; border: 1px solid rgba(255, 255, 255, 0.15); }
+  .trust-badge.low { background: rgba(239, 68, 68, 0.15); color: #EF4444; border: 1px solid rgba(239, 68, 68, 0.3); }
   .ct .cat { font-weight: 500; }
 
   /* Category pills */
