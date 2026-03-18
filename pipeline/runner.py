@@ -1,10 +1,11 @@
 import asyncio
 import time
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any
 
-from pipeline.models import PipelineRequest, PipelineResponse
+from pipeline.models import PipelineRequest, PipelineResponse, ReEvaluateRequest
 from pipeline.graph import build_pipeline_graph
 from pipeline.utils import _emit_stage_start, _emit_stage_complete, PipelineEventEmitter, _yield_sse
+from pipeline.nodes.evaluate import stage_re_evaluate
 
 # Global graph instance (compiled once)
 _graph = build_pipeline_graph()
@@ -17,7 +18,7 @@ async def generate_pipeline_async(request: PipelineRequest) -> PipelineResponse:
     """Asynchronous pipeline execution via LangGraph."""
     
     # We use a no-op emitter for non-streaming mode
-    def noop_emit(event: str, data: any):
+    def noop_emit(event: str, data: "Any"):
         pass
 
     initial_state = {
@@ -66,5 +67,42 @@ async def generate_pipeline_stream(request: PipelineRequest) -> AsyncGenerator[s
             break
 
     # Ensure graph task cleans up
+    await runner_task
+
+
+async def generate_re_evaluate_stream(request: ReEvaluateRequest) -> AsyncGenerator[str, None]:
+    """Streaming recovery execution triggered by TS Engine failures."""
+    
+    emitter = PipelineEventEmitter()
+    
+    async def fast_recovery_runner():
+        initial_state = {
+            "failed_goal": request.failed_goal,
+            "previous_cognitive_workspace": request.previous_workspace_context,
+            "emit": emitter.emit
+        }
+        try:
+            # We directly hit the re-evaluation stage for blazing fast localized recovery
+            final_state = await stage_re_evaluate(initial_state)
+            emitter.emit("done", final_state["final_response"].model_dump_json())
+        except Exception as e:
+            emitter.emit("error", str(e))
+        finally:
+            emitter.close()
+
+    runner_task = asyncio.create_task(fast_recovery_runner())
+    
+    yield _yield_sse("status", "Handshake Received: INVENTORY_OOM. Initializing Recovery Vector...")
+    
+    while True:
+        event = await emitter.get_event()
+        if event is None:
+            break
+            
+        yield _yield_sse(event["type"], event["data"])
+        
+        if event["type"] in ("done", "error"):
+            break
+
     await runner_task
 

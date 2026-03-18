@@ -9,9 +9,13 @@ async def main():
     key = os.getenv("OPENAI_API_KEY")
     config.set_runtime_config(key, "gpt-4o-mini")
     
-    req = PipelineRequest(prompt='Spinach is famously considered an exceptional source of iron because a German chemist in 1870 accidentally misplaced a decimal point')
+    long_query = "a" * 500
+    req = PipelineRequest(prompt=long_query)
     resp = await generate_pipeline_async(req)
     print("Verdict:", resp.final_verdict)
-    print("Reason:", resp.reasoning)
+    
+    for hr in resp.hook_results:
+        print(f"Hook: {hr.tool_name if hasattr(hr, 'tool_name') else hr.tool}")
+        print(f"Note: {hr.note}")
 
 asyncio.run(main())

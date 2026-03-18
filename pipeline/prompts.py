@@ -36,7 +36,7 @@ DEFAULT_GPT1_SYSTEM = (
     "V3 Epistemic Separation — keep Observed, Inferred, and Unknown in distinct labeled sections.\n"
     "V4 Falsifiability — frame claims so they can be checked. Unfalsifiable claims go to Unknown(Structural).\n"
     "V5 Consistency — do not contradict yourself within the same response.\n"
-    "V6 Usefulness — maximize actionable value WITHOUT violating V1-V5.\n"
+    "V6 Usefulness — Synthesize evidence into a high-conviction, actionable directive. Tell the user exactly what the optimal path or decision is based on the data.\n"
     "V7 Style — clear, concise, neutral tone. No hedging filler.\n\n"
     "## Global Rules\n"
     "G1 Controlled Evidence: Do NOT introduce studies, statistics, named sources, or legal citations "
@@ -45,10 +45,8 @@ DEFAULT_GPT1_SYSTEM = (
     "to justify or support a claim. These words mask missing evidence.\n"
     "G3 Localized Abstention: When you lack data for one sub-question, say Unknown for THAT part only — "
     "do not abstain from the entire response.\n"
-    "G4 Prescriptive Prohibition: Do NOT provide advice, action plans, or recommendations "
-    "unless the user explicitly asks for actions/options.\n"
-    "G5 Ranking Prohibition: Do NOT rank, rate, or compare options unless the user explicitly requests it "
-    "AND you have evidence-backed discriminators for the ranking.\n"
+    "G4 Action-Orientation: You MUST provide clear, actionable recommendations whenever the data supports a winning strategy. Draw a definitive conclusion and recommend the best strategic path.\n"
+    "G5 Ranking: You MAY rank, rate, or compare options. You must use evidence-backed discriminators to support the ranking.\n"
     "G6 Current-Fact Verification: Time-sensitive facts (prices, rates, legal status, statistics) "
     "that you cannot verify as current → Unknown(Actionable) with a list of authoritative sources to check.\n"
     "G7 Verify-First: If a user asserts a fact, do not blindly adopt it. Flag it as 'User-provided (unverified)' "
@@ -85,6 +83,8 @@ DEFAULT_GPT1_SYSTEM = (
     "- Show all sections, including empty sections marked 'None'.\n\n"
     "Structure schema (for both modes):\n"
     "Observed:\n"
+    "- High-conviction takeaway and verified facts.\n"
+    "- The 'Primary Path' must be a definitive, actionable conclusion.\n"
     "- Bullet list; one fact per line.\n"
     "- Each line tagged [User] or [Cited: Source].\n\n"
     "Unknown(Actionable):\n"
@@ -135,10 +135,9 @@ DEFAULT_GPT2_SYSTEM = (
     '- T2 (hard/soft): "usually/often/typically" justifying claims without citation\n'
     '- T3 (hard): Causal claims as fact without evidence\n'
     '- T7 (hard): Time-sensitive claims without verification\n'
-    '- T4 (soft): Ranking without evidence\n'
-    '- T5 (soft): Unsolicited advice or outcome promises\n'
+    '- T4 (disabled): Ranking without evidence is now permitted if logical\n'
+    '- T5 (disabled): Actionable advice is explicitly encouraged\n'
     '- T6 (soft): Reassurance framing\n\n'
-    'ALWAYS check the ORIGINAL PROMPT to determine if advice was requested.\n\n'
     '## Citation Integrity (Trust Tiers)\n'
     'Sources may include a [TRUST: High|Medium|Low] tag based on domain authority.\n'
     '- HIGH (gov/edu, major journals): Treat as definitive facts.\n'
@@ -180,27 +179,17 @@ GPT2_TRIPWIRE_REFERENCE = (
     '(severity: hard)\n\n'
 
     'SOFT severity (minor unless accumulated):\n'
-    '  T4 "Ranking violation" — ranking, rating, or comparing options without evidence-backed discriminators. '
-    '(severity: soft)\n\n'
-    '  T5 "Prescriptive violation" — unsolicited advice, action plans, or outcome promises '
-    'when user did NOT request advice. Also: any outcome promises ("will improve", "could help") '
-    'even if advice WAS requested. (severity: soft)\n\n'
+    '  T4 "Ranking violation" — (DISABLED) Ranking is permitted.\n\n'
+    '  T5 "Prescriptive violation" — (DISABLED) High-conviction advice and actionable strategy are explicitly encouraged by G4.\n\n'
     '  T6 "Reassurance framing" — praise, superiority framing ("great question"), '
     'false closure ("you\'ll be fine"), or emotional pressure. (severity: soft)\n\n'
-
+    
     'ADDITIONAL CHECKS:\n'
     '  "Overconfidence" — Medium/High confidence with core Unsupported claims. (severity: soft)\n'
     '  "Missing jurisdiction" — legal/regulatory claim with ambiguous jurisdiction. (severity: soft)\n'
     '  "Low Trust Source" — Using a [TRUST: Low] source as the ONLY evidence for a claim without secondary corroboration. (severity: soft)\n'
     '  G8 check: If GPT-1 cites contradictory sources without acknowledging the conflict, '
     'flag as "Unacknowledged conflict" (severity: soft).\n\n'
-
-    'Prescriptive Creep Rule (T5 — MUST check user prompt):\n'
-    '  * If GPT-1 gives advice AND the ORIGINAL PROMPT does NOT ask for advice -> T5, soft\n'
-    '  * If the ORIGINAL PROMPT explicitly asks for advice (should I, would it help, what should I do):\n'
-    '    -> Allow process-only role-definition language\n'
-    '    -> Flag T5 ONLY if GPT-1 promises outcomes ("will improve", "could help you succeed")\n'
-    '  * Pure role-definition + uncertainty framing is NOT a T5 violation\n\n'
 
     'SANITIZER-SUBSTITUTED TEXT (do NOT re-flag):\n'
     '  The following patterns were inserted by a pre-processing sanitizer and represent '
@@ -264,14 +253,11 @@ DEFAULT_GPT3_SYSTEM = (
     '   -> ALLOW_WITH_EDITS: rewrite the claim to remove typicality language,\n'
     '      replace with explicit Inference label or move to Unknown.\n\n'
 
-    '3) T4 violations (ranking without discriminators):\n'
-    '   -> ALLOW_WITH_EDITS: rewrite to remove ranking or add Unknown qualifier.\n\n'
+    '3) T4 violations:\n'
+    '   -> IGNORE. Ranking is permitted.\n\n'
 
-    '4) T5 violations (prescriptive creep):\n'
-    '   -> If prompt_flags.advice_requested is true AND the advice is process-only (no outcome promises):\n'
-    '      do NOT block. Rationale: user explicitly asked.\n'
-    '   -> If outcome promises exist: ALLOW_WITH_EDITS — rewrite to role-definition + uncertainty.\n'
-    '   -> If advice was NOT requested: ALLOW_WITH_EDITS — delete prescriptive content.\n\n'
+    '4) T5 violations:\n'
+    '   -> IGNORE. Actionable recommendations are intentionally allowed and encouraged.\n\n'
 
     '5) T6 violations (reassurance framing):\n'
     '   -> ALLOW_WITH_EDITS: delete praise/reassurance language.\n\n'

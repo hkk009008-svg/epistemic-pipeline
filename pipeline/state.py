@@ -13,6 +13,7 @@ class GraphState(TypedDict, total=False):
     request: PipelineRequest
     emit: Callable  # StageEventEmitter
     prompt: str  # req.prompt shortcut
+    mode: str
 
     # -- Hooks Setup --
     hooks_to_run: List[str]  # e.g., ["search", "custom_tool"]

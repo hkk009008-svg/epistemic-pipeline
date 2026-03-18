@@ -3,84 +3,111 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>V7 Audit Workspace</title>
-<link rel="stylesheet" href="/static/css/style.css?v=8">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<title>Epistemic AI Workspace</title>
+<link rel="stylesheet" href="/static/css/style.css?v=11">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 </head>
 <body>
 
+<!-- Animated Background Canvas -->
+<div class="bg-orb orb-1"></div>
+<div class="bg-orb orb-2"></div>
+<div class="bg-grid"></div>
+
 <div class="top-bar">
   <div class="logo">
-    <span class="logo-v7">V7</span><span class="logo-audit">AUDIT</span><span class="logo-wksp">WORKSPACE</span>
+    <span class="logo-v7">EPISTEMIC</span><span class="logo-wksp">AI</span>
   </div>
   <div class="actions">
     <button class="btn-icon" onclick="openConfig()" title="Configuration">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" class="icon" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
     </button>
   </div>
 </div>
 
 <main class="workspace">
-  <!-- Left Panel: Submission and Report -->
-  <section class="panel panel-left">
-    <div class="panel-header">
-      <h2>AUDIT SUBJECT</h2>
+  <section class="panel panel-main">
+    
+    <!-- Hero Section -->
+    <div id="heroSection" class="hero-section">
+      <div class="hero-badge">V7 Auditor Engine</div>
+      <h1>The AI that refuses to guess.</h1>
+      <p>Select an engine below. We use a deterministic matrix to physically search the web, weigh evidence, and provide fact-backed answers.</p>
     </div>
-    <div class="input-container glass-panel">
-      <textarea id="promptArea" placeholder="Enter claims or text to audit..." rows="4"></textarea>
-      <div class="input-actions">
-        <button class="btn-primary" id="runBtn" onclick="runAudit()">INITIATE AUDIT</button>
+
+    <!-- Engine Toggle -->
+    <div class="engine-toggle-container">
+      <div class="engine-toggle glass-panel">
+        <button id="modeVerify" class="toggle-btn active" onclick="setMode('verify')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="toggle-icon"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          Audit
+        </button>
+        <button id="modeDecision" class="toggle-btn" onclick="setMode('decision')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="toggle-icon"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+          Curator
+        </button>
       </div>
     </div>
 
-    <div class="panel-header mt-lg" id="reportHeader" style="display: none;">
-      <h2>EVALUATION REPORT</h2>
+    <!-- Input Box -->
+    <div class="input-container glass-panel input-glow-wrap">
+      <textarea id="promptArea" placeholder="Paste a headline, wild claim, or rumor to verify..." rows="3"></textarea>
+      
+      <!-- Suggestion Chips -->
+      <div id="suggestionChips" class="suggestion-chips">
+        <!-- Injected via JS -->
+      </div>
+
+      <div class="input-actions">
+        <button class="btn-primary" id="runBtn" onclick="runAudit()">
+          <span class="btn-text">Verify Claim</span>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="btn-icon-right"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+        </button>
+      </div>
     </div>
     
+    <!-- Report Output Area -->
     <div id="reportContainer" class="report-container">
-      <!-- Generated Report goes here -->
-    </div>
-  </section>
-
-  <!-- Right Panel: Hooks execution trace -->
-  <section class="panel panel-right">
-    <div class="panel-header">
-      <h2>HOOK TRACE LOG</h2>
-      <span class="pulse-indicator" id="pulse" style="display:none;"></span>
-    </div>
-    <div class="hook-log glass-panel" id="hookLog">
-      <div class="log-entry sys">System initialized. Awaiting parameters.</div>
+      <!-- Report rendered via JS -->
     </div>
   </section>
 </main>
 
 <!-- Config Panel Overlay -->
 <div class="overlay" id="overlay" onclick="closeConfig()"></div>
-<div class="config-sidebar" id="configSidebar">
+<div class="config-sidebar glass-panel" id="configSidebar">
   <div class="config-header">
-    <h3>NODE CONFIGURATION</h3>
-    <button class="btn-icon" onclick="closeConfig()">✕</button>
+    <h3><svg class="config-header-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>NODE CONFIGURATION</h3>
+    <button class="btn-icon-close" onclick="closeConfig()" aria-label="Close config panel" title="Close Panel">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+    </button>
   </div>
   <div class="config-body">
     <div class="cfg-group">
       <label>OpenAI API Key</label>
-      <input type="password" id="cfgOai" placeholder="sk-...">
-      <button class="btn-secondary" onclick="saveOai()">Save</button>
+      <div class="input-with-button">
+        <input type="password" id="cfgOai" placeholder="sk-...">
+        <button class="btn-secondary" onclick="saveOai()">Save</button>
+      </div>
       <div id="stOai" class="status-text"></div>
     </div>
-    <div class="cfg-group mt-lg">
+    <div class="cfg-group cfg-group-spaced">
       <label>Tavily Search API Key</label>
-      <input type="password" id="cfgTav" placeholder="tvly-...">
-      <button class="btn-secondary" onclick="saveTav()">Save</button>
+      <div class="input-with-button">
+        <input type="password" id="cfgTav" placeholder="tvly-...">
+        <button class="btn-secondary" onclick="saveTav()">Save</button>
+      </div>
       <div id="stTav" class="status-text"></div>
-      <label class="check-label mt-sm">
+      
+      <label class="check-label">
         <input type="checkbox" id="cfgTavEn" onchange="toggleTav(this.checked)">
-        <span>Enable Live Search Plugin</span>
+        <span class="check-custom"></span>
+        <span class="check-text">Enable Live Search Plugin</span>
       </label>
     </div>
   </div>
 </div>
 
-<script src="/static/js/app.js?v=7"></script>
+<script src="/static/js/app.js?v=11"></script>
 </body>
 </html>

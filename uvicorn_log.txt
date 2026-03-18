@@ -1,0 +1,223 @@
+INFO:     Will watch for changes in these directories: ['/Users/hyungkoookkim/epistemic-pipeline']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [29527] using WatchFiles
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Process SpawnProcess-1:
+Traceback (most recent call last):
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/process.py", line 315, in _bootstrap
+    self.run()
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/uvicorn/server.py", line 67, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+  File "/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/uvicorn/_compat.py", line 60, in asyncio_run
+    return loop.run_until_complete(main)
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/uvicorn/server.py", line 71, in serve
+    await self._serve(sockets)
+  File "/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/uvicorn/server.py", line 78, in _serve
+    config.load()
+  File "/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/uvicorn/config.py", line 439, in load
+    self.loaded_app = import_from_string(self.app)
+  File "/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+  File "/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/importlib/__init__.py", line 127, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+  File "<frozen importlib._bootstrap>", line 1030, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1007, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 986, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 680, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 850, in exec_module
+  File "<frozen importlib._bootstrap>", line 228, in _call_with_frames_removed
+  File "/Users/hyungkoookkim/epistemic-pipeline/app.py", line 16, in <module>
+    from api.routes import router
+  File "/Users/hyungkoookkim/epistemic-pipeline/api/routes.py", line 23, in <module>
+    from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, ReEvaluateRequest
+  File "/Users/hyungkoookkim/epistemic-pipeline/pipeline/__init__.py", line 1, in <module>
+    from pipeline.runner import generate_pipeline, generate_pipeline_async, generate_pipeline_stream
+  File "/Users/hyungkoookkim/epistemic-pipeline/pipeline/runner.py", line 8, in <module>
+    from pipeline.nodes.evaluate import stage_re_evaluate
+ImportError: cannot import name 'stage_re_evaluate' from 'pipeline.nodes.evaluate' (/Users/hyungkoookkim/epistemic-pipeline/pipeline/nodes/evaluate.py)
+WARNING:  WatchFiles detected changes in 'pipeline/nodes/evaluate.py'. Reloading...
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [29718]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55106 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+INFO:     127.0.0.1:55115 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55115 - "GET /static/css/style.css?v=9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55116 - "GET /static/js/app.js?v=9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55116 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55116 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55116 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55123 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55123 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55123 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55123 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55123 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55124 - "POST /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55124 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55124 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55160 - "POST /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55160 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55160 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55160 - "POST /api/tavily/toggle?enabled=true HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55160 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55160 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55160 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55174 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55174 - "GET /static/css/style.css?v=9 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55174 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55174 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55174 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55218 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55238 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55238 - "GET /static/css/style.css?v=10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55239 - "GET /static/js/app.js?v=10 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55239 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55239 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55239 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55239 - "POST /api/pipeline HTTP/1.1" 200 OK
+WARNING:  WatchFiles detected changes in 'pipeline/nodes/build_response.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [29718]
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [30332]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55254 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55254 - "GET /static/css/style.css?v=10 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55255 - "GET /static/js/app.js?v=10 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55255 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55255 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55255 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55255 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55255 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55273 - "POST /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55273 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55273 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55275 - "POST /api/tavily/toggle?enabled=true HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55275 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55275 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55275 - "POST /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55275 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55275 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55275 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55283 - "POST /api/pipeline HTTP/1.1" 200 OK
+WARNING:  WatchFiles detected changes in '.venv/lib/python3.9/site-packages/playwright/_impl/_json_pipe.py', '.venv/lib/python3.9/site-packages/playwright/_impl/__init__.py', '.venv/lib/python3.9/site-packages/greenlet/tests/__init__.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_sync_base.py', '.venv/lib/python3.9/site-packages/playwright/_impl/__pyinstaller/hook-playwright.sync_api.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_page.py', '.venv/lib/python3.9/site-packages/pyee/trio.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_version.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_locator.py', '.venv/lib/python3.9/site-packages/greenlet/tests/fail_switch_three_greenlets.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_map.py', '.venv/lib/python3.9/site-packages/greenlet/tests/fail_cpp_exception.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_contextvars.py', '.venv/lib/python3.9/site-packages/greenlet/__init__.py', '.venv/lib/python3.9/site-packages/pyee/executor.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_glob.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_leaks.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_event_context_manager.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_browser_type.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_greenlets.py', '.venv/lib/python3.9/site-packages/greenlet/tests/fail_switch_two_greenlets.py', '.venv/lib/python3.9/site-packages/playwright/_impl/__pyinstaller/hook-playwright.async_api.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_har_router.py', '.venv/lib/python3.9/site-packages/playwright/async_api/_generated.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_writable_stream.py', '.venv/lib/python3.9/site-packages/greenlet/tests/fail_clearing_run_switches.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_impl_to_api_mapping.py', '.venv/lib/python3.9/site-packages/greenlet/tests/fail_initialstub_already_started.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_clock.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_generator.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_artifact.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_connection.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_dialog.py', '.venv/lib/python3.9/site-packages/playwright/__init__.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_helper.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_set_input_files_helpers.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_web_error.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_path_utils.py', '.venv/lib/python3.9/site-packages/playwright/_repo_version.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_str_utils.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_console_message.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_cdp_session.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_network.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_interpreter_shutdown.py', '.venv/lib/python3.9/site-packages/pyee/__init__.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_errors.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_tracing.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_tracing.py', '.venv/lib/python3.9/site-packages/pyee/twisted.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_playwright.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_transport.py', '.venv/lib/python3.9/site-packages/playwright/async_api/_context_manager.py', '.venv/lib/python3.9/site-packages/playwright/__main__.py', '.venv/lib/python3.9/site-packages/greenlet/platform/__init__.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_js_handle.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_browser.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_cpp.py', '.venv/lib/python3.9/site-packages/pyee/asyncio.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_async_base.py', '.venv/lib/python3.9/site-packages/pyee/base.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_gc.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_file_chooser.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_weakref.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_driver.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_extension_interface.py', '.venv/lib/python3.9/site-packages/greenlet/tests/leakcheck.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_stack_saved.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_element_handle.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_selectors.py', '.venv/lib/python3.9/site-packages/greenlet/tests/fail_switch_three_greenlets2.py', '.venv/lib/python3.9/site-packages/pyee/cls.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_input.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_assertions.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_generator_nested.py', '.venv/lib/python3.9/site-packages/greenlet/tests/fail_slp_switch.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_object_factory.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_browser_context.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_stream.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_fetch.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_frame.py', '.venv/lib/python3.9/site-packages/pyee/uplift.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_video.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_local_utils.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_download.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_throw.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_greenlet_trash.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_api_structures.py', '.venv/lib/python3.9/site-packages/playwright/async_api/__init__.py', '.venv/lib/python3.9/site-packages/playwright/_impl/__pyinstaller/__init__.py', '.venv/lib/python3.9/site-packages/playwright/_impl/_waiter.py', '.venv/lib/python3.9/site-packages/greenlet/tests/test_greenlet.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [30332]
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+WARNING:  WatchFiles detected changes in '.venv/lib/python3.9/site-packages/playwright/sync_api/_context_manager.py', '.venv/lib/python3.9/site-packages/playwright/sync_api/_generated.py', '.venv/lib/python3.9/site-packages/playwright/sync_api/__init__.py'. Reloading...
+INFO:     Started server process [31283]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [31328]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'test_ui.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [31328]
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [31459]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55433 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55434 - "GET /static/js/app.js?v=11 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55433 - "GET /static/css/style.css?v=11 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55434 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55434 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55434 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55434 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55455 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55455 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55455 - "POST /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55455 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55455 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55458 - "POST /api/tavily/toggle?enabled=true HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55458 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55458 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55458 - "POST /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55458 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55458 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55459 - "POST /api/pipeline HTTP/1.1" 200 OK
+WARNING:  WatchFiles detected changes in 'test_ui.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [31459]
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [31813]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55488 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55488 - "GET /static/js/app.js?v=11 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55488 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55488 - "GET /api/tavily/config HTTP/1.1" 200 OK
+WARNING:  WatchFiles detected changes in 'test_ui.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [31813]
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [31920]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55499 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55499 - "GET /api/tavily/config HTTP/1.1" 200 OK
+WARNING:  WatchFiles detected changes in 'test_ui.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [31920]
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [32024]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55508 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55508 - "GET /static/css/style.css?v=11 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55509 - "GET /static/js/app.js?v=11 HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55509 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55509 - "GET /api/tavily/config HTTP/1.1" 200 OK
+WARNING:  WatchFiles detected changes in 'test_ui.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [32024]
+/Users/hyungkoookkim/epistemic-pipeline/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+INFO:     Started server process [32306]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55566 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55566 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55566 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55566 - "POST /api/tavily/toggle?enabled=true HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:55566 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55566 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55566 - "POST /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55566 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55566 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55569 - "POST /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55569 - "GET /api/openai/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55569 - "GET /api/tavily/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55569 - "POST /api/pipeline HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55586 - "POST /api/pipeline HTTP/1.1" 200 OK

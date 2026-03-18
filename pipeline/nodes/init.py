@@ -11,6 +11,7 @@ async def stage_init(state: GraphState) -> dict:
 
     return {
         "prompt": req.prompt,
+        "mode": getattr(req, "mode", "verify"),
         "hooks_to_run": [],
         "hook_results": [],
         "reasoning": []

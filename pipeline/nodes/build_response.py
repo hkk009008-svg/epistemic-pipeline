@@ -14,5 +14,4 @@ async def stage_build_response(state: GraphState) -> dict:
         reasoning="\n".join(state.get("reasoning", []))
     )
 
-    state["emit"]("done", "")
     return {"final_response": resp}

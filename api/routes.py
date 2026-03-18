@@ -20,9 +20,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
 from api.rate_limit import rate_limit_dependency, get_rate_limit_info
 
 import config
-from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse
+from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, ReEvaluateRequest
 from pipeline.helpers import PipelineError
-from pipeline.runner import generate_pipeline, generate_pipeline_async, generate_pipeline_stream
+from pipeline.runner import generate_pipeline, generate_pipeline_async, generate_pipeline_stream, generate_re_evaluate_stream
 
 router = APIRouter()
 
@@ -242,6 +242,16 @@ async def pipeline_endpoint(req: PipelineRequest, request: Request):
             media_type="text/event-stream",
         )
     return await generate_pipeline_async(req)
+
+@router.post("/api/pipeline/re_evaluate", dependencies=[Depends(rate_limit_dependency)])
+async def re_evaluate_endpoint(req: ReEvaluateRequest, request: Request):
+    """Bidirectional Handshake endpoint to recover from TS Engine's InventoryOOM exceptions."""
+    if req.stream:
+        return StreamingResponse(
+            generate_re_evaluate_stream(req),
+            media_type="text/event-stream",
+        )
+    raise HTTPException(status_code=400, detail="Re-evaluation strictly requires stream=True")
 
 
 @router.post("/v2/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])
