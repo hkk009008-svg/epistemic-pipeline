@@ -8,16 +8,17 @@ UI_HTML = """
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Epistemic Verification Pipeline</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
 
   *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
   :root, [data-theme="dark"] {
-    --bg-root: #09090b;
-    --bg-surface-0: #111113;
-    --bg-surface-1: #161618;
-    --bg-surface-2: #1c1c1f;
-    --bg-surface-3: #232326;
+    /* Dark navy (readable blue—not neutral black) */
+    --bg-root: #0f2847;
+    --bg-surface-0: #15365d;
+    --bg-surface-1: #1a3f6c;
+    --bg-surface-2: #1f4878;
+    --bg-surface-3: #255184;
     --border-subtle: rgba(255,255,255,0.06);
     --border-hover: rgba(255,255,255,0.1);
     --border-focus: rgba(59,130,246,0.55);
@@ -87,15 +88,253 @@ UI_HTML = """
     --shadow-glow-rose: 0 0 0 rgba(0,0,0,0);
   }
 
-  body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  html {
     background: var(--bg-root);
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background-color: var(--bg-root);
+    background-image:
+      linear-gradient(180deg, #173a63 0%, #0c213c 42%, #08182c 100%),
+      radial-gradient(ellipse 90% 70% at 50% -15%, rgba(56, 189, 248, 0.12), transparent 55%),
+      radial-gradient(ellipse 50% 50% at 100% 30%, rgba(99, 102, 241, 0.14), transparent 50%);
+    background-attachment: fixed;
     color: var(--text-primary);
     min-height: 100vh;
     display: flex;
     flex-direction: column;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+
+  [data-theme="light"] body {
+    background-image: none;
+    background-color: var(--bg-root);
+  }
+
+  /* ---- Workspace: main chat column + insight rail ---- */
+  .workspace {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+    min-width: 0;
+    position: relative;
+  }
+  .main-stack {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .insight-rail {
+    width: min(300px, 34vw);
+    flex-shrink: 0;
+    border-left: 1px solid var(--border-subtle);
+    background: var(--bg-surface-0);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 52px);
+    position: sticky;
+    top: 52px;
+    align-self: flex-start;
+    transition: width 0.22s ease, border-color 0.2s ease, opacity 0.2s ease;
+    z-index: 5;
+  }
+  .insight-rail.collapsed {
+    width: 0;
+    min-width: 0;
+    border-left-color: transparent;
+    opacity: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .insight-rail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+  }
+  .insight-rail-head span {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-tertiary);
+  }
+  .insight-rail-toggle {
+    background: var(--bg-surface-2);
+    border: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: var(--transition);
+  }
+  .insight-rail-toggle:hover {
+    border-color: var(--border-hover);
+    color: var(--text-primary);
+  }
+  .insight-rail-inner {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px 20px;
+    min-height: 120px;
+  }
+  .insight-empty {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+  .insight-body.hidden { display: none; }
+  .insight-verdict-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .insight-badge {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    text-transform: uppercase;
+  }
+  .insight-badge.pass {
+    background: rgba(var(--accent-emerald-rgb), 0.15);
+    color: var(--accent-emerald);
+    border: 1px solid rgba(var(--accent-emerald-rgb), 0.25);
+  }
+  .insight-badge.fail {
+    background: rgba(var(--accent-rose-rgb), 0.12);
+    color: var(--accent-rose);
+    border: 1px solid rgba(var(--accent-rose-rgb), 0.22);
+  }
+  .insight-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    flex: 1;
+    min-width: 140px;
+  }
+  .insight-meter-wrap {
+    margin-bottom: 14px;
+  }
+  .insight-meter-wrap .im-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .insight-meter {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-surface-2);
+    overflow: hidden;
+  }
+  .insight-meter > i {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--accent-teal), var(--accent-blue));
+    transition: width 0.4s ease;
+  }
+  .insight-kv {
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-bottom: 6px;
+    line-height: 1.45;
+  }
+  .insight-kv strong { color: var(--text-secondary); font-weight: 600; }
+  .insight-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-muted);
+    margin: 16px 0 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .insight-section-title:first-of-type {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+  }
+  .insight-claim {
+    font-size: 11px;
+    color: var(--text-secondary);
+    padding: 8px 10px;
+    background: var(--bg-surface-1);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+    line-height: 1.45;
+  }
+  .insight-claim .ic-cat {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--accent-violet);
+    margin-bottom: 4px;
+  }
+  .insight-src-wrap { margin-top: 4px; }
+  .insight-src-wrap .sr-item { font-size: 11px; margin-bottom: 8px; }
+  .insight-src-wrap a { color: var(--accent-blue); text-decoration: none; word-break: break-all; }
+  .insight-src-wrap a:hover { text-decoration: underline; }
+
+  .insight-fab {
+    display: none;
+    position: fixed;
+    bottom: 88px;
+    right: 16px;
+    z-index: 40;
+    padding: 10px 14px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-surface-2);
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    box-shadow: var(--shadow-lg);
+    transition: var(--transition);
+  }
+  .insight-fab:hover { color: var(--text-primary); border-color: var(--border-hover); }
+
+  .brand-cluster {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-start;
+  }
+  .brand-cluster h1 { margin: 0; }
+  .brand-tagline {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-muted);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin: 0;
+    padding-left: 1px;
   }
 
   /* ---- Scrollbar ---- */
@@ -106,7 +345,7 @@ UI_HTML = """
 
   /* ---- Top Bar ---- */
   .top-bar {
-    background: rgba(17,17,19,0.8);
+    background: rgba(15, 40, 71, 0.88);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-bottom: 1px solid var(--border-subtle);
@@ -321,6 +560,7 @@ UI_HTML = """
   /* ---- Chat Area ---- */
   .chat {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 24px 24px 24px;
     display: flex;
@@ -813,8 +1053,8 @@ UI_HTML = """
     background: var(--bg-surface-1);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-xl);
-    padding: 4px 4px 4px 16px;
-    align-items: center;
+    padding: 8px 8px 8px 16px;
+    align-items: flex-end;
     transition: all var(--transition);
     box-shadow: var(--shadow-md);
   }
@@ -822,17 +1062,28 @@ UI_HTML = """
     border-color: var(--border-focus);
     box-shadow: var(--shadow-md), 0 0 0 3px rgba(var(--accent-blue-rgb),0.08);
   }
-  .ibar input {
+  .ibar input,
+  .ibar textarea#ui {
     flex: 1;
-    padding: 10px 0;
+    padding: 8px 0;
     background: transparent;
     border: none;
     color: var(--text-primary);
     font-size: 13.5px;
+    line-height: 1.45;
     outline: none;
     font-family: inherit;
+    resize: none;
+    min-height: 44px;
+    max-height: 200px;
+    field-sizing: content;
   }
-  .ibar input::placeholder { color: var(--text-muted); }
+  .ibar textarea#ui { padding-top: 10px; }
+  @supports not (field-sizing: content) {
+    .ibar textarea#ui { min-height: 48px; }
+  }
+  .ibar input::placeholder,
+  .ibar textarea#ui::placeholder { color: var(--text-muted); }
   .ibar form button {
     width: 36px;
     height: 36px;
@@ -856,7 +1107,7 @@ UI_HTML = """
     display: none;
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(9,9,11,0.95);
+    background: rgba(15, 40, 71, 0.97);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     z-index: 100;
@@ -1388,6 +1639,56 @@ UI_HTML = """
   .search-note { font-size: 12px; color: var(--text-tertiary); font-style: italic; padding: 8px 0; }
 
   /* ---- Responsive ---- */
+  .insight-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    top: 52px;
+    background: rgba(0,0,0,0.4);
+    z-index: 48;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+  .insight-backdrop.open {
+    display: block;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (max-width: 960px) {
+    .insight-rail {
+      position: fixed;
+      top: 52px;
+      right: 0;
+      bottom: 0;
+      width: min(300px, 92vw);
+      max-height: none;
+      align-self: stretch;
+      transform: translateX(104%);
+      opacity: 1;
+      pointer-events: none;
+      box-shadow: -12px 0 40px rgba(0,0,0,0.35);
+      transition: transform 0.25s ease, border-color 0.2s ease;
+    }
+    .insight-rail.collapsed {
+      width: min(300px, 92vw);
+      transform: translateX(104%);
+      opacity: 1;
+      pointer-events: none;
+    }
+    .insight-rail.mobile-open {
+      transform: translateX(0);
+      pointer-events: auto;
+    }
+    .insight-fab {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+  }
+
   @media (max-width: 640px) {
     .metrics-grid { grid-template-columns: repeat(2, 1fr); }
     .stress-controls { flex-wrap: wrap; }
@@ -1416,9 +1717,12 @@ UI_HTML = """
 </div>
 
 <div class="top-bar">
-  <h1>
-    <span class="g1" id="stg1">GPT-1</span><span class="arr">&rarr;</span><span class="g2" id="stg2">GPT-2</span><span class="arr">&rarr;</span><span class="g3" id="stg3">GPT-3</span>
-  </h1>
+  <div class="brand-cluster">
+    <h1>
+      <span class="g1" id="stg1">GPT-1</span><span class="arr">&rarr;</span><span class="g2" id="stg2">GPT-2</span><span class="arr">&rarr;</span><span class="g3" id="stg3">GPT-3</span>
+    </h1>
+    <p class="brand-tagline">Generate · verify · arbitrate</p>
+  </div>
   <div class="right-controls">
     <button class="history-btn" onclick="toggleHistory()" title="Conversation history" aria-label="Conversation history">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
@@ -1520,6 +1824,9 @@ Only include "Options" if user asked for actions/choices.</textarea>
     </div>
   </div>
 </div>
+
+<div class="workspace">
+<div class="main-stack">
 
 <div class="chat" id="ch" role="log" aria-live="polite" aria-relevant="additions" aria-label="Verification results">
   <div class="welcome" id="welcome">
@@ -1642,15 +1949,169 @@ Only include "Options" if user asked for actions/choices.</textarea>
   </div>
   <div class="tier-desc" id="tier-desc">Full Audit v7 rules &mdash; all claims verified, typicality stripped, bare stats require citations</div>
   <form onsubmit="go(event)" role="search" aria-label="Submit a claim for verification">
-    <input type="text" id="ui" placeholder="Ask anything..." autocomplete="off" aria-label="Enter text to verify">
+    <textarea id="ui" rows="1" placeholder="Ask anything… (⌘/Ctrl+Enter to send)" autocomplete="off" aria-label="Enter text to verify"></textarea>
     <button type="submit" id="sb" aria-label="Submit for verification">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
     </button>
   </form>
 </div>
 
+</div>
+
+<div class="insight-backdrop" id="insightBackdrop" aria-hidden="true" onclick="closeInsightMobile()"></div>
+<aside class="insight-rail" id="insightRail" aria-label="Run insights">
+  <div class="insight-rail-head">
+    <span>Insights</span>
+    <button type="button" class="insight-rail-toggle" id="insightRailToggle" onclick="toggleInsightRail()" aria-expanded="true">Hide panel</button>
+  </div>
+  <div class="insight-rail-inner">
+    <div class="insight-empty" id="insightEmpty">Run a query to see verdict, confidence, and sources here.</div>
+    <div class="insight-body hidden" id="insightBody"></div>
+  </div>
+</aside>
+</div>
+
+<button type="button" class="insight-fab" id="insightFab" onclick="openInsightMobile()" aria-label="Open run insights panel">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+  Insights
+</button>
+
 <script>
 let currentTier = 'strict';
+
+// ---- Insights rail (verdict / confidence / claims / sources) ----
+function isNarrowInsight() {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 960px)').matches;
+}
+function closeInsightMobile() {
+  const rail = document.getElementById('insightRail');
+  const bd = document.getElementById('insightBackdrop');
+  if (rail) rail.classList.remove('mobile-open');
+  if (bd) { bd.classList.remove('open'); bd.setAttribute('aria-hidden', 'true'); }
+}
+function openInsightMobile() {
+  if (!isNarrowInsight()) return;
+  const rail = document.getElementById('insightRail');
+  const bd = document.getElementById('insightBackdrop');
+  if (rail) rail.classList.add('mobile-open');
+  if (bd) { bd.classList.add('open'); bd.setAttribute('aria-hidden', 'false'); }
+}
+function syncInsightToggleLabel() {
+  const rail = document.getElementById('insightRail');
+  const btn = document.getElementById('insightRailToggle');
+  if (!rail || !btn) return;
+  if (isNarrowInsight()) {
+    var mo = rail.classList.contains('mobile-open');
+    btn.textContent = mo ? 'Close' : 'Open';
+    btn.setAttribute('aria-expanded', mo ? 'true' : 'false');
+  } else {
+    var col = rail.classList.contains('collapsed');
+    btn.textContent = col ? 'Show panel' : 'Hide panel';
+    btn.setAttribute('aria-expanded', col ? 'false' : 'true');
+  }
+}
+/** After each pipeline result: show rail (desktop) or open drawer (mobile). */
+function revealInsightsAfterRun() {
+  const rail = document.getElementById('insightRail');
+  if (!rail) return;
+  if (isNarrowInsight()) openInsightMobile();
+  else rail.classList.remove('collapsed');
+  syncInsightToggleLabel();
+}
+function toggleInsightRail() {
+  const rail = document.getElementById('insightRail');
+  const btn = document.getElementById('insightRailToggle');
+  if (!rail || !btn) return;
+  if (isNarrowInsight()) {
+    if (rail.classList.contains('mobile-open')) closeInsightMobile();
+    else openInsightMobile();
+    syncInsightToggleLabel();
+    return;
+  }
+  rail.classList.toggle('collapsed');
+  syncInsightToggleLabel();
+  closeInsightMobile();
+}
+function resetInsightPanel() {
+  const empty = document.getElementById('insightEmpty');
+  const body = document.getElementById('insightBody');
+  if (empty) empty.classList.remove('hidden');
+  if (body) { body.classList.add('hidden'); body.textContent = ''; }
+}
+function updateInsightPanel(d) {
+  const empty = document.getElementById('insightEmpty');
+  const body = document.getElementById('insightBody');
+  if (!empty || !body || !d) return;
+  empty.classList.add('hidden');
+  body.classList.remove('hidden');
+  const pass = d.final_verdict === 'PASS';
+  const badgeCls = pass ? 'pass' : 'fail';
+  const badgeTxt = pass ? 'Pass' : 'Fail';
+  const label = (d.verdict_label || '').trim() || (pass ? 'Verified' : 'Blocked');
+  const conf = d.confidence || {};
+  const pct = typeof conf.observed_pct === 'number' ? conf.observed_pct : 0;
+  const confLbl = (conf.confidence_label || 'Unknown').trim();
+  let h = '';
+  h += '<div class="insight-verdict-row">';
+  h += '<span class="insight-badge ' + badgeCls + '">' + esc(badgeTxt) + '</span>';
+  h += '<div class="insight-label">' + esc(label) + '</div>';
+  h += '</div>';
+  h += '<div class="insight-meter-wrap"><div class="im-label"><span>Observed claims</span><span>' + esc(String(Math.round(pct))) + '%</span></div>';
+  h += '<div class="insight-meter"><i style="width:' + Math.min(100, Math.max(0, pct)) + '%"></i></div></div>';
+  h += '<div class="insight-kv"><strong>Confidence</strong> · ' + esc(confLbl) + '</div>';
+  h += '<div class="insight-kv"><strong>Tier</strong> · ' + esc(String(d.tier || '')) + ' · <strong>Format</strong> · ' + esc(String(d.output_format || '')) + '</div>';
+  if (d.search_performed) {
+    const n = d.search_sources ? d.search_sources.length : 0;
+    h += '<div class="insight-kv"><strong>Web</strong> · ' + n + ' source(s)</div>';
+  }
+  if (d.arbiter_invoked) {
+    h += '<div class="insight-kv"><strong>Arbiter</strong> · ' + esc(String(d.arbiter_decision || '')) + '</div>';
+  }
+  const claims = d.claim_table || [];
+  if (claims.length > 0) {
+    h += '<div class="insight-section-title">Claims</div>';
+    claims.slice(0, 8).forEach(function(c) {
+      const cat = (c.category || '').trim() || '—';
+      const tx = (c.claim || '').trim() || '—';
+      h += '<div class="insight-claim"><div class="ic-cat">' + esc(cat) + '</div>' + esc(tx) + '</div>';
+    });
+    if (claims.length > 8) {
+      h += '<div class="insight-kv">+' + (claims.length - 8) + ' more in chat trace</div>';
+    }
+  }
+  if (d.search_performed && d.search_sources && d.search_sources.length > 0) {
+    h += '<div class="insight-section-title">Sources</div><div class="insight-src-wrap">';
+    d.search_sources.slice(0, 6).forEach(function(s) {
+      const t = (s.title || 'Source').trim();
+      const u = (s.url || '').trim();
+      if (u) {
+        var hu = encodeURI(u);
+        h += '<div class="sr-item"><a href="' + hu + '" target="_blank" rel="noopener noreferrer">' + esc(t) + '</a></div>';
+      } else {
+        h += '<div class="sr-item">' + esc(t) + '</div>';
+      }
+    });
+    h += '</div>';
+  }
+  body.innerHTML = h;
+  revealInsightsAfterRun();
+}
+
+(function initInsightRail() {
+  const rail = document.getElementById('insightRail');
+  try {
+    if (rail && !isNarrowInsight()) rail.classList.remove('collapsed');
+  } catch (e) {}
+  syncInsightToggleLabel();
+})();
+
+function autoResizePrompt() {
+  const el = document.getElementById('ui');
+  if (!el || el.tagName !== 'TEXTAREA') return;
+  el.style.height = 'auto';
+  var mh = 200;
+  el.style.height = Math.min(el.scrollHeight, mh) + 'px';
+}
 
 // ---- Conversation History (localStorage) ----
 const HIST_KEY = 'ep-conversations';
@@ -1802,6 +2263,9 @@ function tog() {
 function openStress() { document.getElementById('sp').classList.add('open'); }
 function closeStress() { document.getElementById('sp').classList.remove('open'); }
 function clearChat() {
+  resetInsightPanel();
+  closeInsightMobile();
+  syncInsightToggleLabel();
   const ch = document.getElementById('ch');
   ch.innerHTML = '';
   const w = document.createElement('div');
@@ -2331,6 +2795,7 @@ async function go(e) {
     }
 
     const d = await r.json();
+    updateInsightPanel(d);
 
     // ---- Build metadata strip ----
     let metaParts = [];
@@ -2538,6 +3003,22 @@ lc();
 loadTav();
 updateRateLimit();
 renderHistory();
+(function wirePromptField() {
+  var el = document.getElementById('ui');
+  if (!el) return;
+  el.addEventListener('input', autoResizePrompt);
+  el.addEventListener('keydown', function(e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      go(e);
+    }
+  });
+})();
+window.addEventListener('resize', function() {
+  if (!isNarrowInsight()) closeInsightMobile();
+  syncInsightToggleLabel();
+});
+autoResizePrompt();
 document.getElementById('ui').focus();
 </script>
 </body>
