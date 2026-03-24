@@ -2,6 +2,8 @@
 
 A 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a **Generator → Verifier → Arbiter** architecture with the Audit v7 epistemic framework to catch hallucinations, fabricated statistics, unsupported causal claims, and prescriptive creep before they reach users.
 
+For a structured walkthrough of what the service is, why it exists, how the async stage chain runs, and who it is for (including a first-person “as the program” view), see [docs/epistemic-pipeline-analysis.md](docs/epistemic-pipeline-analysis.md).
+
 ## The Problem
 
 Large language models hallucinate. They fabricate statistics, state causal claims as fact, give prescriptive advice as if it were established truth, and present future speculation as current reality. Standard guardrails (content filters, RLHF) don't catch these epistemic failures because they aren't designed to.
