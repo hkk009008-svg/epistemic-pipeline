@@ -8,4 +8,4 @@ anthropic>=0.40,<1.0
 
 # Dev / test (not needed in production image)
 pytest>=8.4,<9.0
-pytest-asyncio>=1.2,<2.0
+pytest-asyncio>=1.3.0,<2.0
