@@ -11,7 +11,6 @@ import json
 import re
 import threading
 import time
-from typing import Optional
 
 import openai
 import anthropic as anthropic_sdk

@@ -6,7 +6,6 @@ allowing a single FastAPI instance to handle 100x more concurrent requests.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import time
@@ -18,21 +17,20 @@ import config
 from pipeline.models import (
     PipelineRequest, PipelineResponse, ConfidenceBreakdown,
     SearchSource, GroundingInfo, UnsupportedSpan,
-    GPT2ResponseSchema, GPT3ResponseSchema,
 )
 from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
-from pipeline.helpers import PipelineError, call_llm, call_llm_async, call_llm_structured, is_activation_phrase
-from pipeline.verifier import parse_gpt2, parse_gpt2_structured, _all_soft, recompute_verdict
-from pipeline.arbiter import parse_gpt3, parse_gpt3_structured, apply_edits
+from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
+from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
+from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search, refine_search_query, fetch_claim_evidence
 from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
-from pipeline.decomposer import decompose_claims, check_decomposition_quality
+from pipeline.decomposer import decompose_claims
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
 from pipeline.meta_verify import meta_verify_pass, meta_verify_fail, is_high_stakes
 from pipeline.metrics import PipelineMetrics, record_run
-from pipeline.best_of_n import generate_best_of_n, generate_best_of_n_async
+from pipeline.best_of_n import generate_best_of_n
 
 
 def _date_context() -> str:

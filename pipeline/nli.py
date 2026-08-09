@@ -14,6 +14,7 @@ all functions return None and the pipeline proceeds without NLI.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import re
@@ -371,7 +372,6 @@ def _batch_classify_nli_remote(pairs: List[Tuple[str, str]]) -> List[Optional[di
 # concurrent asyncio.to_thread(batch_classify_nli) calls would serialize
 # under the GIL when PyTorch runs CPU-bound C++ kernels. A process pool
 # gives each inference its own GIL and CPU cache, eliminating thread thrashing.
-import concurrent.futures
 _nli_process_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
 
 

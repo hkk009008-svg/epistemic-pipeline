@@ -5,11 +5,13 @@ No LLM calls needed — tests verify the deterministic logic within stages.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from pipeline.stages import _base_response, _verify_text
 from pipeline.pipeline_state import PipelineState
-from pipeline.models import ConfidenceBreakdown, PipelineResponse
+from pipeline.models import PipelineResponse
 from pipeline.orchestrator import compute_confidence
 
 
@@ -204,15 +206,21 @@ class TestStageImports:
             stage_rewrite_loop,
         )
         # All should be async functions
-        import asyncio
         assert asyncio.iscoroutinefunction(stage_init)
         assert asyncio.iscoroutinefunction(stage_route)
+        assert asyncio.iscoroutinefunction(stage_search)
+        assert asyncio.iscoroutinefunction(stage_build_prompts)
+        assert asyncio.iscoroutinefunction(stage_generate)
+        assert asyncio.iscoroutinefunction(stage_check_fast_paths)
+        assert asyncio.iscoroutinefunction(stage_sanitize)
+        assert asyncio.iscoroutinefunction(stage_decompose)
+        assert asyncio.iscoroutinefunction(stage_nli)
         assert asyncio.iscoroutinefunction(stage_verify)
+        assert asyncio.iscoroutinefunction(stage_soft_retry)
+        assert asyncio.iscoroutinefunction(stage_arbiter)
         assert asyncio.iscoroutinefunction(stage_rewrite_loop)
 
     def test_verify_text_importable(self):
-        from pipeline.stages import _verify_text
-        import asyncio
         assert asyncio.iscoroutinefunction(_verify_text)
 
     def test_base_response_importable(self):

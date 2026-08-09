@@ -12,14 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import date
-from typing import Optional
 
 import config
 from pipeline.pipeline_state import PipelineState
 from pipeline.models import (
-    PipelineRequest, PipelineResponse, ConfidenceBreakdown,
-    SearchSource, GPT2ResponseSchema, GPT3ResponseSchema,
+    PipelineResponse, ConfidenceBreakdown,
+    GPT2ResponseSchema, GPT3ResponseSchema,
 )
 from pipeline.prompts import (
     DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM,
@@ -41,8 +39,7 @@ from pipeline.best_of_n import generate_best_of_n_async
 # Re-import orchestrator utilities (these stay in orchestrator.py)
 from pipeline.orchestrator import (
     compute_confidence, clean_for_display, _fail_message,
-    _date_context, _resolve_output_format, _emit_stage_start, _emit_stage_complete, _noop_emit,
-    StageEventEmitter,
+    _date_context, _resolve_output_format, _emit_stage_start, _emit_stage_complete,
 )
 
 
