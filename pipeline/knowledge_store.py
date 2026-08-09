@@ -964,6 +964,14 @@ class KnowledgeStore:
             indexed_text = row["body"]
             if not (0 <= start < end <= len(source_text)):
                 raise StaleKnowledgeIndexError("indexed source span is invalid")
+            start_line = row["start_line"]
+            end_line = row["end_line"]
+            if type(start_line) is not int or type(end_line) is not int:
+                raise StaleKnowledgeIndexError("indexed source lines are invalid")
+            expected_start_line = source_text.count("\n", 0, start) + 1
+            expected_end_line = source_text.count("\n", 0, end) + 1
+            if start_line != expected_start_line or end_line != expected_end_line:
+                raise StaleKnowledgeIndexError("indexed source lines do not match source span")
             if source_text[start:end] != indexed_text:
                 raise StaleKnowledgeIndexError("indexed chunk does not match source span")
             if _sha256_bytes(indexed_text.encode("utf-8")) != row["chunk_sha256"]:

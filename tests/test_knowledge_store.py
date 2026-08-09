@@ -216,6 +216,21 @@ def test_source_tampering_fails_closed(tmp_path):
         store.retrieve("Alice favorite color")
 
 
+def test_retrieval_rejects_forged_multiline_chunk_lines(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document(
+        "profile",
+        "personal",
+        "Profile",
+        "\nAlice likes blue.\nDetails follow.",
+    )
+    with sqlite3.connect(store.index_path) as conn:
+        conn.execute("UPDATE chunks SET start_line = 1, end_line = 2")
+
+    with pytest.raises(StaleKnowledgeIndexError, match="source lines"):
+        store.retrieve("Alice")
+
+
 def test_index_directory_symlink_cannot_escape_root(tmp_path):
     root = tmp_path / "knowledge"
     outside = tmp_path / "outside"
