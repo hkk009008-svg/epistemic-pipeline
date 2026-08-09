@@ -510,6 +510,8 @@ async def grounded_document_upsert(document_id: str, req: GroundedDocumentReques
             req.folder,
             req.title,
             req.content,
+            expected_revision_id=req.expected_revision_id,
+            revision_reason=req.revision_reason,
         )
         return GroundedDocumentResponse.from_record(record)
     except ValueError as exc:

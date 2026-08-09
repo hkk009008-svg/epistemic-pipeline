@@ -16,21 +16,116 @@ import hashlib
 import html
 import json
 import re
+import time
 import unicodedata
+import uuid
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import config
 from pipeline.helpers import PipelineError, call_llm_structured
 from pipeline.knowledge_store import (
+    CHUNKER_VERSION,
     MAX_DOCUMENT_CHARS,
+    RUN_RECEIPT_VERSION,
+    SCHEMA_VERSION,
     DocumentRecord,
     EvidenceItem,
     EvidencePacket,
     KnowledgeStore,
+    RETRIEVER_VERSION,
+    canonicalize_query,
 )
+
+
+GROUNDED_RAG_CONTRACT_VERSION = "grounded-rag-v1"
+ANSWERER_PROMPT_VERSION = "grounded-answerer-v1"
+VERIFIER_PROMPT_VERSION = "grounded-verifier-v1"
+FINALIZER_PROMPT_VERSION = "grounded-finalizer-v1"
+
+GroundedReasonCode = Literal[
+    "no_lexical_match",
+    "retrieval_query_term_limit_exceeded",
+    "evidence_packet_budget_exceeded",
+    "model_input_budget_exceeded",
+    "answerer_packet_mismatch",
+    "answerer_abstained",
+    "verifier_protocol_error",
+    "conflict_in_evidence",
+    "no_supported_claims",
+    "finalizer_protocol_error",
+    "finalizer_abstained",
+    "answered",
+    "partial_with_conflict",
+    "partial_evidence",
+]
+CoverageReason = Literal["query_term_limit", "top_k", "byte_budget"]
+CompletedStage = Literal["retrieval", "answerer", "verifier", "finalizer"]
+RevisionReason = Literal["content_update", "metadata_update", "correction", "restore"]
+DocumentRevisionReason = Literal[
+    "initial_create",
+    "legacy_import",
+    "content_update",
+    "metadata_update",
+    "correction",
+    "restore",
+]
+
+_STAGE_ORDER: tuple[CompletedStage, ...] = (
+    "retrieval",
+    "answerer",
+    "verifier",
+    "finalizer",
+)
+_COVERAGE_ORDER: tuple[CoverageReason, ...] = (
+    "query_term_limit",
+    "top_k",
+    "byte_budget",
+)
+_STATUS_REASONS = {
+    "ANSWER": frozenset({"answered"}),
+    "PARTIAL": frozenset({"partial_with_conflict", "partial_evidence"}),
+    "ABSTAIN": frozenset({
+        "no_lexical_match",
+        "retrieval_query_term_limit_exceeded",
+        "evidence_packet_budget_exceeded",
+        "model_input_budget_exceeded",
+        "answerer_packet_mismatch",
+        "answerer_abstained",
+        "verifier_protocol_error",
+        "conflict_in_evidence",
+        "no_supported_claims",
+        "finalizer_protocol_error",
+        "finalizer_abstained",
+    }),
+}
+
+
+def _validate_contract_shape(
+    *,
+    status: str,
+    reason_code: str,
+    coverage_limited: bool,
+    coverage_reasons: list[str],
+    stages_completed: list[str],
+    retrieval_truncated: bool | None = None,
+) -> None:
+    if reason_code not in _STATUS_REASONS[status]:
+        raise ValueError("reason_code is incompatible with status")
+    ordered_reasons = [reason for reason in _COVERAGE_ORDER if reason in coverage_reasons]
+    if coverage_reasons != ordered_reasons:
+        raise ValueError("coverage_reasons must be unique and in canonical order")
+    if coverage_limited != bool(coverage_reasons):
+        raise ValueError("coverage_limited must match coverage_reasons")
+    if retrieval_truncated is not None and retrieval_truncated != (
+        "byte_budget" in coverage_reasons
+    ):
+        raise ValueError("retrieval_truncated must represent byte-budget truncation")
+    if stages_completed != list(_STAGE_ORDER[:len(stages_completed)]):
+        raise ValueError("stages_completed must be a non-repeating pipeline prefix")
 
 
 class GroundedDocumentRequest(BaseModel):
@@ -39,16 +134,29 @@ class GroundedDocumentRequest(BaseModel):
     folder: str = Field(default="general", min_length=1, max_length=520)
     title: str = Field(..., min_length=1, max_length=300)
     content: str = Field(..., min_length=1, max_length=MAX_DOCUMENT_CHARS)
+    expected_revision_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    revision_reason: RevisionReason | None = None
 
 
 class GroundedDocumentResponse(BaseModel):
-    document_id: str
-    folder: str
-    title: str
-    source_sha256: str
-    relative_path: str
-    chunk_count: int
-    corpus_revision: str
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: str = Field(..., pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    revision_id: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    supersedes_revision_id: str | None = Field(
+        ...,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    revision_reason: DocumentRevisionReason
+    folder: str = Field(..., min_length=1, max_length=520)
+    title: str = Field(..., min_length=1, max_length=300)
+    source_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    relative_path: str = Field(..., min_length=1, max_length=1_000)
+    chunk_count: int = Field(..., ge=1)
+    corpus_revision: str = Field(..., pattern=r"^[0-9a-f]{64}$")
 
     @classmethod
     def from_record(cls, record: DocumentRecord) -> GroundedDocumentResponse:
@@ -60,6 +168,14 @@ class GroundedQueryRequest(BaseModel):
 
     prompt: str = Field(..., min_length=1, max_length=10_000)
     top_k: int = Field(default=6, ge=1, le=12)
+
+    @field_validator("prompt")
+    @classmethod
+    def canonical_query_fits_packet_budget(cls, value: str) -> str:
+        canonical_query = canonicalize_query(value)
+        if not canonical_query:
+            raise ValueError("prompt must contain a lexical query")
+        return value
 
 
 class ProposedCitation(BaseModel):
@@ -118,33 +234,162 @@ class FinalizerOutput(BaseModel):
 
 
 class GroundedCitation(BaseModel):
-    evidence_id: str
-    document_id: str
-    title: str
-    relative_path: str
-    source_sha256: str
-    quote: str
-    source_start_char: int
-    source_end_char: int
-    start_line: int
-    end_line: int
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str = Field(..., min_length=1, max_length=80)
+    document_id: str = Field(..., min_length=1, max_length=64)
+    document_revision_id: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    title: str = Field(..., min_length=1, max_length=300)
+    relative_path: str = Field(..., min_length=1, max_length=1_000)
+    source_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    quote: str = Field(..., min_length=1, max_length=1_200)
+    source_start_char: int = Field(..., ge=0)
+    source_end_char: int = Field(..., gt=0)
+    start_line: int = Field(..., ge=1)
+    end_line: int = Field(..., ge=1)
+
+    @model_validator(mode="after")
+    def span_is_ordered(self) -> GroundedCitation:
+        if self.source_end_char <= self.source_start_char:
+            raise ValueError("citation source span must be non-empty and ordered")
+        if self.end_line < self.start_line:
+            raise ValueError("citation line span must be ordered")
+        return self
+
+
+class GroundedPromptVersions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answerer: Literal["grounded-answerer-v1"] = ANSWERER_PROMPT_VERSION
+    verifier: Literal["grounded-verifier-v1"] = VERIFIER_PROMPT_VERSION
+    finalizer: Literal["grounded-finalizer-v1"] = FINALIZER_PROMPT_VERSION
+
+
+class GroundedStageFingerprints(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    gpt1: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    gpt2: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    gpt3: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class GroundedRAGResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract_version: Literal["grounded-rag-v1"] = GROUNDED_RAG_CONTRACT_VERSION
+    packet_schema_version: Literal[2] = SCHEMA_VERSION
+    run_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+    receipt_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     status: Literal["ANSWER", "PARTIAL", "ABSTAIN"]
-    answer: str
-    reason_code: str
-    corpus_revision: str
-    packet_id: str
-    retrieval_count: int
+    answer: str = Field(..., min_length=1)
+    reason_code: GroundedReasonCode
+    corpus_revision: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    packet_id: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    retrieval_version: Literal["sqlite-fts5-v2"] = RETRIEVER_VERSION
+    chunker_version: Literal["words-180-overlap-30-chars-4000-v2"] = CHUNKER_VERSION
+    retrieval_count: int = Field(..., ge=0, le=12)
     retrieval_truncated: bool = False
-    draft_claim_count: int = 0
-    supported_claim_count: int = 0
-    contradicted_claim_count: int = 0
-    conflict_claim_count: int = 0
-    insufficient_claim_count: int = 0
-    citations: list[GroundedCitation] = Field(default_factory=list)
-    stages_completed: list[str] = Field(default_factory=list)
+    coverage_limited: bool = False
+    coverage_reasons: list[CoverageReason] = Field(default_factory=list, max_length=3)
+    prompt_versions: GroundedPromptVersions = Field(
+        default_factory=GroundedPromptVersions
+    )
+    stage_fingerprints: GroundedStageFingerprints = Field(
+        default_factory=GroundedStageFingerprints
+    )
+    draft_claim_count: int = Field(default=0, ge=0, le=12)
+    supported_claim_count: int = Field(default=0, ge=0, le=12)
+    contradicted_claim_count: int = Field(default=0, ge=0, le=12)
+    conflict_claim_count: int = Field(default=0, ge=0, le=12)
+    insufficient_claim_count: int = Field(default=0, ge=0, le=12)
+    citations: list[GroundedCitation] = Field(default_factory=list, max_length=48)
+    stages_completed: list[CompletedStage] = Field(..., min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def response_invariants_hold(self) -> GroundedRAGResponse:
+        _validate_contract_shape(
+            status=self.status,
+            reason_code=self.reason_code,
+            coverage_limited=self.coverage_limited,
+            coverage_reasons=list(self.coverage_reasons),
+            stages_completed=list(self.stages_completed),
+            retrieval_truncated=self.retrieval_truncated,
+        )
+        if self.status == "ABSTAIN" and self.citations:
+            raise ValueError("an abstention cannot release citations")
+        if self.status != "ABSTAIN" and (
+            not self.citations or self.supported_claim_count == 0
+        ):
+            raise ValueError("an answer must release supported cited claims")
+        if self.reason_code == "no_lexical_match" and self.retrieval_count != 0:
+            raise ValueError("no_lexical_match requires an empty retrieval")
+        if (
+            "verifier" in self.stages_completed
+            and self.reason_code != "verifier_protocol_error"
+        ):
+            verdict_count = (
+                self.supported_claim_count
+                + self.contradicted_claim_count
+                + self.conflict_claim_count
+                + self.insufficient_claim_count
+            )
+            if verdict_count != self.draft_claim_count:
+                raise ValueError("verifier verdict counts must cover every draft claim")
+        return self
+
+
+class GroundedRunReceipt(BaseModel):
+    """Metadata-only receipt. Raw queries, evidence, claims, and prose are excluded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["grounded-run-receipt-v1"] = RUN_RECEIPT_VERSION
+    contract_version: Literal["grounded-rag-v1"] = GROUNDED_RAG_CONTRACT_VERSION
+    run_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+    created_at: str
+    latency_ms: int = Field(..., ge=0)
+    corpus_revision: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    packet_id: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    packet_schema_version: Literal[2] = SCHEMA_VERSION
+    retrieval_version: Literal["sqlite-fts5-v2"] = RETRIEVER_VERSION
+    chunker_version: Literal["words-180-overlap-30-chars-4000-v2"] = CHUNKER_VERSION
+    coverage_limited: bool
+    coverage_reasons: list[CoverageReason] = Field(..., max_length=3)
+    prompt_versions: GroundedPromptVersions
+    stage_fingerprints: GroundedStageFingerprints
+    stages_completed: list[CompletedStage] = Field(..., min_length=1, max_length=4)
+    draft_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    verification_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    selected_claim_ids: list[str] = Field(..., max_length=12)
+    citation_evidence_ids: list[str] = Field(..., max_length=48)
+    status: Literal["ANSWER", "PARTIAL", "ABSTAIN"]
+    reason_code: GroundedReasonCode
+    draft_claim_count: int = Field(..., ge=0, le=12)
+    supported_claim_count: int = Field(..., ge=0, le=12)
+    contradicted_claim_count: int = Field(..., ge=0, le=12)
+    conflict_claim_count: int = Field(..., ge=0, le=12)
+    insufficient_claim_count: int = Field(..., ge=0, le=12)
+
+    @model_validator(mode="after")
+    def receipt_invariants_hold(self) -> GroundedRunReceipt:
+        _validate_contract_shape(
+            status=self.status,
+            reason_code=self.reason_code,
+            coverage_limited=self.coverage_limited,
+            coverage_reasons=list(self.coverage_reasons),
+            stages_completed=list(self.stages_completed),
+        )
+        if len(self.selected_claim_ids) != len(set(self.selected_claim_ids)):
+            raise ValueError("selected_claim_ids must be unique")
+        if len(self.citation_evidence_ids) != len(set(self.citation_evidence_ids)):
+            raise ValueError("citation_evidence_ids must be unique")
+        if self.status == "ABSTAIN" and (
+            self.selected_claim_ids or self.citation_evidence_ids
+        ):
+            raise ValueError("an abstention cannot record released claims or citations")
+        if self.status != "ABSTAIN" and not self.selected_claim_ids:
+            raise ValueError("an answer receipt must record selected claims")
+        return self
 
 
 _ANSWERER_SYSTEM = """You are the claim-first answerer for a private user knowledge corpus.
@@ -201,6 +446,20 @@ def _object_hash(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
 
+def _safe_stage_fingerprints(
+    stage_configs: dict[str, dict],
+) -> GroundedStageFingerprints:
+    """Hash provider/model identity without retaining keys or endpoint URLs."""
+    fingerprints = {
+        stage: _object_hash({
+            "provider": str(stage_configs[stage].get("provider") or ""),
+            "model": str(stage_configs[stage].get("model") or ""),
+        })
+        for stage in ("gpt1", "gpt2", "gpt3")
+    }
+    return GroundedStageFingerprints(**fingerprints)
+
+
 def _render_claim_text(text: str) -> str | None:
     """Return inert CommonMark-safe claim text, or reject provenance spoofing."""
     text = unicodedata.normalize("NFKC", text)
@@ -248,6 +507,7 @@ def _validated_citation(
     return GroundedCitation(
         evidence_id=item.evidence_id,
         document_id=item.document_id,
+        document_revision_id=item.document_revision_id,
         title=item.title,
         relative_path=item.relative_path,
         source_sha256=item.source_sha256,
@@ -261,25 +521,45 @@ def _validated_citation(
 
 def _abstain(
     packet: EvidencePacket,
-    reason_code: str,
-    stages: list[str],
+    reason_code: GroundedReasonCode,
+    stages: list[CompletedStage],
     *,
+    run_id: str,
+    stage_fingerprints: GroundedStageFingerprints,
     draft_count: int = 0,
     verdicts: Counter | None = None,
 ) -> GroundedRAGResponse:
     verdicts = verdicts or Counter()
     if reason_code == "no_lexical_match":
         answer = "The available user data does not contain enough evidence to answer this question."
+    elif reason_code == "retrieval_query_term_limit_exceeded":
+        answer = (
+            "The query exceeded the fixed lexical-term limit, so retrieval "
+            "coverage was incomplete and no answer was returned."
+        )
+    elif reason_code == "evidence_packet_budget_exceeded":
+        answer = (
+            "Matching user data could not fit within the fixed evidence-packet "
+            "budget, so no answer was returned."
+        )
     else:
-        answer = "No answer was returned because the evidence verification path did not clear every required gate."
+        answer = (
+            "No answer was returned because the evidence verification path "
+            "did not clear every required gate."
+        )
     return GroundedRAGResponse(
+        run_id=run_id,
         status="ABSTAIN",
         answer=answer,
         reason_code=reason_code,
         corpus_revision=packet.corpus_revision,
         packet_id=packet.packet_id,
+        retrieval_version=packet.retrieval_version,
         retrieval_count=len(packet.items),
         retrieval_truncated=packet.truncated,
+        coverage_limited=packet.coverage_limited,
+        coverage_reasons=list(packet.coverage_reasons),
+        stage_fingerprints=stage_fingerprints,
         draft_claim_count=draft_count,
         supported_claim_count=verdicts["SUPPORTED"],
         contradicted_claim_count=verdicts["CONTRADICTED"],
@@ -290,20 +570,111 @@ def _abstain(
     )
 
 
+async def _persist_response_receipt(
+    *,
+    store: KnowledgeStore,
+    response: GroundedRAGResponse,
+    started_at: float,
+    draft_hash: str | None,
+    verification_hash: str | None,
+    selected_claim_ids: list[str],
+) -> GroundedRAGResponse:
+    citation_evidence_ids = list(dict.fromkeys(
+        citation.evidence_id for citation in response.citations
+    ))
+    receipt = GroundedRunReceipt(
+        contract_version=response.contract_version,
+        run_id=response.run_id,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        latency_ms=max(0, round((time.perf_counter() - started_at) * 1000)),
+        corpus_revision=response.corpus_revision,
+        packet_id=response.packet_id,
+        packet_schema_version=response.packet_schema_version,
+        retrieval_version=response.retrieval_version,
+        chunker_version=response.chunker_version,
+        coverage_limited=response.coverage_limited,
+        coverage_reasons=response.coverage_reasons,
+        prompt_versions=response.prompt_versions,
+        stage_fingerprints=response.stage_fingerprints,
+        stages_completed=response.stages_completed,
+        draft_hash=draft_hash,
+        verification_hash=verification_hash,
+        selected_claim_ids=selected_claim_ids,
+        citation_evidence_ids=citation_evidence_ids,
+        status=response.status,
+        reason_code=response.reason_code,
+        draft_claim_count=response.draft_claim_count,
+        supported_claim_count=response.supported_claim_count,
+        contradicted_claim_count=response.contradicted_claim_count,
+        conflict_claim_count=response.conflict_claim_count,
+        insufficient_claim_count=response.insufficient_claim_count,
+    )
+    receipt_sha256 = await asyncio.to_thread(
+        store.append_run_receipt,
+        receipt.model_dump(mode="json"),
+    )
+    return response.model_copy(update={"receipt_sha256": receipt_sha256})
+
+
 async def run_grounded_rag(
     request: GroundedQueryRequest,
     store: KnowledgeStore | None = None,
 ) -> GroundedRAGResponse:
     """Run the isolated grounded lane and never return unverified draft text."""
     store = store or KnowledgeStore(config.KNOWLEDGE_ROOT)
+    started_at = time.perf_counter()
+    run_id = uuid.uuid4().hex
+    stage_fingerprints = GroundedStageFingerprints()
+    draft_hash: str | None = None
+    verification_hash: str | None = None
+    selected_claim_ids: list[str] = []
+
+    async def finish(response: GroundedRAGResponse) -> GroundedRAGResponse:
+        return await _persist_response_receipt(
+            store=store,
+            response=response,
+            started_at=started_at,
+            draft_hash=draft_hash,
+            verification_hash=verification_hash,
+            selected_claim_ids=selected_claim_ids,
+        )
+
+    def abstain(
+        packet: EvidencePacket,
+        reason_code: GroundedReasonCode,
+        stages: list[CompletedStage],
+        *,
+        draft_count: int = 0,
+        verdicts: Counter | None = None,
+    ) -> GroundedRAGResponse:
+        return _abstain(
+            packet,
+            reason_code,
+            stages,
+            run_id=run_id,
+            stage_fingerprints=stage_fingerprints,
+            draft_count=draft_count,
+            verdicts=verdicts,
+        )
+
     packet = await asyncio.to_thread(store.retrieve, request.prompt, request.top_k)
-    stages = ["retrieval"]
+    stages: list[CompletedStage] = ["retrieval"]
     if not packet.items:
-        return _abstain(packet, "no_lexical_match", stages)
+        empty_reason: GroundedReasonCode = (
+            "evidence_packet_budget_exceeded"
+            if packet.truncated
+            else (
+                "retrieval_query_term_limit_exceeded"
+                if "query_term_limit" in packet.coverage_reasons
+                else "no_lexical_match"
+            )
+        )
+        return await finish(abstain(packet, empty_reason, stages))
 
     stage_configs = {
         stage: config.get_stage_config(stage) for stage in ("gpt1", "gpt2", "gpt3")
     }
+    stage_fingerprints = _safe_stage_fingerprints(stage_configs)
     if any(not cfg.get("api_key") for cfg in stage_configs.values()):
         raise PipelineError(400, "Configure an API key for all three grounded stages first.")
 
@@ -311,7 +682,7 @@ async def run_grounded_rag(
     evidence_by_id = {item.evidence_id: item for item in packet.items}
     answerer_prompt = _bounded_prompt(packet_json, {"question": request.prompt})
     if answerer_prompt is None:
-        return _abstain(packet, "model_input_budget_exceeded", stages)
+        return await finish(abstain(packet, "model_input_budget_exceeded", stages))
 
     answerer = await call_llm_structured(
         stage_configs["gpt1"],
@@ -321,9 +692,9 @@ async def run_grounded_rag(
     )
     stages.append("answerer")
     if answerer.packet_id != packet.packet_id:
-        return _abstain(packet, "answerer_packet_mismatch", stages)
+        return await finish(abstain(packet, "answerer_packet_mismatch", stages))
     if answerer.answerability == "UNANSWERABLE" or not answerer.claims:
-        return _abstain(packet, "answerer_abstained", stages)
+        return await finish(abstain(packet, "answerer_abstained", stages))
 
     draft_claims: list[dict] = []
     answerer_valid_citations: dict[str, list[GroundedCitation]] = {}
@@ -363,11 +734,13 @@ async def run_grounded_rag(
         "claims": blind_claims,
     })
     if verifier_prompt is None:
-        return _abstain(
-            packet,
-            "model_input_budget_exceeded",
-            stages,
-            draft_count=len(draft_claims),
+        return await finish(
+            abstain(
+                packet,
+                "model_input_budget_exceeded",
+                stages,
+                draft_count=len(draft_claims),
+            )
         )
     verifier = await call_llm_structured(
         stage_configs["gpt2"],
@@ -385,11 +758,13 @@ async def run_grounded_rag(
         or len(returned_ids) != len(set(returned_ids))
         or set(returned_ids) != set(expected_ids)
     ):
-        return _abstain(
-            packet,
-            "verifier_protocol_error",
-            stages,
-            draft_count=len(draft_claims),
+        return await finish(
+            abstain(
+                packet,
+                "verifier_protocol_error",
+                stages,
+                draft_count=len(draft_claims),
+            )
         )
 
     check_by_id = {check.claim_id: check for check in verifier.checks}
@@ -424,24 +799,29 @@ async def run_grounded_rag(
         if claim_id in answerer_valid_citations
         and claim_id in verifier_citations
         and claim_id in rendered_claim_text
-        and next(c for c in normalized_checks if c["claim_id"] == claim_id)["verdict"] == "SUPPORTED"
+        and next(c for c in normalized_checks if c["claim_id"] == claim_id)[
+            "verdict"
+        ] == "SUPPORTED"
     ]
-    if not eligible_ids:
-        reason_code = "conflict_in_evidence" if verdicts["CONFLICT"] else "no_supported_claims"
-        return _abstain(
-            packet,
-            reason_code,
-            stages,
-            draft_count=len(draft_claims),
-            verdicts=verdicts,
-        )
     verification = {
         "packet_id": packet.packet_id,
         "draft_hash": draft_hash,
         "checks": normalized_checks,
     }
     verification_hash = _object_hash(verification)
-
+    if not eligible_ids:
+        reason_code: GroundedReasonCode = (
+            "conflict_in_evidence" if verdicts["CONFLICT"] else "no_supported_claims"
+        )
+        return await finish(
+            abstain(
+                packet,
+                reason_code,
+                stages,
+                draft_count=len(draft_claims),
+                verdicts=verdicts,
+            )
+        )
     finalizer_prompt = _bounded_prompt(packet_json, {
         "question": request.prompt,
         "draft": draft,
@@ -450,12 +830,14 @@ async def run_grounded_rag(
         "eligible_claim_ids": eligible_ids,
     })
     if finalizer_prompt is None:
-        return _abstain(
-            packet,
-            "model_input_budget_exceeded",
-            stages,
-            draft_count=len(draft_claims),
-            verdicts=verdicts,
+        return await finish(
+            abstain(
+                packet,
+                "model_input_budget_exceeded",
+                stages,
+                draft_count=len(draft_claims),
+                verdicts=verdicts,
+            )
         )
     finalizer = await call_llm_structured(
         stage_configs["gpt3"],
@@ -473,24 +855,30 @@ async def run_grounded_rag(
         or len(selected) != len(set(selected))
         or any(claim_id not in eligible_ids for claim_id in selected)
     ):
-        return _abstain(
-            packet,
-            "finalizer_protocol_error",
-            stages,
-            draft_count=len(draft_claims),
-            verdicts=verdicts,
+        return await finish(
+            abstain(
+                packet,
+                "finalizer_protocol_error",
+                stages,
+                draft_count=len(draft_claims),
+                verdicts=verdicts,
+            )
         )
     if finalizer.decision == "ABSTAIN" or not selected:
         reason_code = "conflict_in_evidence" if verdicts["CONFLICT"] else (
             "finalizer_abstained" if finalizer.decision == "ABSTAIN" else "no_supported_claims"
         )
-        return _abstain(
-            packet,
-            reason_code,
-            stages,
-            draft_count=len(draft_claims),
-            verdicts=verdicts,
+        return await finish(
+            abstain(
+                packet,
+                reason_code,
+                stages,
+                draft_count=len(draft_claims),
+                verdicts=verdicts,
+            )
         )
+
+    selected_claim_ids = list(selected)
 
     citation_number: dict[tuple[str, int, int], int] = {}
     citations: list[GroundedCitation] = []
@@ -518,23 +906,30 @@ async def run_grounded_rag(
         and verdicts["SUPPORTED"] == len(draft_claims)
         else "PARTIAL"
     )
-    return GroundedRAGResponse(
-        status=status,
-        answer="\n".join(rendered_claims),
-        reason_code=(
-            "answered"
-            if status == "ANSWER"
-            else "partial_with_conflict" if verdicts["CONFLICT"] else "partial_evidence"
-        ),
-        corpus_revision=packet.corpus_revision,
-        packet_id=packet.packet_id,
-        retrieval_count=len(packet.items),
-        retrieval_truncated=packet.truncated,
-        draft_claim_count=len(draft_claims),
-        supported_claim_count=verdicts["SUPPORTED"],
-        contradicted_claim_count=verdicts["CONTRADICTED"],
-        conflict_claim_count=verdicts["CONFLICT"],
-        insufficient_claim_count=verdicts["INSUFFICIENT"],
-        citations=citations,
-        stages_completed=stages,
+    return await finish(
+        GroundedRAGResponse(
+            run_id=run_id,
+            status=status,
+            answer="\n".join(rendered_claims),
+            reason_code=(
+                "answered"
+                if status == "ANSWER"
+                else "partial_with_conflict" if verdicts["CONFLICT"] else "partial_evidence"
+            ),
+            corpus_revision=packet.corpus_revision,
+            packet_id=packet.packet_id,
+            retrieval_version=packet.retrieval_version,
+            retrieval_count=len(packet.items),
+            retrieval_truncated=packet.truncated,
+            coverage_limited=packet.coverage_limited,
+            coverage_reasons=list(packet.coverage_reasons),
+            stage_fingerprints=stage_fingerprints,
+            draft_claim_count=len(draft_claims),
+            supported_claim_count=verdicts["SUPPORTED"],
+            contradicted_claim_count=verdicts["CONTRADICTED"],
+            conflict_claim_count=verdicts["CONFLICT"],
+            insufficient_claim_count=verdicts["INSUFFICIENT"],
+            citations=citations,
+            stages_completed=stages,
+        )
     )

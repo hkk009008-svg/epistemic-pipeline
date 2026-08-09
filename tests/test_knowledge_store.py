@@ -13,6 +13,7 @@ import pytest
 from pipeline.knowledge_store import (
     MAX_CHUNK_CHARS,
     MAX_PACKET_BYTES,
+    DocumentVersionConflictError,
     KnowledgeStore,
     KnowledgeStoreError,
     StaleKnowledgeIndexError,
@@ -114,8 +115,12 @@ def test_concurrent_identical_upserts_publish_only_complete_source(monkeypatch, 
         records = [future.result(timeout=10) for future in futures]
 
     assert len(records) == 2
+    assert len({record.revision_id for record in records}) == 1
     packet = store.retrieve("Alice immutable data")
     assert packet.items[0].text == "Alice likes immutable data."
+    with sqlite3.connect(store.index_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM document_versions").fetchone()[0] == 1
+
 
 def test_update_creates_new_immutable_version_and_changes_revision(tmp_path):
     store = KnowledgeStore(tmp_path / "knowledge")
@@ -124,10 +129,17 @@ def test_update_creates_new_immutable_version_and_changes_revision(tmp_path):
     )
     first_path = store.root / first.relative_path
     second = store.upsert_document(
-        "profile", "personal", "Profile", "Alice's favorite color is green."
+        "profile",
+        "personal",
+        "Profile",
+        "Alice's favorite color is green.",
+        expected_revision_id=first.revision_id,
+        revision_reason="content_update",
     )
 
     assert first.source_sha256 != second.source_sha256
+    assert second.supersedes_revision_id == first.revision_id
+    assert second.revision_reason == "content_update"
     assert first.corpus_revision != second.corpus_revision
     assert first_path.read_text(encoding="utf-8") == "Alice's favorite color is blue."
     assert (store.root / second.relative_path).read_text(encoding="utf-8").endswith("green.")
@@ -139,7 +151,14 @@ def test_update_creates_new_immutable_version_and_changes_revision(tmp_path):
 def test_title_change_is_part_of_corpus_revision(tmp_path):
     store = KnowledgeStore(tmp_path / "knowledge")
     first = store.upsert_document("notes", "work", "Old title", "release codename comet")
-    second = store.upsert_document("notes", "work", "New title", "release codename comet")
+    second = store.upsert_document(
+        "notes",
+        "work",
+        "New title",
+        "release codename comet",
+        expected_revision_id=first.revision_id,
+        revision_reason="metadata_update",
+    )
     assert first.source_sha256 == second.source_sha256
     assert first.corpus_revision != second.corpus_revision
 
@@ -148,6 +167,8 @@ def test_no_index_and_no_match_return_empty_packets(tmp_path):
     store = KnowledgeStore(tmp_path / "knowledge")
     before = store.retrieve("nothing indexed")
     assert before.items == ()
+    assert before.coverage_limited is False
+    assert before.coverage_reasons == ()
     assert not store.root.exists()
 
     store.upsert_document("profile", "personal", "Profile", "Alice likes tea.")
@@ -161,6 +182,20 @@ def test_query_punctuation_is_escaped_for_fts(tmp_path):
     store.upsert_document("profile", "personal", "Profile", "Alice uses C++ for simulations.")
     packet = store.retrieve('Alice AND (C++) "simulations"?', top_k=3)
     assert packet.items
+
+
+def test_single_character_and_stopword_only_queries_are_not_silently_dropped(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document(
+        "launch",
+        "work",
+        "Launch",
+        "Project X launches Friday. The approved level is 7. To be or not to be.",
+    )
+
+    assert store.retrieve("What is X?").items
+    assert store.retrieve("Is it 7?").items
+    assert store.retrieve("to be").items
 
 
 def test_document_identifier_is_not_a_path(tmp_path):
@@ -179,6 +214,21 @@ def test_source_tampering_fails_closed(tmp_path):
 
     with pytest.raises(StaleKnowledgeIndexError):
         store.retrieve("Alice favorite color")
+
+
+def test_retrieval_rejects_forged_multiline_chunk_lines(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document(
+        "profile",
+        "personal",
+        "Profile",
+        "\nAlice likes blue.\nDetails follow.",
+    )
+    with sqlite3.connect(store.index_path) as conn:
+        conn.execute("UPDATE chunks SET start_line = 1, end_line = 2")
+
+    with pytest.raises(StaleKnowledgeIndexError, match="source lines"):
+        store.retrieve("Alice")
 
 
 def test_index_directory_symlink_cannot_escape_root(tmp_path):
@@ -209,8 +259,15 @@ def test_sources_symlink_cannot_escape_root(tmp_path):
 
 def test_same_document_id_moves_instead_of_leaving_two_active_entries(tmp_path):
     store = KnowledgeStore(tmp_path / "knowledge")
-    store.upsert_document("profile", "personal", "Profile", "Alice likes blue.")
-    store.upsert_document("profile", "archive", "Profile", "Alice likes green.")
+    first = store.upsert_document("profile", "personal", "Profile", "Alice likes blue.")
+    store.upsert_document(
+        "profile",
+        "archive",
+        "Profile",
+        "Alice likes green.",
+        expected_revision_id=first.revision_id,
+        revision_reason="content_update",
+    )
 
     packet = store.retrieve("profile Alice likes", top_k=12)
     assert packet.items
@@ -251,14 +308,322 @@ def test_evidence_packet_has_a_deterministic_byte_budget(tmp_path):
 
     assert packet.items
     assert packet.truncated is True
+    assert packet.coverage_limited is True
+    assert "byte_budget" in packet.coverage_reasons
     assert len(encoded) <= MAX_PACKET_BYTES
+
+
+def test_first_lexical_match_can_be_explicitly_omitted_by_packet_budget(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document(
+        "oversized",
+        "bounded",
+        "\U0001f600" * 300,
+        "needle " + ("\U0001f600" * 3_900),
+    )
+
+    packet = store.retrieve("needle " + ("\U0001f600" * 9_900))
+
+    assert packet.items == ()
+    assert packet.truncated is True
+    assert packet.coverage_limited is True
+    assert "byte_budget" in packet.coverage_reasons
+
+
+def test_top_k_omission_is_explicit_and_distinct_from_byte_truncation(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    for index in range(3):
+        store.upsert_document(
+            f"document_{index}",
+            "coverage",
+            f"Coverage {index}",
+            f"needle evidence number {index}",
+        )
+
+    packet = store.retrieve("needle evidence", top_k=1)
+
+    assert len(packet.items) == 1
+    assert packet.truncated is False
+    assert packet.coverage_limited is True
+    assert packet.coverage_reasons == ("top_k",)
+    assert packet.prompt_dict()["coverage_reasons"] == ["top_k"]
+
+
+def test_query_term_limit_is_explicit_when_a_later_term_is_omitted(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document("profile", "personal", "Profile", "needle")
+    query = " ".join([f"noise{index}" for index in range(24)] + ["needle"])
+
+    packet = store.retrieve(query)
+
+    assert packet.items == ()
+    assert packet.truncated is False
+    assert packet.coverage_limited is True
+    assert packet.coverage_reasons == ("query_term_limit",)
+
+
+@pytest.mark.parametrize("seed_corpus", [False, True])
+def test_nfkc_expansion_cannot_exceed_packet_budget(tmp_path, seed_corpus):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    if seed_corpus:
+        store.upsert_document("profile", "personal", "Profile", "ordinary evidence")
+
+    with pytest.raises(ValueError, match="canonical query exceeds"):
+        store.retrieve("\ufdfa" * 10_000)
+
+
+def test_retrieval_rejects_forged_active_revision_provenance(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document("profile", "personal", "Profile", "Alice likes blue.")
+    with sqlite3.connect(store.index_path) as conn:
+        conn.execute(
+            "UPDATE documents SET active_revision_id = ? WHERE document_id = ?",
+            ("f" * 64, "profile"),
+        )
+
+    with pytest.raises(StaleKnowledgeIndexError, match="immutable revision"):
+        store.retrieve("Alice")
+
+
+def test_retrieval_rejects_hash_invalid_revision_ledger_row(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    record = store.upsert_document(
+        "profile",
+        "personal",
+        "Profile",
+        "Alice likes blue.",
+    )
+    with sqlite3.connect(store.index_path) as conn:
+        row = conn.execute(
+            """
+            SELECT document_id, source_sha256, supersedes_revision_id, folder,
+                   title, relative_path, chunk_count, revision_reason, created_at
+            FROM document_versions WHERE revision_id = ?
+            """,
+            (record.revision_id,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO document_versions (
+                revision_id, document_id, source_sha256, supersedes_revision_id,
+                folder, title, relative_path, chunk_count, revision_reason, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("f" * 64, *row),
+        )
+        conn.execute(
+            "UPDATE documents SET active_revision_id = ? WHERE document_id = ?",
+            ("f" * 64, "profile"),
+        )
+
+    with pytest.raises(StaleKnowledgeIndexError, match="immutable revision"):
+        store.retrieve("Alice")
+
+
+def test_document_update_requires_exact_head_and_preserves_lineage(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    first = store.upsert_document("profile", "personal", "Profile", "Alice likes blue.")
+
+    with pytest.raises(DocumentVersionConflictError, match="expected_revision_id"):
+        store.upsert_document("profile", "personal", "Profile", "Alice likes green.")
+
+    second = store.upsert_document(
+        "profile",
+        "personal",
+        "Profile",
+        "Alice likes green.",
+        expected_revision_id=first.revision_id,
+        revision_reason="correction",
+    )
+    with pytest.raises(DocumentVersionConflictError, match="changed"):
+        store.upsert_document(
+            "profile",
+            "personal",
+            "Profile",
+            "Alice likes red.",
+            expected_revision_id=first.revision_id,
+            revision_reason="correction",
+        )
+
+    assert second.supersedes_revision_id == first.revision_id
+    assert {item.document_revision_id for item in store.retrieve("Alice likes").items} == {
+        second.revision_id
+    }
+    with sqlite3.connect(store.index_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT revision_id, supersedes_revision_id, revision_reason
+            FROM document_versions WHERE document_id = ? ORDER BY created_at
+            """,
+            ("profile",),
+        ).fetchall()
+        assert rows == [
+            (first.revision_id, None, "initial_create"),
+            (second.revision_id, first.revision_id, "correction"),
+        ]
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            conn.execute(
+                "UPDATE document_versions SET revision_reason = 'restore' WHERE revision_id = ?",
+                (first.revision_id,),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO document_versions (
+                    revision_id, document_id, source_sha256,
+                    supersedes_revision_id, folder, title, relative_path,
+                    chunk_count, revision_reason, created_at
+                )
+                SELECT revision_id, document_id, source_sha256,
+                       supersedes_revision_id, folder, title, relative_path,
+                       chunk_count, 'restore', created_at
+                FROM document_versions WHERE revision_id = ?
+                """,
+                (first.revision_id,),
+            )
+
+
+def test_revision_reasons_match_the_actual_change(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    first = store.upsert_document("profile", "personal", "Profile", "blue")
+
+    with pytest.raises(ValueError, match="metadata_update cannot change"):
+        store.upsert_document(
+            "profile",
+            "personal",
+            "Profile",
+            "green",
+            expected_revision_id=first.revision_id,
+            revision_reason="metadata_update",
+        )
+    with pytest.raises(ValueError, match="restore must target"):
+        store.upsert_document(
+            "profile",
+            "personal",
+            "Profile",
+            "never active",
+            expected_revision_id=first.revision_id,
+            revision_reason="restore",
+        )
+
+    second = store.upsert_document(
+        "profile",
+        "personal",
+        "Profile",
+        "green",
+        expected_revision_id=first.revision_id,
+        revision_reason="correction",
+    )
+    restored = store.upsert_document(
+        "profile",
+        "personal",
+        "Profile",
+        "blue",
+        expected_revision_id=second.revision_id,
+        revision_reason="restore",
+    )
+
+    assert restored.source_sha256 == first.source_sha256
+    assert restored.supersedes_revision_id == second.revision_id
+    assert restored.revision_reason == "restore"
+
+
+def test_concurrent_updates_from_one_head_allow_exactly_one_winner(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    first = store.upsert_document("profile", "personal", "Profile", "Alice likes blue.")
+    barrier = threading.Barrier(2)
+
+    def update(color: str):
+        barrier.wait(timeout=5)
+        try:
+            return store.upsert_document(
+                "profile",
+                "personal",
+                "Profile",
+                f"Alice likes {color}.",
+                expected_revision_id=first.revision_id,
+                revision_reason="correction",
+            )
+        except DocumentVersionConflictError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(update, ("green", "red")))
+
+    winners = [result for result in results if not isinstance(result, Exception)]
+    losers = [result for result in results if isinstance(result, DocumentVersionConflictError)]
+    assert len(winners) == 1
+    assert len(losers) == 1
+    packet = store.retrieve("Alice likes")
+    assert {item.document_revision_id for item in packet.items} == {winners[0].revision_id}
+    assert any(color in packet.items[0].text for color in ("green", "red"))
+    with sqlite3.connect(store.index_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM document_versions WHERE document_id = 'profile'"
+        ).fetchone()[0] == 2
+
+
+def test_schema_v1_active_documents_are_backfilled_into_revision_history(tmp_path):
+    root = tmp_path / "knowledge"
+    internal = root / ".rag"
+    internal.mkdir(parents=True)
+    index_path = internal / "index.sqlite3"
+    with sqlite3.connect(index_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE documents (
+                document_id TEXT PRIMARY KEY,
+                folder TEXT NOT NULL,
+                title TEXT NOT NULL,
+                source_sha256 TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy",
+                "archive",
+                "Legacy",
+                "a" * 64,
+                f"sources/archive/legacy/versions/{'a' * 64}.txt",
+                1,
+                "2026-01-01T00:00:00+00:00",
+            ),
+        )
+
+    store = KnowledgeStore(root)
+    migrated = store._connect(create=False)
+    assert migrated is not None
+    try:
+        row = migrated.execute(
+            "SELECT active_revision_id FROM documents WHERE document_id = 'legacy'"
+        ).fetchone()
+        version = migrated.execute(
+            "SELECT revision_reason FROM document_versions WHERE document_id = 'legacy'"
+        ).fetchone()
+    finally:
+        migrated.close()
+
+    assert row["active_revision_id"]
+    assert version["revision_reason"] == "legacy_import"
 
 
 def test_stale_inactive_chunk_cannot_enter_active_packet(tmp_path):
     store = KnowledgeStore(tmp_path / "knowledge")
-    store.upsert_document("profile", "personal", "Profile", "Alice likes blue.")
+    first = store.upsert_document("profile", "personal", "Profile", "Alice likes blue.")
     old = store.retrieve("Alice likes").items[0]
-    store.upsert_document("profile", "personal", "Profile", "Alice likes green.")
+    store.upsert_document(
+        "profile",
+        "personal",
+        "Profile",
+        "Alice likes green.",
+        expected_revision_id=first.revision_id,
+        revision_reason="content_update",
+    )
 
     with sqlite3.connect(store.index_path) as conn:
         conn.execute(

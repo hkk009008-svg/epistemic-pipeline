@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, Optional, TypedDict
 
-from pipeline.models import ConfidenceBreakdown, PipelineRequest, PipelineResponse, SearchSource
+from pipeline.models import ConfidenceBreakdown, PipelineRequest, SearchSource
 
 
 class PipelineState(TypedDict, total=False):
