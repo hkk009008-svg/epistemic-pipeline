@@ -50,19 +50,37 @@ knowledge_data/
 ```
 
 - Source versions are immutable and addressed by the SHA-256 of their UTF-8
-  bytes. Updating a document creates a new version; old source bytes remain
-  available for audit.
+  bytes. Every logical change also appends a `document_versions` row with its
+  revision ID, parent revision, closed reason code, folder/title snapshot, and
+  source location. Old source bytes and revision metadata remain available for
+  audit.
 - `index.sqlite3` is the authoritative active document map and FTS5 chunk index
   for this slice. Immutable blobs preserve evidence bytes, but there is no
   automatic database rebuild yet; back up the database with the source tree.
 - `document_id` is globally unique inside the corpus. Reusing it in a different
   folder moves the active logical document; the old content-addressed blob
-  remains inactive for audit.
+  remains inactive for audit. A non-idempotent update must supply the current
+  `expected_revision_id` plus `revision_reason`; SQLite `BEGIN IMMEDIATE`
+  compare-and-swap allows only one concurrent writer to advance that head.
+  Reasons are checked against the mutation: `metadata_update` cannot change
+  source bytes, `content_update` must change them, and `restore` must reproduce
+  a representation already present in that document's history.
 - Chunks preserve exact source character and line spans. Retrieval order is
   deterministic (`BM25`, then evidence ID).
 - Whitespace-free or unusually long spans are split at a fixed 4,000-character
-  ceiling. Canonical evidence packets have a 48,000-byte ceiling; lower-ranked
-  items that do not fit are omitted and `retrieval_truncated` is reported.
+  ceiling. Retrieval uses at most 24 unique non-stopword query terms, retaining
+  one-character identifiers and numerals; when filtering would leave no terms,
+  it falls back to the raw lexical tokens. A further eligible term sets
+  `query_term_limit`. A query whose normalized canonical JSON would consume
+  more than the fixed 40,000-byte query allocation is rejected before
+  retrieval; it is never silently truncated or allowed to exceed the packet
+  ceiling. Retrieval
+  asks SQLite for `top_k + 1`, so omission at the caller's rank limit sets
+  `top_k` without requiring a full index count. Canonical evidence packets also
+  have a 48,000-byte ceiling; omitted lower-ranked items set `byte_budget`.
+  `coverage_limited` and the closed `coverage_reasons` values
+  `query_term_limit`, `top_k`, and `byte_budget` disclose these distinct limits.
+  `retrieval_truncated` remains the byte-budget-only compatibility field.
 - Each retrieved source and chunk is hash-checked before it can enter a model
   prompt. A stale or modified index fails closed.
 
@@ -80,7 +98,7 @@ Retrieval runs once. The resulting canonical packet contains:
 - canonical query;
 - pinned retriever version;
 - ordered evidence IDs;
-- document/folder/title and versioned relative path;
+- document revision ID, folder/title, and versioned relative path;
 - source and chunk SHA-256 hashes;
 - exact character and line locations;
 - chunk text and BM25 ranking value.
@@ -95,10 +113,13 @@ a source document are not authorized instructions to any model.
 
 This proves support relative to the retrieved packet, not completeness against
 the entire folder map. The first version intentionally accepts false abstention
-from lexical misses. If a labeled retrieval benchmark shows that misses or
-omitted conflicts dominate, the next bounded step is claim-specific FTS against
-the same corpus revision followed by a superseding shared packet—not an
-open-ended agent retrieval loop.
+from lexical misses. A zero-match vocabulary mismatch produces no claim that
+could drive claim-specific retrieval; only a real labeled benchmark can justify
+a bounded deterministic query-expansion, hybrid, or embedding experiment for
+that failure. Claim-specific FTS is a different future mechanism for a draft
+whose supporting or conflicting evidence was omitted from the first packet. It
+must use the same corpus revision, produce a superseding shared packet, and
+rerun all three roles—not become an open-ended agent retrieval loop.
 
 ## Three constrained roles
 
@@ -125,9 +146,11 @@ result; keyword overlap can never create support.
 
 ### 3. Constrained final adjudicator
 
-LLM 3 runs whenever at least one claim is eligible for release. It sees the packet, canonical draft,
-verification ledger, and the IDs eligible for release. It may only order a
-subset of those IDs or abstain. It cannot write or rewrite factual prose.
+LLM 3 runs when at least one claim is eligible for release and its complete
+input fits the fixed model-input budget. An oversized finalizer input abstains
+before the call. Otherwise LLM 3 sees the packet, canonical draft, verification
+ledger, and the IDs eligible for release. It may only order a subset of those
+IDs or abstain. It cannot write or rewrite factual prose.
 
 Python then renders the verified claim text with numbered citation spans.
 An unsupported, contradicted, insufficient, conflicting, duplicate, or unknown
@@ -165,6 +188,25 @@ curl -X POST http://localhost:8000/api/grounded/documents/profile \
   }'
 ```
 
+The create response contains `revision_id`. A later update is compare-and-swap:
+
+```bash
+curl -X POST http://localhost:8000/api/grounded/documents/profile \
+  -H "Authorization: Bearer $KNOWLEDGE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "folder": "personal/preferences",
+    "title": "Profile",
+    "content": "Alice prefers Helix and uses a dark color theme.",
+    "expected_revision_id": "<revision_id from the current head>",
+    "revision_reason": "correction"
+  }'
+```
+
+Omitting or supplying a stale head for a real update returns HTTP 409. Repeating
+the exact active representation is idempotent and does not append a duplicate
+revision.
+
 Query the corpus:
 
 ```bash
@@ -174,18 +216,34 @@ curl -X POST http://localhost:8000/api/grounded/query \
   -d '{"prompt": "Which editor does Alice prefer?", "top_k": 6}'
 ```
 
-The response exposes the status, rendered answer, packet/corpus IDs, aggregate
-verification counts (including conflict separately from contradiction), and
-exact source citations. `retrieval_truncated` discloses when the fixed packet
-byte budget omitted lower-ranked matches. It does not expose raw model outputs
-or hidden reasoning traces.
+The versioned `grounded-rag-v1` response exposes the status, rendered answer,
+run/packet/corpus IDs, retrieval/chunker/prompt versions, coverage reasons,
+aggregate verification counts, and exact source citations. Once execution
+reaches model configuration, it also exposes credential-free SHA-256
+fingerprints of each provider/model pair. They are identifiers, not secrets;
+the no-lexical-match path runs before model configuration and returns `null`
+fingerprints. `reason_code` is a closed vocabulary. The response does not expose
+raw model outputs, provider credentials, endpoint URLs, or hidden reasoning.
+
+Before releasing a normal `ANSWER`, `PARTIAL`, or `ABSTAIN`, the service appends
+a hash-bound `grounded-run-receipt-v1` row. Receipts contain only versions,
+hashes, IDs, stages, counts, status/reason, coverage, and latency. They
+deliberately exclude the query, answer, claim text, quotations, source paths,
+evidence text, API keys, endpoint URLs, and rationale. Receipt UPDATE and DELETE
+are blocked; failure to persist the receipt prevents release of the response.
+Input, retrieval, store, or model-configuration failures, provider exceptions,
+and route timeouts remain HTTP errors and do not currently receive a run
+receipt.
 
 ## Status contract
 
 - `ANSWER`: every emitted claim cleared all gates.
 - `PARTIAL`: only a supported subset is safe to emit.
-- `ABSTAIN`: no evidence, an answerer abstention, a protocol/hash/citation
-  failure, no supported claim, or a final adjudicator abstention.
+- `ABSTAIN`: no evidence, matching evidence that cannot fit the fixed packet
+  budget, an answerer abstention, a protocol/hash/citation failure, no supported
+  claim, or a final adjudicator abstention. Packet-budget omission is reported
+  as `evidence_packet_budget_exceeded`; an empty result after query-term capping
+  is `retrieval_query_term_limit_exceeded`. Neither is labeled a lexical miss.
 
 `reason_code=partial_with_conflict` or `conflict_in_evidence`, together with
 `conflict_claim_count`, keeps conflicting corpus evidence distinct from a claim
@@ -210,28 +268,42 @@ persistent private volume rather than the ephemeral application filesystem.
 Do not commit or bake `knowledge_data/` into an image; it is excluded by the
 repository ignore files.
 
-## What to measure before adding sophistication
+## Offline evaluation schema self-test
 
-Build a small human-reviewed corpus with answerable, unanswerable, conflicting,
-stale, distractor, prompt-injection, number/date mutation, modality reversal,
-and compound-claim cases. Measure separately:
+The repository includes a closed offline scoring contract and a synthetic
+schema fixture at `tests/fixtures/grounded_rag_v1/cases.jsonl`. It makes no model
+or network calls:
 
-- retrieval recall@k and MRR for gold evidence;
-- citation span validity and citation completeness;
-- supported/unsupported/contradiction verdict precision and recall;
-- unsupported claims reaching the final answer (primary safety metric);
-- correct abstention and false-abstention rates;
-- p50/p95 latency and cost.
+```bash
+python scripts/evaluate_grounded_rag.py
+python scripts/evaluate_grounded_rag.py --json
+```
 
-Compare answerer-only, answerer+verifier, and the complete constrained path on
-the same frozen corpus. Add embeddings, hybrid retrieval, reranking, or bounded
-claim-specific retrieval only if that evaluation shows lexical retrieval recall
-is the bottleneck. False abstention is preferable to opaque recall machinery in
-the first evidence-enforcement slice.
+The fixture contains hand-authored expected and recorded observations so CI can
+test schema validation and metric arithmetic. Its recall, citation, unsupported
+claim, abstention, latency, and cost values are not measurements of this
+pipeline. Citation support and corpus support are recorded labels; a citation
+counts as valid only when its labeled evidence ID is both retrieved and present
+in the expected relevant-evidence set. The scorer does not execute retrieval or
+validate source quotations itself.
+
+There is no live recording runner, independently human-labeled benchmark, stage
+ablation runner, or verifier precision/recall evaluator yet. Do not describe the
+synthetic fixture as a quality baseline or use its numbers to select retrieval
+or model changes. A future explicitly initiated runner must freeze a real corpus
+and independent labels before comparing answerer-only, answerer-plus-verifier,
+and the complete constrained path. Only those measurements may justify
+embeddings, hybrid retrieval, reranking, or bounded claim-specific retrieval.
+False abstention remains preferable to unmeasured recall machinery in the first
+evidence-enforcement slice.
 
 Do not report the existing hand-weighted confidence label as a probability of
 hallucination. A numerical risk estimate requires a held-out labeled set and
 calibration/risk-coverage evaluation.
+
+Mechanisms deferred until a qualifying measured, product, legal, privacy,
+security, or operational trigger exists are recorded in
+`docs/grounded-rag-adopt-later.md`.
 
 ## Research basis
 

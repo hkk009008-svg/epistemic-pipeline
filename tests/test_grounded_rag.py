@@ -1,9 +1,11 @@
 """Fail-closed contract tests for the isolated three-role grounded lane."""
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
+from pydantic import ValidationError
 
 import pipeline.grounded_rag as grounded
 from pipeline.grounded_rag import (
@@ -13,7 +15,12 @@ from pipeline.grounded_rag import (
     VerifierOutput,
     run_grounded_rag,
 )
-from pipeline.knowledge_store import EvidenceItem, EvidencePacket, KnowledgeStore
+from pipeline.knowledge_store import (
+    EvidenceItem,
+    EvidencePacket,
+    KnowledgeStore,
+    KnowledgeStoreError,
+)
 
 
 def _packet(with_items: bool = True) -> EvidencePacket:
@@ -25,6 +32,7 @@ def _packet(with_items: bool = True) -> EvidencePacket:
             rank=1,
             retrieval_score=-1.0,
             document_id="profile",
+            document_revision_id="d" * 64,
             folder="personal",
             title="Profile",
             relative_path="sources/personal/profile/versions/abc.txt",
@@ -42,9 +50,20 @@ def _packet(with_items: bool = True) -> EvidencePacket:
 class StubStore:
     def __init__(self, packet: EvidencePacket):
         self.packet = packet
+        self.receipts: dict[str, dict] = {}
 
     def retrieve(self, query: str, top_k: int) -> EvidencePacket:
         return self.packet
+
+    def append_run_receipt(self, receipt: dict) -> str:
+        payload = json.dumps(
+            receipt,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.receipts[receipt["run_id"]] = receipt
+        return hashlib.sha256(payload).hexdigest()
 
 
 def _task_from_prompt(user_content: str) -> dict:
@@ -82,6 +101,7 @@ def _install_config(monkeypatch):
 @pytest.mark.asyncio
 async def test_supported_answer_uses_same_packet_and_blind_verifier(monkeypatch):
     packet = _packet()
+    store = StubStore(packet)
     calls = []
 
     async def fake_call(cfg, system, user_content, response_model):
@@ -125,15 +145,54 @@ async def test_supported_answer_uses_same_packet_and_blind_verifier(monkeypatch)
     monkeypatch.setattr(grounded, "call_llm_structured", fake_call)
     response = await run_grounded_rag(
         GroundedQueryRequest(prompt="What is Alice's favorite color?"),
-        store=StubStore(packet),
+        store=store,
     )
 
     assert response.status == "ANSWER"
     assert response.answer == "- Alice's favorite color is blue. [1]"
     assert response.citations[0].quote == "Alice's favorite color is blue."
     assert response.stages_completed == ["retrieval", "answerer", "verifier", "finalizer"]
+    assert response.contract_version == "grounded-rag-v1"
+    assert response.packet_schema_version == 2
+    assert response.receipt_sha256 is not None
+    assert all(response.stage_fingerprints.model_dump().values())
+    receipt = store.receipts[response.run_id]
+    serialized_receipt = json.dumps(receipt, sort_keys=True)
+    assert receipt["selected_claim_ids"] == ["C1"]
+    assert receipt["citation_evidence_ids"] == ["E-source-1"]
+    assert "What is Alice" not in serialized_receipt
+    assert "Alice's favorite color" not in serialized_receipt
+    assert '"api_key"' not in serialized_receipt
+    invalid_payload = response.model_dump(mode="json")
+    invalid_payload["reason_code"] = "models_agreed_so_probably_true"
+    with pytest.raises(ValidationError):
+        grounded.GroundedRAGResponse.model_validate(invalid_payload)
+    impossible_payload = response.model_dump(mode="json")
+    impossible_payload.update({
+        "status": "ABSTAIN",
+        "coverage_limited": False,
+        "coverage_reasons": ["top_k"],
+        "stages_completed": ["finalizer", "retrieval"],
+    })
+    with pytest.raises(ValidationError):
+        grounded.GroundedRAGResponse.model_validate(impossible_payload)
     assert len(calls) == 3
     assert len({_packet_bytes_from_prompt(call[1]) for call in calls}) == 1
+
+
+@pytest.mark.asyncio
+async def test_receipt_write_failure_prevents_answer_release(monkeypatch):
+    packet = _packet(with_items=False)
+
+    class FailingReceiptStore(StubStore):
+        def append_run_receipt(self, receipt: dict) -> str:
+            raise KnowledgeStoreError("receipt unavailable")
+
+    with pytest.raises(KnowledgeStoreError, match="receipt unavailable"):
+        await run_grounded_rag(
+            GroundedQueryRequest(prompt="What is missing?"),
+            store=FailingReceiptStore(packet),
+        )
 
 
 @pytest.mark.asyncio
@@ -154,8 +213,58 @@ async def test_no_evidence_abstains_without_model_calls(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_matching_evidence_omitted_by_packet_budget_is_not_a_lexical_miss(
+    monkeypatch,
+):
+    packet = KnowledgeStore._build_packet(
+        "oversized query",
+        "c" * 64,
+        [],
+        truncated=True,
+        coverage_reasons=("byte_budget",),
+    )
+
+    async def should_not_call(*args, **kwargs):
+        raise AssertionError("models must not run without a packet item")
+
+    monkeypatch.setattr(grounded, "call_llm_structured", should_not_call)
+    response = await run_grounded_rag(
+        GroundedQueryRequest(prompt="oversized query"),
+        store=StubStore(packet),
+    )
+
+    assert response.status == "ABSTAIN"
+    assert response.reason_code == "evidence_packet_budget_exceeded"
+    assert response.coverage_reasons == ["byte_budget"]
+
+
+@pytest.mark.asyncio
+async def test_query_term_limited_empty_packet_is_not_a_lexical_miss(monkeypatch):
+    packet = KnowledgeStore._build_packet(
+        "limited query",
+        "c" * 64,
+        [],
+        coverage_reasons=("query_term_limit",),
+    )
+
+    async def should_not_call(*args, **kwargs):
+        raise AssertionError("models must not run without a packet item")
+
+    monkeypatch.setattr(grounded, "call_llm_structured", should_not_call)
+    response = await run_grounded_rag(
+        GroundedQueryRequest(prompt="limited query"),
+        store=StubStore(packet),
+    )
+
+    assert response.status == "ABSTAIN"
+    assert response.reason_code == "retrieval_query_term_limit_exceeded"
+    assert response.coverage_reasons == ["query_term_limit"]
+
+
+@pytest.mark.asyncio
 async def test_invalid_verifier_quote_cannot_reach_final_output(monkeypatch):
     packet = _packet()
+    store = StubStore(packet)
 
     async def fake_call(cfg, system, user_content, response_model):
         task = _task_from_prompt(user_content)
@@ -193,12 +302,13 @@ async def test_invalid_verifier_quote_cannot_reach_final_output(monkeypatch):
     monkeypatch.setattr(grounded, "call_llm_structured", fake_call)
     response = await run_grounded_rag(
         GroundedQueryRequest(prompt="What is Alice's favorite color?"),
-        store=StubStore(packet),
+        store=store,
     )
     assert response.status == "ABSTAIN"
     assert response.reason_code == "no_supported_claims"
     assert response.stages_completed == ["retrieval", "answerer", "verifier"]
     assert "blue" not in response.answer
+    assert store.receipts[response.run_id]["verification_hash"] is not None
 
 
 @pytest.mark.asyncio
