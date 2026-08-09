@@ -21,6 +21,13 @@ BEST_OF_N = int(os.getenv("BEST_OF_N", "1"))  # 1 = disabled, 2+ = enable best-o
 # Authorization: Bearer <token>. When unset (local dev), config endpoints are open.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
+# ---- Grounded local knowledge lane ----
+# This first slice intentionally exposes one fixed corpus per deployment.  A
+# future multi-user service must derive the corpus root from an authenticated
+# server-side principal; clients must never choose arbitrary filesystem roots.
+KNOWLEDGE_ROOT = os.getenv("KNOWLEDGE_ROOT", "knowledge_data")
+KNOWLEDGE_API_TOKEN = os.getenv("KNOWLEDGE_API_TOKEN", "")
+
 # ---- Runtime overrides (set via /api/openai/config) ----
 _runtime: dict = {}
 _lock = threading.Lock()

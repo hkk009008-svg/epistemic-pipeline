@@ -2,6 +2,12 @@
 
 A 3-stage LLM verification pipeline that checks factual accuracy and epistemic integrity of AI-generated content. Uses a **Generator → Verifier → Arbiter** architecture with the Audit v7 epistemic framework to catch hallucinations, fabricated statistics, unsupported causal claims, and prescriptive creep before they reach users.
 
+For private user-owned knowledge, the repository also includes an isolated
+**folder-grounded RAG lane**: deterministic SQLite FTS5 retrieval creates one
+immutable evidence packet, two models propose and verify atomic cited claims, a
+third model may only select verified claim IDs, and Python renders the final
+answer. See [docs/grounded-folder-rag.md](docs/grounded-folder-rag.md).
+
 For a structured walkthrough of what the service is, why it exists, how the async stage chain runs, and who it is for (including a first-person “as the program” view), see [docs/epistemic-pipeline-analysis.md](docs/epistemic-pipeline-analysis.md).
 
 ## The Problem
@@ -118,8 +124,14 @@ Main verification endpoint. Accepts a prompt, runs it through the 3-stage pipeli
 | `POST` | `/api/stage/config` | Per-stage model config (admin) |
 | `GET` | `/api/metrics` | Aggregate pipeline metrics |
 | `POST` | `/api/feedback` | Submit accuracy feedback |
+| `POST` | `/api/grounded/documents/{document_id}` | Version and index a private UTF-8 document |
+| `POST` | `/api/grounded/query` | Run the fail-closed folder-grounded pipeline |
 
 Admin endpoints require `Authorization: Bearer <ADMIN_TOKEN>` when `ADMIN_TOKEN` is set.
+If grounded mode is enabled without a separate `ADMIN_TOKEN`, its knowledge
+token also protects these shared model-configuration endpoints.
+Grounded endpoints always require `Authorization: Bearer <KNOWLEDGE_API_TOKEN>`
+and remain disabled when that token is unset.
 
 ## Verification Tiers
 
@@ -142,6 +154,8 @@ pipeline/
   decomposer.py       # Atomic claim decomposition (pre-verification)
   nli.py              # Optional NLI verification (DeBERTa-v3 or remote)
   search.py           # Tavily web search integration
+  knowledge_store.py  # Versioned local sources + deterministic SQLite FTS5 retrieval
+  grounded_rag.py     # Immutable-packet three-role grounded pipeline
   helpers.py          # LLM client management, JSON extraction, error types
 ```
 

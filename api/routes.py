@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hmac
 import json
 import os
 import time
@@ -17,16 +18,31 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 
-from api.rate_limit import rate_limit_dependency, get_rate_limit_info
-
 import config
-from pipeline.models import OpenAIConfig, TavilyConfig, StageConfig, PipelineRequest, PipelineResponse, StressRequest, FeedbackRequest
+from api.rate_limit import get_rate_limit_info, rate_limit_dependency
+from api.ui import UI_HTML
+from pipeline.feedback import FeedbackEntry, get_feedback_store
+from pipeline.grounded_rag import (
+    GroundedDocumentRequest,
+    GroundedDocumentResponse,
+    GroundedQueryRequest,
+    GroundedRAGResponse,
+    run_grounded_rag,
+)
 from pipeline.helpers import PipelineError
+from pipeline.knowledge_store import KnowledgeStore, KnowledgeStoreError
+from pipeline.metrics import get_aggregate
+from pipeline.models import (
+    FeedbackRequest,
+    OpenAIConfig,
+    PipelineRequest,
+    PipelineResponse,
+    StageConfig,
+    StressRequest,
+    TavilyConfig,
+)
 from pipeline.orchestrator import run_pipeline, run_pipeline_async
 from pipeline.stress import generate_stress_results
-from pipeline.metrics import get_aggregate
-from pipeline.feedback import FeedbackEntry, get_feedback_store
-from api.ui import UI_HTML
 
 router = APIRouter()
 
@@ -120,17 +136,47 @@ def _validate_base_url(url: str):
 
 
 def _require_admin(request: Request):
-    """Verify admin token on config-mutation endpoints.
+    """Verify a control-plane token on config-mutation endpoints.
 
-    When ADMIN_TOKEN is set, requests must include Authorization: Bearer <token>.
-    When ADMIN_TOKEN is empty (local dev), all requests are allowed.
+    ADMIN_TOKEN takes precedence. When grounded mode is enabled without a
+    separate admin token, its mandatory knowledge token also closes the model
+    configuration plane that determines where private evidence is sent.
     """
-    token = config.ADMIN_TOKEN
+    token = config.ADMIN_TOKEN or config.KNOWLEDGE_API_TOKEN
     if not token:
-        return  # No token configured — open access (local dev)
+        return  # Both protected modes are disabled: preserve local-dev behavior.
     auth = request.headers.get("authorization", "")
-    if auth != f"Bearer {token}":
-        raise HTTPException(status_code=401, detail="Unauthorized — invalid or missing admin token.")
+    expected = f"Bearer {token}"
+    if not hmac.compare_digest(auth.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized — invalid or missing control-plane token.",
+        )
+
+
+def _require_grounded_access(request: Request):
+    """Protect all reads and writes to the private local knowledge corpus.
+
+    Unlike the development-friendly admin endpoints, grounded endpoints remain
+    disabled when no token is configured.  User data must never become a public
+    endpoint because an environment variable was omitted.
+    """
+    token = config.KNOWLEDGE_API_TOKEN
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Grounded knowledge endpoints are disabled until "
+                "KNOWLEDGE_API_TOKEN is set."
+            ),
+        )
+    supplied = request.headers.get("authorization", "")
+    expected = f"Bearer {token}"
+    if not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized — invalid or missing knowledge token.",
+        )
 
 
 # ---- UI ----
@@ -447,6 +493,51 @@ async def pipeline_endpoint(req: PipelineRequest, request: Request):
             )
         except PipelineError as e:
             raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+@router.post(
+    "/api/grounded/documents/{document_id}",
+    response_model=GroundedDocumentResponse,
+    dependencies=[Depends(rate_limit_dependency), Depends(_require_grounded_access)],
+)
+async def grounded_document_upsert(document_id: str, req: GroundedDocumentRequest):
+    """Store an immutable document version and atomically update the FTS index."""
+    store = KnowledgeStore(config.KNOWLEDGE_ROOT)
+    try:
+        record = await asyncio.to_thread(
+            store.upsert_document,
+            document_id,
+            req.folder,
+            req.title,
+            req.content,
+        )
+        return GroundedDocumentResponse.from_record(record)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KnowledgeStoreError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.post(
+    "/api/grounded/query",
+    response_model=GroundedRAGResponse,
+    dependencies=[Depends(rate_limit_dependency), Depends(_require_grounded_access)],
+)
+async def grounded_query(req: GroundedQueryRequest):
+    """Answer from the fixed local corpus through all grounded evidence gates."""
+    try:
+        return await asyncio.wait_for(run_grounded_rag(req), timeout=_PIPELINE_TIMEOUT)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Grounded pipeline timed out after {_PIPELINE_TIMEOUT}s.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except KnowledgeStoreError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except PipelineError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 @router.post("/v2/pipeline", response_model=PipelineResponse, dependencies=[Depends(rate_limit_dependency)])

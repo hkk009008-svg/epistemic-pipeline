@@ -9,5 +9,6 @@ start.sh
 stress_harness.py
 APP_RATING.svg
 *.md
+knowledge_data
 .gitignore
 .dockerignore

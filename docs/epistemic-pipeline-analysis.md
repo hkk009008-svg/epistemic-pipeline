@@ -14,7 +14,7 @@ I am a **FastAPI service** ([app.py](../app.py)) whose job is to take a user’s
 
 - **Name / version**: “Epistemic Verification Pipeline” v3.0.0 in [app.py](../app.py); prompt framework **Audit v7** at `PROMPT_VERSION = "7.1.0"` in [pipeline/prompts.py](../pipeline/prompts.py).
 - **Core contract**: `POST /api/pipeline` accepts [PipelineRequest](../pipeline/models.py) (`prompt`, optional `tier`, `output_format`, `stream`) and returns [PipelineResponse](../pipeline/models.py): generator output, verifier JSON artifacts, optional arbiter path, `final_verdict` (`PASS` / `FAIL`), `final_result`, `confidence`, `claim_table`, violations/findings metadata, search fields.
-- **Supporting surfaces**: `GET /` embedded UI ([api/ui.py](../api/ui.py) via [api/routes.py](../api/routes.py)), `GET /health`, config endpoints for OpenAI/Tavily/per-stage models, `POST /api/stress` for batch stress testing ([pipeline/stress.py](../pipeline/stress.py)), rate limiting ([api/rate_limit.py](../api/rate_limit.py)), optional feedback storage ([pipeline/feedback.py](../pipeline/feedback.py)).
+- **Supporting surfaces**: `GET /` embedded UI ([api/ui.py](../api/ui.py) via [api/routes.py](../api/routes.py)), `GET /health`, config endpoints for OpenAI/Tavily/per-stage models, `POST /api/stress` for batch stress testing ([pipeline/stress.py](../pipeline/stress.py)), rate limiting ([api/rate_limit.py](../api/rate_limit.py)), optional feedback storage ([pipeline/feedback.py](../pipeline/feedback.py)), and a separately authenticated private folder-grounded lane at `POST /api/grounded/documents/{document_id}` and `POST /api/grounded/query`.
 
 ---
 
@@ -50,6 +50,18 @@ The live async orchestrator is `run_pipeline_async` in [pipeline/orchestrator.py
 
 **Confidence**: `compute_confidence()` in [pipeline/orchestrator.py](../pipeline/orchestrator.py) blends claim categories, weighted T1–T7 penalties, optional search authority scores, and NLI grounding.
 
+### Separate folder-grounded execution path
+
+Private user-owned knowledge does not pass through the legacy Audit-v7/search
+chain. [knowledge_store.py](../pipeline/knowledge_store.py) versions UTF-8 source
+bytes and materializes one deterministic SQLite FTS5 evidence packet.
+[grounded_rag.py](../pipeline/grounded_rag.py) then runs a claim-first answerer,
+a blind per-claim verifier, and an always-invoked constrained final adjudicator.
+Python permits only doubly cited `SUPPORTED` claim IDs and renders the final
+answer; missing evidence or any reference/hash/protocol failure abstains. See
+[grounded-folder-rag.md](grounded-folder-rag.md) for its exact contract and
+deployment boundary.
+
 ```mermaid
 flowchart LR
   user[User_or_Client]
@@ -76,7 +88,7 @@ flowchart LR
 | Audience | How they interact |
 |----------|-------------------|
 | **End users** | Browser UI at `/` for chat-style verification. |
-| **Integrators / apps** | `POST /api/pipeline` (JSON or NDJSON `stream: true`); n8n templates under [n8n-workflows/](../n8n-workflows/). |
+| **Integrators / apps** | `POST /api/pipeline` (JSON or NDJSON `stream: true`); authenticated `/api/grounded/*` endpoints for one fixed private corpus; n8n templates under [n8n-workflows/](../n8n-workflows/). |
 | **Operators** | Env-based config ([config.py](../config.py), `.env.example`), Railway/Docker deploy ([CLAUDE.md](../CLAUDE.md)); runtime key/model toggles via API. |
 | **Developers / QA** | Deterministic unit tests under [tests/](../tests/); stress harness via `/api/stress` and [tests.json](../tests.json). |
 
@@ -85,7 +97,7 @@ flowchart LR
 ## Operational character (how the program “feels” under load)
 
 - **Concurrency**: Shared `AsyncOpenAI` client with key-rotation safety in [app.py](../app.py); async LLM calls in stages.
-- **Safety / abuse**: Per-IP rate limit; `base_url` allowlist for custom providers to reduce SSRF risk ([api/routes.py](../api/routes.py)); optional CORS from `ALLOWED_ORIGINS`.
+- **Safety / abuse**: Per-IP rate limit; `base_url` allowlist for custom providers to reduce SSRF risk ([api/routes.py](../api/routes.py)); optional CORS from `ALLOWED_ORIGINS`; private grounded routes fail closed unless `KNOWLEDGE_API_TOKEN` is configured.
 - **Observability**: `PipelineMetrics` / `record_run` in orchestrator and stages.
 
 ---
@@ -94,3 +106,4 @@ flowchart LR
 
 - Full tripwire reference: `GPT2_TRIPWIRE_REFERENCE` and verifier parsing rules in [pipeline/prompts.py](../pipeline/prompts.py) + [pipeline/verifier.py](../pipeline/verifier.py).
 - Exact PASS/FAIL/BLOCK branching: `stage_verify`, `stage_soft_retry`, `stage_arbiter`, `stage_rewrite_loop` in [pipeline/stages.py](../pipeline/stages.py).
+- Folder-backed evidence and release invariants: [knowledge_store.py](../pipeline/knowledge_store.py), [grounded_rag.py](../pipeline/grounded_rag.py), and [grounded-folder-rag.md](grounded-folder-rag.md).

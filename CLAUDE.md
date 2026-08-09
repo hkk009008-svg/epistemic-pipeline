@@ -36,6 +36,8 @@ pipeline/
   convergence.py        # Rewrite loop convergence detection (finding deltas, oscillation)
   decomposer.py         # Atomic claim decomposition (pre-GPT-2 claim splitting)
   nli.py                # Optional NLI verification layer (DeBERTa-v3 or remote service)
+  knowledge_store.py    # Versioned private sources + deterministic SQLite FTS5 evidence packets
+  grounded_rag.py       # Isolated claim-first/verifier/constrained-finalizer RAG lane
   stress.py             # Stress testing framework, PSS (Pipeline Stability Score)
 
 tests/
@@ -111,6 +113,8 @@ User Prompt
 | POST | `/api/tavily/toggle` | Enable/disable web search |
 | POST | `/api/stage/config` | Set per-stage model config (provider/model/key) |
 | GET | `/api/stage/config/{stage}` | Get stage config (gpt1/gpt2/gpt3) |
+| POST | `/api/grounded/documents/{document_id}` | Version and index a private UTF-8 document |
+| POST | `/api/grounded/query` | Run the fail-closed folder-grounded lane |
 
 ## Environment Variables
 
@@ -124,6 +128,8 @@ User Prompt
 | `PIPELINE_URL` | No | `http://localhost:8000` | Base URL for n8n workflows |
 | `NLI_SERVICE_URL` | No | — | Optional remote NLI service URL |
 | `ANTHROPIC_API_KEY` | No | — | Anthropic API key (if using Claude for any stage) |
+| `KNOWLEDGE_ROOT` | No | `knowledge_data` | Fixed private corpus root for grounded mode |
+| `KNOWLEDGE_API_TOKEN` | Grounded mode | — | Required bearer token for all grounded reads/writes |
 
 ## Running Tests
 

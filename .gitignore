@@ -11,5 +11,6 @@ venv/
 *.egg-info/
 dist/
 build/
+knowledge_data/
 .claude/
 benchmarks/results/
