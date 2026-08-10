@@ -231,6 +231,89 @@ def test_retrieval_rejects_forged_multiline_chunk_lines(tmp_path):
         store.retrieve("Alice")
 
 
+@pytest.mark.parametrize("top_k", [1, 12])
+def test_retrieval_avoids_python_character_rescans_and_reads_source_once(
+    monkeypatch, tmp_path, top_k
+):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    record = store.upsert_document(
+        "performance-guard",
+        "tests",
+        "Retrieval performance guard",
+        "\n".join(f"needle evidence row{index}" for index in range(700)),
+    )
+    assert record.chunk_count > 12
+
+    baseline = store.retrieve("needle", top_k=top_k)
+    baseline_bytes = json.dumps(
+        baseline.prompt_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    baseline_evidence_ids = tuple(item.evidence_id for item in baseline.items)
+    assert len(baseline.items) == top_k
+    assert baseline.coverage_reasons == ("top_k",)
+    assert len({item.source_sha256 for item in baseline.items}) == 1
+
+    source_path = (store.root / record.relative_path).resolve(strict=True)
+    original_read_bytes = Path.read_bytes
+    counters = {
+        "source_reads": 0,
+        "decodes": 0,
+        "python_character_visits": 0,
+    }
+
+    class GuardedText(str):
+        def __iter__(self):
+            for character in str.__iter__(self):
+                counters["python_character_visits"] += 1
+                yield character
+
+        def __getitem__(self, key):
+            value = str.__getitem__(self, key)
+            if isinstance(key, slice):
+                return GuardedText(value)
+            counters["python_character_visits"] += 1
+            return value
+
+    class GuardedBytes(bytes):
+        def decode(self, encoding="utf-8", errors="strict"):
+            counters["decodes"] += 1
+            return GuardedText(bytes.decode(self, encoding, errors))
+
+    probe = GuardedText("guard")
+    assert list(probe) == list("guard")
+    assert probe[0] == "g"
+    assert counters["python_character_visits"] == len(probe) + 1
+    counters["python_character_visits"] = 0
+
+    def guarded_read_bytes(path):
+        payload = original_read_bytes(path)
+        if path.resolve(strict=True) == source_path:
+            counters["source_reads"] += 1
+            return GuardedBytes(payload)
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    instrumented = store.retrieve("needle", top_k=top_k)
+    instrumented_bytes = json.dumps(
+        instrumented.prompt_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert counters == {
+        "source_reads": 1,
+        "decodes": 1,
+        "python_character_visits": 0,
+    }
+    assert instrumented.packet_id == baseline.packet_id
+    assert tuple(item.evidence_id for item in instrumented.items) == baseline_evidence_ids
+    assert instrumented_bytes == baseline_bytes
+
+
 def test_index_directory_symlink_cannot_escape_root(tmp_path):
     root = tmp_path / "knowledge"
     outside = tmp_path / "outside"
