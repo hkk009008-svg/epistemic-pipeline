@@ -287,14 +287,202 @@ counts as valid only when its labeled evidence ID is both retrieved and present
 in the expected relevant-evidence set. The scorer does not execute retrieval or
 validate source quotations itself.
 
-There is no live recording runner, independently human-labeled benchmark, stage
-ablation runner, or verifier precision/recall evaluator yet. Do not describe the
-synthetic fixture as a quality baseline or use its numbers to select retrieval
-or model changes. A future explicitly initiated runner must freeze a real corpus
-and independent labels before comparing answerer-only, answerer-plus-verifier,
-and the complete constrained path. Only those measurements may justify
-embeddings, hybrid retrieval, reranking, or bounded claim-specific retrieval.
-False abstention remains preferable to unmeasured recall machinery in the first
+Do not describe this synthetic fixture as a quality baseline or use its numbers
+to select retrieval or model changes.
+
+## Measured Grounded-RAG Baseline v1 harness
+
+The repository also includes an evaluation-only harness for recording and
+scoring the real three-stage grounded path against a frozen, human-owned
+benchmark. The harness is executable, but adding it does **not** establish a
+measured baseline: no provider run is performed during implementation or CI.
+Only an explicitly authorized, complete recording plus independent human
+adjudication produces measurements.
+
+The protected benchmark is a single closed-schema JSON file outside the source
+tree. Its exact raw-byte SHA-256 is supplied to every command. Validation checks
+that hash before model configuration or calls, rejects unknown schema fields,
+unsafe paths, duplicate or missing IDs, and gold quotes that do not resolve
+uniquely in their declared documents. `record` then creates a fresh temporary
+`KnowledgeStore`, ingests documents in deterministic document-ID order, and
+runs every case exactly once through the same internal engine used by
+`run_grounded_rag`:
+
+```bash
+python scripts/measure_grounded_rag.py validate \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256>
+
+# Requires separate authorization for provider execution and spend.
+python scripts/measure_grounded_rag.py record \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --output-dir /absolute/private/path/run-id \
+  --external-cost-limit-usd <provider-side-hard-cap> \
+  --allow-live-execution
+
+python scripts/measure_grounded_rag.py score \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --observations /absolute/private/path/run-id/observations.json \
+  --observations-sha256 <retained-record-output-sha256> \
+  --adjudication /absolute/private/path/adjudication.json \
+  --adjudication-sha256 <human-retained-raw-byte-sha256> \
+  --output-dir /absolute/private/path/summary-id
+
+# Recompute every metric from the exact private inputs and verify the retained
+# digest printed by score.
+python scripts/measure_grounded_rag.py verify-summary \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --observations /absolute/private/path/run-id/observations.json \
+  --observations-sha256 <retained-record-output-sha256> \
+  --adjudication /absolute/private/path/adjudication.json \
+  --adjudication-sha256 <human-retained-raw-byte-sha256> \
+  --summary /absolute/private/path/summary-id/summary.json \
+  --summary-sha256 <retained-score-output-sha256>
+```
+
+### Optional Antigravity SDK evaluation provider
+
+The measured recorder reserves an explicit `agy-sdk` lane. It is evaluation-only:
+it is not registered in `config.PROVIDERS`, is not reachable from FastAPI or
+the normal `run_grounded_rag` call, and does not change the configured-provider
+default. Its worker protocol and adapter are offline-validated, but the public
+`record` path currently fails closed with `AGY_LIVE_EXECUTION_DISABLED` before
+reading a credential or importing the SDK. Process-group cleanup cannot contain
+a descendant that creates a new OS session; live use therefore remains blocked
+until a VM, container, or equivalent job-object backend owns the full process
+tree. The optional dependency is pinned separately so it is not installed in
+the production image:
+
+```bash
+python3 -m venv /absolute/private/path/agy-eval-venv
+/absolute/private/path/agy-eval-venv/bin/python -m pip install \
+  -r requirements.txt -r scripts/requirements-agy-eval.txt
+
+# Offline inspection only: hashes the installed SDK distribution and bundled
+# localharness executable. It does not import/start the SDK or make a model call.
+/absolute/private/path/agy-eval-venv/bin/python \
+  -m pipeline.agy_evaluation_provider
+```
+
+The closed future-live interface reserves the two printed hashes, exact model,
+per-stage timeout, and dedicated `GEMINI_API_KEY` shown below. These arguments,
+ordinary live-execution and benchmark-disclosure authority, retention policy,
+and an externally enforced spending cap are all necessary, but they do not
+override the current containment block:
+
+```bash
+python scripts/measure_grounded_rag.py record \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --output-dir /absolute/private/path/run-id \
+  --external-cost-limit-usd <provider-side-hard-cap> \
+  --evaluation-provider agy-sdk \
+  --agy-model <exact-sdk-model> \
+  --agy-sdk-artifact-sha256 <offline-inspection-sdk-sha256> \
+  --agy-localharness-sha256 <offline-inspection-localharness-sha256> \
+  --agy-call-timeout-seconds 120 \
+  --allow-live-execution
+```
+
+The adapter sends each structured call through a fresh private worker using
+bounded stdin/stdout. Prompts, evidence, schemas, and credentials never appear
+in argv. The worker exposes only the SDK `FINISH` structured-output capability,
+with custom tools, MCP, skills, hooks, triggers, workspaces, subagents, and SDK
+retries disabled. It revalidates the result with the existing closed stage
+schema, removes the worker state before releasing the result, and converts any
+runtime/hash/model/tool/schema/output/timeout/cleanup failure into the existing
+sanitized `INCOMPLETE` recording path.
+
+The fixed public CLI gate is stronger than those worker checks: it prevents the
+worker from starting at all until descendant containment is implemented and
+separately reviewed. Fake workers exercise the protocol and cleanup behavior in
+tests; they are not evidence that live containment is available.
+
+This is the official `google-antigravity` Python SDK using an explicitly
+supplied Gemini Developer API credential. It does **not** reuse an authenticated
+`agy` CLI subscription session. The CLI persists its own session state and does
+not provide the closed no-transcript/no-ambient-tool boundary required here.
+The SDK's requested model is recorded as requested-only unless the SDK itself
+reports an effective model. Provider-internal retries or routing are not
+attested. No live SDK or CLI model call was performed while implementing or
+testing this adapter, so this change does not establish a measured AGY/Gemini
+baseline.
+
+Normal and recorded execution return the same `GroundedRAGResponse`. Recording
+uses an inert private accumulator at deterministic stage boundaries; it cannot
+change retrieval, model inputs, verdicts, selection, receipt persistence, or
+rendering. The private observation bundle contains ordered retrieval metadata;
+normalized draft claims and proposed-citation validity; verifier raw and
+effective verdicts and validated spans; eligible IDs; finalizer decision,
+protocol validity, requested and accepted IDs; final response metadata and
+citations; and stage and total latency. Per-stage timing is observation-bound,
+while total latency is derived directly from the production receipt's durable
+integer measurement. `score` therefore refuses to read observations without the
+raw-byte digest printed by `record`; a caller cannot edit stage timing and keep
+the retained measurement identity. An invalid verifier quote therefore
+remains observable as raw `SUPPORTED` but effective `INSUFFICIENT`.
+Each case also retains the grounded contract, packet, retriever, chunker, prompt
+versions, safe provider/model fingerprints, draft and verification hashes, and
+the requested retrieval `k`. It also retains the exact metadata-only production
+receipt and its digest. The observation bundle hashes the exact source files
+that define the recorder and grounded execution and binds the resolved Python,
+SQLite, Pydantic, provider-SDK, and HTTP-client versions. An uncommitted,
+later-modified, or runtime-different implementation therefore cannot masquerade
+as the measured implementation.
+
+Observation files may contain claim text and exact quotes. They are private
+evaluation artifacts and must not be published, logged, or confused with the
+metadata-only production receipt. They never contain prompts, full evidence
+packets, provider responses, reasoning, credentials, API keys, endpoint URLs,
+or provider configuration. Publication exclusively reserves the output
+directory and atomically links the complete JSON file under its final name; it
+never replaces an existing path. Because another process can rename any
+pathname after the final inode check, every downstream command also requires
+and verifies the retained raw-byte digest for observations, human adjudication,
+and summary. If durability confirmation fails after a file
+is linked, the private directory is retained for quarantine rather than deleting
+a path that another process may have replaced. Provider errors and interruption
+produce an `INCOMPLETE` bundle; an incomplete or selectively omitted run cannot
+be scored.
+
+Human truth remains separate from model observations. The adjudication file is
+bound to the SHA-256 of the exact canonical observation bytes and must label
+every draft claim and every released citation exactly once. The summary binds
+both the observation and adjudication digests. Corpus
+support is never inferred from the answerer, verifier, finalizer, pipeline
+status, or citation presence. The scorer reports retrieval recall over gold
+spans; unsupported-claim rates at answerer, verifier-supported, and released
+cuts; verifier `SUPPORTED` precision and recall; citation validity and
+completeness; correct and false abstention; answer coverage; coverage reasons;
+and stage and total latency. Observation schema v2 can retain closed per-stage
+Antigravity invocation receipts with exact requested identity, runtime hashes,
+content hashes, duration, and token counts only when the SDK explicitly reports
+them. It never estimates or invents counts. The published v1 aggregate usage
+and cost object remains `UNAVAILABLE` with its existing reason code and `null`
+values; the SDK does not provide a trustworthy dollar cost, and zero would be
+false data.
+
+Latency aggregates retain their sorted finite samples so percentile arithmetic
+is independently derivable. A summary is not trusted merely because its fields
+are internally consistent: `verify-summary` checks the externally retained
+summary digest and recomputes the complete artifact from the bound observations,
+adjudication, and frozen benchmark.
+
+The benchmark's cost number is an external authorization ceiling, not measured
+spend. Because the current adapter cannot meter cost, `record` requires the
+caller to name a separately enforced provider-side hard cap no greater than
+that ceiling. The flag records the prerequisite; it does not create a provider
+budget. A scored summary has an explicit `PASS` or `FAIL` result. `FAIL` is
+retained as diagnostic evidence and the CLI exits with status `4`, so publishing
+a failed measurement cannot be mistaken for a promotion gate passing.
+
+The v1 harness records the complete constrained path, not stage ablations.
+Only a completed and independently adjudicated run may justify embeddings,
+hybrid retrieval, reranking, or bounded claim-specific retrieval. False
+abstention remains preferable to unmeasured recall machinery in the first
 evidence-enforcement slice.
 
 Do not report the existing hand-weighted confidence label as a probability of
