@@ -22,6 +22,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -65,6 +66,7 @@ GroundedReasonCode = Literal[
 ]
 CoverageReason = Literal["query_term_limit", "top_k", "byte_budget"]
 CompletedStage = Literal["retrieval", "answerer", "verifier", "finalizer"]
+GroundedStageName = Literal["gpt1", "gpt2", "gpt3"]
 RevisionReason = Literal["content_update", "metadata_update", "correction", "restore"]
 DocumentRevisionReason = Literal[
     "initial_create",
@@ -272,6 +274,43 @@ class GroundedStageFingerprints(BaseModel):
     gpt1: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     gpt2: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     gpt3: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class GroundedRecordedStageIdentity(BaseModel):
+    """Secret-free provider identity admitted only by the recorded lane."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: str = Field(..., min_length=1, max_length=80)
+    model: str = Field(..., min_length=1, max_length=160)
+
+    @field_validator("provider", "model")
+    @classmethod
+    def identity_is_log_safe(cls, value: str) -> str:
+        if value != value.strip() or any(ord(character) < 0x20 for character in value):
+            raise ValueError("recorded provider identity is malformed")
+        return value
+
+
+GroundedRecordedCaller = Callable[
+    [GroundedStageName, str, str, type[BaseModel]],
+    Awaitable[BaseModel],
+]
+
+
+@dataclass(frozen=True)
+class GroundedRecordedExecution:
+    """Evaluation-only structured caller; never used by the production route."""
+
+    stage_identities: Mapping[GroundedStageName, GroundedRecordedStageIdentity]
+    caller: GroundedRecordedCaller
+
+    def __post_init__(self) -> None:
+        expected = {"gpt1", "gpt2", "gpt3"}
+        if set(self.stage_identities) != expected:
+            raise ValueError("recorded execution must bind exactly three stages")
+        if not callable(self.caller):
+            raise ValueError("recorded execution caller must be callable")
 
 
 class GroundedRAGResponse(BaseModel):
@@ -484,11 +523,23 @@ class GroundedStageLatencyArtifacts(_GroundedArtifactModel):
     total: float
 
 
+class GroundedStageInvocationArtifact(_GroundedArtifactModel):
+    """Exact content hashes at the shared structured-call boundary."""
+
+    stage: GroundedStageName
+    provider: str = Field(..., min_length=1, max_length=80)
+    model: str = Field(..., min_length=1, max_length=160)
+    system_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    user_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    response_schema_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    response_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+
 class GroundedRunArtifacts(_GroundedArtifactModel):
     """Private evaluation-only snapshot; never persisted as a production receipt."""
 
-    schema_version: Literal["grounded-run-artifacts-v1"] = (
-        "grounded-run-artifacts-v1"
+    schema_version: Literal["grounded-run-artifacts-v2"] = (
+        "grounded-run-artifacts-v2"
     )
     contract_version: Literal["grounded-rag-v1"] = GROUNDED_RAG_CONTRACT_VERSION
     packet_schema_version: Literal[2] = SCHEMA_VERSION
@@ -514,6 +565,7 @@ class GroundedRunArtifacts(_GroundedArtifactModel):
     verification_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     latency_ms: GroundedStageLatencyArtifacts
     latency_capture_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    stage_invocations: tuple[GroundedStageInvocationArtifact, ...] = ()
     provider_usage: Literal["UNAVAILABLE"] = "UNAVAILABLE"
     cost_usd: None = None
 
@@ -544,6 +596,17 @@ class GroundedRunArtifacts(_GroundedArtifactModel):
             self.latency_ms,
         ):
             raise ValueError("captured latency hash does not match latency artifacts")
+        expected_stages = tuple(
+            stage
+            for stage, called in (
+                ("gpt1", self.answerer.called),
+                ("gpt2", self.verifier.called),
+                ("gpt3", self.finalizer.called),
+            )
+            if called
+        )
+        if tuple(item.stage for item in self.stage_invocations) != expected_stages:
+            raise ValueError("captured stage invocations do not match called stages")
         return self
 
 
@@ -572,6 +635,9 @@ class _GroundedCaptureAccumulator:
     draft_hash: str | None = None
     verification_hash: str | None = None
     selected_claim_ids: tuple[str, ...] = ()
+    stage_invocations: list[GroundedStageInvocationArtifact] = field(
+        default_factory=list
+    )
 
     def freeze(self, response: GroundedRAGResponse) -> GroundedRunArtifacts:
         if (
@@ -631,6 +697,7 @@ class _GroundedCaptureAccumulator:
                 response.receipt_sha256,
                 latency_ms,
             ),
+            stage_invocations=tuple(self.stage_invocations),
         )
 
 
@@ -967,6 +1034,7 @@ async def _run_grounded_rag(
     store: KnowledgeStore | None = None,
     *,
     capture: _GroundedCaptureAccumulator | None = None,
+    recorded_execution: GroundedRecordedExecution | None = None,
 ) -> GroundedRAGResponse:
     """Run the shared grounded engine with an optional inert private capture."""
     store = store or KnowledgeStore(config.KNOWLEDGE_ROOT)
@@ -1032,12 +1100,58 @@ async def _run_grounded_rag(
         )
         return await finish(abstain(packet, empty_reason, stages))
 
-    stage_configs = {
-        stage: config.get_stage_config(stage) for stage in ("gpt1", "gpt2", "gpt3")
-    }
+    if recorded_execution is None:
+        stage_configs = {
+            stage: config.get_stage_config(stage)
+            for stage in ("gpt1", "gpt2", "gpt3")
+        }
+    else:
+        stage_configs = {
+            stage: recorded_execution.stage_identities[stage].model_dump(mode="json")
+            for stage in ("gpt1", "gpt2", "gpt3")
+        }
     stage_fingerprints = _safe_stage_fingerprints(stage_configs)
-    if any(not cfg.get("api_key") for cfg in stage_configs.values()):
+    if recorded_execution is None and any(
+        not cfg.get("api_key") for cfg in stage_configs.values()
+    ):
         raise PipelineError(400, "Configure an API key for all three grounded stages first.")
+
+    async def invoke_stage(
+        stage: GroundedStageName,
+        system: str,
+        user_content: str,
+        response_model: type[BaseModel],
+    ) -> BaseModel:
+        if recorded_execution is None:
+            result = await call_llm_structured(
+                stage_configs[stage],
+                system,
+                user_content,
+                response_model,
+            )
+        else:
+            result = await recorded_execution.caller(
+                stage,
+                system,
+                user_content,
+                response_model,
+            )
+        # The evaluation caller does not get a weaker response contract. Even
+        # a validated object is serialized and revalidated against the exact
+        # production stage model before the grounded engine consumes it.
+        validated = response_model.model_validate(result.model_dump(mode="json"))
+        if capture is not None:
+            response_schema = response_model.model_json_schema()
+            capture.stage_invocations.append(GroundedStageInvocationArtifact(
+                stage=stage,
+                provider=str(stage_configs[stage].get("provider") or ""),
+                model=str(stage_configs[stage].get("model") or ""),
+                system_sha256=hashlib.sha256(system.encode("utf-8")).hexdigest(),
+                user_sha256=hashlib.sha256(user_content.encode("utf-8")).hexdigest(),
+                response_schema_sha256=_object_hash(response_schema),
+                response_sha256=_object_hash(validated.model_dump(mode="json")),
+            ))
+        return validated
 
     packet_json = _canonical_bytes(packet.prompt_dict()).decode("utf-8")
     evidence_by_id = {item.evidence_id: item for item in packet.items}
@@ -1046,8 +1160,8 @@ async def _run_grounded_rag(
         return await finish(abstain(packet, "model_input_budget_exceeded", stages))
 
     answerer_started = time.perf_counter() if capture is not None else None
-    answerer = await call_llm_structured(
-        stage_configs["gpt1"],
+    answerer = await invoke_stage(
+        "gpt1",
         _ANSWERER_SYSTEM,
         answerer_prompt,
         AnswererOutput,
@@ -1115,8 +1229,8 @@ async def _run_grounded_rag(
             )
         )
     verifier_started = time.perf_counter() if capture is not None else None
-    verifier = await call_llm_structured(
-        stage_configs["gpt2"],
+    verifier = await invoke_stage(
+        "gpt2",
         _VERIFIER_SYSTEM,
         verifier_prompt,
         VerifierOutput,
@@ -1238,8 +1352,8 @@ async def _run_grounded_rag(
             )
         )
     finalizer_started = time.perf_counter() if capture is not None else None
-    finalizer = await call_llm_structured(
-        stage_configs["gpt3"],
+    finalizer = await invoke_stage(
+        "gpt3",
         _FINALIZER_SYSTEM,
         finalizer_prompt,
         FinalizerOutput,
@@ -1366,8 +1480,15 @@ async def run_grounded_rag(
 async def run_grounded_rag_recorded(
     request: GroundedQueryRequest,
     store: KnowledgeStore | None = None,
+    *,
+    recorded_execution: GroundedRecordedExecution | None = None,
 ) -> tuple[GroundedRAGResponse, GroundedRunArtifacts]:
     """Run once and return an explicitly private evaluation-only snapshot."""
     capture = _GroundedCaptureAccumulator(retrieval_k=request.top_k)
-    response = await _run_grounded_rag(request, store, capture=capture)
+    response = await _run_grounded_rag(
+        request,
+        store,
+        capture=capture,
+        recorded_execution=recorded_execution,
+    )
     return response, capture.freeze(response)

@@ -343,6 +343,74 @@ python scripts/measure_grounded_rag.py verify-summary \
   --summary-sha256 <retained-score-output-sha256>
 ```
 
+### Optional Antigravity SDK evaluation provider
+
+The measured recorder reserves an explicit `agy-sdk` lane. It is evaluation-only:
+it is not registered in `config.PROVIDERS`, is not reachable from FastAPI or
+the normal `run_grounded_rag` call, and does not change the configured-provider
+default. Its worker protocol and adapter are offline-validated, but the public
+`record` path currently fails closed with `AGY_LIVE_EXECUTION_DISABLED` before
+reading a credential or importing the SDK. Process-group cleanup cannot contain
+a descendant that creates a new OS session; live use therefore remains blocked
+until a VM, container, or equivalent job-object backend owns the full process
+tree. The optional dependency is pinned separately so it is not installed in
+the production image:
+
+```bash
+python3 -m venv /absolute/private/path/agy-eval-venv
+/absolute/private/path/agy-eval-venv/bin/python -m pip install \
+  -r requirements.txt -r scripts/requirements-agy-eval.txt
+
+# Offline inspection only: hashes the installed SDK distribution and bundled
+# localharness executable. It does not import/start the SDK or make a model call.
+/absolute/private/path/agy-eval-venv/bin/python \
+  -m pipeline.agy_evaluation_provider
+```
+
+The closed future-live interface reserves the two printed hashes, exact model,
+per-stage timeout, and dedicated `GEMINI_API_KEY` shown below. These arguments,
+ordinary live-execution and benchmark-disclosure authority, retention policy,
+and an externally enforced spending cap are all necessary, but they do not
+override the current containment block:
+
+```bash
+python scripts/measure_grounded_rag.py record \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --output-dir /absolute/private/path/run-id \
+  --external-cost-limit-usd <provider-side-hard-cap> \
+  --evaluation-provider agy-sdk \
+  --agy-model <exact-sdk-model> \
+  --agy-sdk-artifact-sha256 <offline-inspection-sdk-sha256> \
+  --agy-localharness-sha256 <offline-inspection-localharness-sha256> \
+  --agy-call-timeout-seconds 120 \
+  --allow-live-execution
+```
+
+The adapter sends each structured call through a fresh private worker using
+bounded stdin/stdout. Prompts, evidence, schemas, and credentials never appear
+in argv. The worker exposes only the SDK `FINISH` structured-output capability,
+with custom tools, MCP, skills, hooks, triggers, workspaces, subagents, and SDK
+retries disabled. It revalidates the result with the existing closed stage
+schema, removes the worker state before releasing the result, and converts any
+runtime/hash/model/tool/schema/output/timeout/cleanup failure into the existing
+sanitized `INCOMPLETE` recording path.
+
+The fixed public CLI gate is stronger than those worker checks: it prevents the
+worker from starting at all until descendant containment is implemented and
+separately reviewed. Fake workers exercise the protocol and cleanup behavior in
+tests; they are not evidence that live containment is available.
+
+This is the official `google-antigravity` Python SDK using an explicitly
+supplied Gemini Developer API credential. It does **not** reuse an authenticated
+`agy` CLI subscription session. The CLI persists its own session state and does
+not provide the closed no-transcript/no-ambient-tool boundary required here.
+The SDK's requested model is recorded as requested-only unless the SDK itself
+reports an effective model. Provider-internal retries or routing are not
+attested. No live SDK or CLI model call was performed while implementing or
+testing this adapter, so this change does not establish a measured AGY/Gemini
+baseline.
+
 Normal and recorded execution return the same `GroundedRAGResponse`. Recording
 uses an inert private accumulator at deterministic stage boundaries; it cannot
 change retrieval, model inputs, verdicts, selection, receipt persistence, or
@@ -389,9 +457,13 @@ status, or citation presence. The scorer reports retrieval recall over gold
 spans; unsupported-claim rates at answerer, verifier-supported, and released
 cuts; verifier `SUPPORTED` precision and recall; citation validity and
 completeness; correct and false abstention; answer coverage; coverage reasons;
-and stage and total latency. Provider usage and cost are `UNAVAILABLE` with
-`null` values because the current adapter does not expose trustworthy usage;
-zero and estimates would be false data.
+and stage and total latency. Observation schema v2 can retain closed per-stage
+Antigravity invocation receipts with exact requested identity, runtime hashes,
+content hashes, duration, and token counts only when the SDK explicitly reports
+them. It never estimates or invents counts. The published v1 aggregate usage
+and cost object remains `UNAVAILABLE` with its existing reason code and `null`
+values; the SDK does not provide a trustworthy dollar cost, and zero would be
+false data.
 
 Latency aggregates retain their sorted finite samples so percentile arithmetic
 is independently derivable. A summary is not trusted merely because its fields

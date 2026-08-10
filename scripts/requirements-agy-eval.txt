@@ -1,0 +1,2 @@
+# Optional evaluation-only dependency. Never install this in the production image.
+google-antigravity==0.1.10

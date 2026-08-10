@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -88,6 +89,29 @@ def build_parser() -> argparse.ArgumentParser:
             "benchmark's external authorization ceiling"
         ),
     )
+    record_parser.add_argument(
+        "--evaluation-provider",
+        choices=("configured", "agy-sdk"),
+        default="configured",
+        help="explicit evaluation-only provider lane; production config is unchanged",
+    )
+    record_parser.add_argument(
+        "--agy-model",
+        help="exact requested Antigravity SDK model (agy-sdk only)",
+    )
+    record_parser.add_argument(
+        "--agy-sdk-artifact-sha256",
+        help="expected installed google-antigravity 0.1.10 aggregate (agy-sdk only)",
+    )
+    record_parser.add_argument(
+        "--agy-localharness-sha256",
+        help="expected bundled localharness executable SHA-256 (agy-sdk only)",
+    )
+    record_parser.add_argument(
+        "--agy-call-timeout-seconds",
+        type=float,
+        help="per-stage subprocess timeout in (0, 300] seconds (agy-sdk only)",
+    )
 
     score_parser = subparsers.add_parser(
         "score",
@@ -146,9 +170,27 @@ def _record_command(args: argparse.Namespace) -> int:
         raise EvaluationDataError(
             "record requires --allow-live-execution and separate external authorization"
         )
+    policy_limit = (
+        benchmark.definition.execution_policy.external_authorization_maximum_cost_usd
+    )
+    if (
+        not math.isfinite(args.external_cost_limit_usd)
+        or args.external_cost_limit_usd < 0
+        or args.external_cost_limit_usd > policy_limit
+    ):
+        raise EvaluationDataError(
+            "recording requires an externally enforced cost limit within benchmark policy"
+        )
+    recorded_runner = _recorded_runner(args)
     bundle = asyncio.run(record_baseline(
         benchmark,
+        recorded_runner=recorded_runner,
         external_cost_limit_usd=args.external_cost_limit_usd,
+        provider_observation_mode=(
+            "AGY_SDK"
+            if args.evaluation_provider == "agy-sdk"
+            else "CONFIGURED_UNOBSERVED"
+        ),
     ))
     # Re-read and re-hash the protected file after execution before publication.
     load_benchmark(args.benchmark, args.benchmark_sha256)
@@ -167,6 +209,33 @@ def _record_command(args: argparse.Namespace) -> int:
         f"recorded_cases={len(bundle.cases)} output={published}"
     )
     return 0 if bundle.status == "COMPLETE" else 3
+
+
+def _recorded_runner(args: argparse.Namespace):
+    agy_values = (
+        args.agy_model,
+        args.agy_sdk_artifact_sha256,
+        args.agy_localharness_sha256,
+        args.agy_call_timeout_seconds,
+    )
+    if args.evaluation_provider == "configured":
+        if any(value is not None for value in agy_values):
+            raise EvaluationDataError(
+                "AGY runtime arguments require --evaluation-provider agy-sdk"
+            )
+        return None
+    if any(value is None for value in agy_values):
+        raise EvaluationDataError(
+            "agy-sdk requires model, SDK hash, localharness hash, and call timeout"
+        )
+    # The worker mechanics are offline-validated, but process-group cleanup
+    # cannot contain a descendant that deliberately creates a new session on
+    # the supported hosts. Until a VM/container/job-object backend owns the
+    # entire process tree, the public recorder must fail before credential
+    # access, optional SDK import, worker construction, or model execution.
+    raise EvaluationDataError(
+        "AGY_LIVE_EXECUTION_DISABLED: descendant containment is unavailable"
+    )
 
 
 def _score_command(args: argparse.Namespace) -> int:

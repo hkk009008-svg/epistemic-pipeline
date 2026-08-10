@@ -14,10 +14,13 @@ from pydantic import ValidationError
 import pipeline.grounded_evaluation as evaluation
 import pipeline.grounded_rag as grounded
 import scripts.measure_grounded_rag as measure_grounded_rag
+from pipeline.agy_evaluation_provider import AgyEvaluationProviderError
 from pipeline.grounded_rag import (
     AnswererOutput,
     FinalizerOutput,
     GroundedQueryRequest,
+    GroundedRecordedExecution,
+    GroundedRecordedStageIdentity,
     VerifierOutput,
     run_grounded_rag,
     run_grounded_rag_recorded,
@@ -179,6 +182,54 @@ def _write_json(path: Path, payload: dict) -> str:
     raw = _json_bytes(payload)
     path.write_bytes(raw)
     return hashlib.sha256(raw).hexdigest()
+
+
+def _agy_invocation(
+    stage: str,
+    captured: dict | None = None,
+    *,
+    worker_source_sha256: str = "c" * 64,
+) -> dict:
+    captured = captured or {
+        "system_sha256": "e" * 64,
+        "user_sha256": "f" * 64,
+        "response_schema_sha256": "1" * 64,
+        "response_sha256": "2" * 64,
+    }
+    return {
+        "schema_version": "grounded-provider-invocation-v1",
+        "stage": stage,
+        "provider": "google-antigravity-sdk",
+        "requested_model": "gemini-evaluation-test",
+        "reported_model": None,
+        "model_attestation": "REQUESTED_ONLY",
+        "sdk_distribution": "google-antigravity",
+        "sdk_version": "0.1.10",
+        "sdk_artifact_sha256": "a" * 64,
+        "localharness_sha256": "b" * 64,
+        "worker_protocol_version": "agy-evaluation-worker-v1",
+        "worker_source_sha256": worker_source_sha256,
+        "invocation_policy_sha256": evaluation.AGY_INVOCATION_POLICY_SHA256,
+        "system_sha256": captured["system_sha256"],
+        "user_sha256": captured["user_sha256"],
+        "response_schema_sha256": captured["response_schema_sha256"],
+        "response_sha256": captured["response_sha256"],
+        "duration_ms": 4.0,
+        "outcome": "SUCCESS",
+        "logical_model_calls": 1,
+        "adapter_retries": 0,
+        "observed_tool_names": ["finish"],
+        "usage": {
+            "status": "REPORTED",
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "total_tokens": 16,
+            "cached_input_tokens": 2,
+            "reasoning_tokens": 2,
+            "service_tier": "standard",
+        },
+        "cost_usd": None,
+    }
 
 
 def _benchmark_payload() -> dict:
@@ -501,14 +552,31 @@ def _complete_observations(
             for check in checks
         ],
     })).hexdigest()
+    configured_stage_invocations = [
+        evaluation.StageInvocationObservation(
+            stage=stage,
+            provider="openai",
+            model=f"configured-test-model-{index}",
+            system_sha256=str(index) * 64,
+            user_sha256=str(index + 3) * 64,
+            response_schema_sha256=str(index + 6) * 64,
+            response_sha256=chr(ord("a") + index - 1) * 64,
+        )
+        for index, stage in enumerate(("gpt1", "gpt2", "gpt3"), start=1)
+    ]
+    configured_fingerprints = {
+        invocation.stage: hashlib.sha256(_json_bytes({
+            "model": invocation.model,
+            "provider": invocation.provider,
+        })).hexdigest()
+        for invocation in configured_stage_invocations
+    }
     called_identity = _execution_identity(
         response_run_id="a" * 32,
         packet_id=packet.packet_id,
         corpus_revision=corpus_revision,
         stage_fingerprints=evaluation.StageFingerprintsObservation(
-            gpt1="a" * 64,
-            gpt2="b" * 64,
-            gpt3="c" * 64,
+            **configured_fingerprints,
         ),
         stages_completed=["retrieval", "answerer", "verifier", "finalizer"],
         draft_hash=draft_hash,
@@ -582,6 +650,7 @@ def _complete_observations(
             finalizer_ms=4.0,
             total_ms=10.0,
         ),
+        stage_invocations=configured_stage_invocations,
     )
     empty_packet = KnowledgeStore._build_packet(
         evaluation.canonicalize_query(definition.cases[1].query),
@@ -734,7 +803,7 @@ async def test_recorded_execution_is_response_equivalent_and_captures_full_trace
     normal_payload = normal.model_dump(mode="json", exclude={"receipt_sha256"})
     assert recorded_payload == normal_payload
     assert recorded.status == "ANSWER"
-    assert artifacts.schema_version == "grounded-run-artifacts-v1"
+    assert artifacts.schema_version == "grounded-run-artifacts-v2"
     assert artifacts.contract_version == "grounded-rag-v1"
     assert artifacts.packet_schema_version == 2
     assert artifacts.retrieval_version == "sqlite-fts5-v2"
@@ -769,6 +838,188 @@ async def test_recorded_execution_is_response_equivalent_and_captures_full_trace
     assert artifacts.latency_ms.total >= 0
     assert artifacts.provider_usage == "UNAVAILABLE"
     assert artifacts.cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_recorded_execution_can_inject_a_closed_evaluation_caller(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    packet = _packet()
+    caller = _supported_call(packet)
+    stages: list[str] = []
+
+    async def recorded_caller(stage, system, user_content, response_model):
+        stages.append(stage)
+        return await caller({}, system, user_content, response_model)
+
+    monkeypatch.setattr(
+        grounded.config,
+        "get_stage_config",
+        lambda _stage: (_ for _ in ()).throw(
+            AssertionError("recorded execution must not read production config")
+        ),
+    )
+    monkeypatch.setattr(
+        grounded,
+        "call_llm_structured",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recorded execution must not use production dispatch")
+        ),
+    )
+    execution = GroundedRecordedExecution(
+        stage_identities={
+            stage: GroundedRecordedStageIdentity(
+                provider="google-antigravity-sdk",
+                model="gemini-evaluation-model",
+            )
+            for stage in ("gpt1", "gpt2", "gpt3")
+        },
+        caller=recorded_caller,
+    )
+
+    response, artifacts = await run_grounded_rag_recorded(
+        GroundedQueryRequest(prompt="What is Alice's favorite color?"),
+        store=StubStore(packet),
+        recorded_execution=execution,
+    )
+
+    assert response.status == "ANSWER"
+    assert stages == ["gpt1", "gpt2", "gpt3"]
+    expected_fingerprint = hashlib.sha256(_json_bytes({
+        "model": "gemini-evaluation-model",
+        "provider": "google-antigravity-sdk",
+    })).hexdigest()
+    assert artifacts.stage_fingerprints.gpt1 == expected_fingerprint
+    assert artifacts.stage_fingerprints.gpt2 == expected_fingerprint
+    assert artifacts.stage_fingerprints.gpt3 == expected_fingerprint
+
+
+def test_observation_v2_binds_provider_receipts_to_called_stage_fingerprints(
+    tmp_path: Path,
+):
+    benchmark = _load_unit_benchmark(tmp_path)
+    observations = _complete_observations(benchmark)
+    payload = observations.model_dump(mode="json")
+    case = payload["cases"][0]
+    fingerprint = hashlib.sha256(_json_bytes({
+        "model": "gemini-evaluation-test",
+        "provider": "google-antigravity-sdk",
+    })).hexdigest()
+    fingerprints = {"gpt1": fingerprint, "gpt2": fingerprint, "gpt3": fingerprint}
+    identity = case["execution_identity"]
+    identity["stage_fingerprints"] = fingerprints
+    identity["receipt"]["stage_fingerprints"] = fingerprints
+    identity["receipt_sha256"] = hashlib.sha256(
+        _json_bytes(identity["receipt"])
+    ).hexdigest()
+    latency = case["latency"]
+    latency["capture_sha256"] = evaluation.latency_capture_sha256(
+        identity["receipt_sha256"],
+        retrieval_ms=latency["retrieval_ms"],
+        answerer_ms=latency["answerer_ms"],
+        verifier_ms=latency["verifier_ms"],
+        finalizer_ms=latency["finalizer_ms"],
+        total_ms=latency["total_ms"],
+    )
+    case["stage_invocations"] = [
+        {
+            "stage": stage,
+            "provider": "google-antigravity-sdk",
+            "model": "gemini-evaluation-test",
+            "system_sha256": character * 64,
+            "user_sha256": str(index) * 64,
+            "response_schema_sha256": chr(ord("a") + index) * 64,
+            "response_sha256": str(index + 5) * 64,
+        }
+        for index, (stage, character) in enumerate(
+            (("gpt1", "3"), ("gpt2", "4"), ("gpt3", "5")),
+            start=1,
+        )
+    ]
+    for captured in case["stage_invocations"]:
+        assert captured["provider"] == "google-antigravity-sdk"
+    case["provider_invocations"] = [
+        _agy_invocation(stage, captured)
+        for stage, captured in zip(
+            ("gpt1", "gpt2", "gpt3"),
+            case["stage_invocations"],
+            strict=True,
+        )
+    ]
+    case["provider_observation_mode"] = "AGY_SDK"
+    payload["provider_observation_mode"] = "AGY_SDK"
+    for other_case in payload["cases"][1:]:
+        other_case["provider_observation_mode"] = "AGY_SDK"
+
+    rebound = evaluation.ObservationBundle.model_validate(payload)
+    assert rebound.schema_version == "grounded-rag-observations-v2"
+    assert [item.stage for item in rebound.cases[0].provider_invocations] == [
+        "gpt1",
+        "gpt2",
+        "gpt3",
+    ]
+    assert rebound.cases[0].provider_invocations[0].usage is not None
+    assert rebound.cases[0].provider_invocations[0].usage.total_tokens == 16
+    assert rebound.usage_cost.status == "UNAVAILABLE"
+
+    reversed_payload = rebound.model_dump(mode="json")
+    reversed_payload["cases"][0]["provider_invocations"].reverse()
+    with pytest.raises(ValidationError, match="called stage order"):
+        evaluation.ObservationBundle.model_validate(reversed_payload)
+
+    wrong_model = rebound.model_dump(mode="json")
+    wrong_model["cases"][0]["provider_invocations"][0][
+        "requested_model"
+    ] = "different-model"
+    with pytest.raises(ValidationError, match="does not match engine capture"):
+        evaluation.ObservationBundle.model_validate(wrong_model)
+
+    stripped = rebound.model_dump(mode="json")
+    stripped["cases"][0]["provider_invocations"] = []
+    with pytest.raises(ValidationError, match="called stage order"):
+        evaluation.ObservationBundle.model_validate(stripped)
+
+    mislabeled = rebound.model_dump(mode="json")
+    mislabeled["cases"][0]["provider_observation_mode"] = "CONFIGURED_UNOBSERVED"
+    with pytest.raises(ValidationError, match="cannot carry provider invocations"):
+        evaluation.ObservationBundle.model_validate(mislabeled)
+
+    stripped_and_mislabeled = rebound.model_dump(mode="json")
+    stripped_and_mislabeled["cases"][0]["provider_invocations"] = []
+    stripped_and_mislabeled["cases"][0][
+        "provider_observation_mode"
+    ] = "CONFIGURED_UNOBSERVED"
+    with pytest.raises(ValidationError, match="requires AGY receipt mode"):
+        evaluation.ObservationBundle.model_validate(stripped_and_mislabeled)
+
+    fully_stripped = rebound.model_dump(mode="json")
+    fully_stripped["provider_observation_mode"] = "CONFIGURED_UNOBSERVED"
+    for stripped_case in fully_stripped["cases"]:
+        stripped_case["provider_observation_mode"] = "CONFIGURED_UNOBSERVED"
+        stripped_case["provider_invocations"] = []
+    fully_stripped["cases"][0]["stage_invocations"] = []
+    with pytest.raises(ValidationError, match="stage invocation captures"):
+        evaluation.ObservationBundle.model_validate(fully_stripped)
+
+    forged_request_hash = rebound.model_dump(mode="json")
+    forged_request_hash["cases"][0]["provider_invocations"][0][
+        "user_sha256"
+    ] = "9" * 64
+    with pytest.raises(ValidationError, match="does not match engine capture"):
+        evaluation.ObservationBundle.model_validate(forged_request_hash)
+
+    forged_worker_policy = rebound.model_dump(mode="json")
+    for invocation in forged_worker_policy["cases"][0]["provider_invocations"]:
+        invocation["invocation_policy_sha256"] = "9" * 64
+    with pytest.raises(ValidationError, match="bound worker policy"):
+        evaluation.ObservationBundle.model_validate(forged_worker_policy)
+
+    runtime_drift = rebound.model_dump(mode="json")
+    runtime_drift["cases"][0]["provider_invocations"][1][
+        "sdk_artifact_sha256"
+    ] = "9" * 64
+    with pytest.raises(ValidationError, match="runtime identity changed"):
+        evaluation.ObservationBundle.model_validate(runtime_drift)
 
 
 @pytest.mark.asyncio
@@ -1245,6 +1496,9 @@ def test_baseline_scorer_uses_human_labels_and_exact_metric_arithmetic(
     assert summary.latency.answerer_ms.sample_count == 1
     assert summary.latency.total_ms.total == pytest.approx(15.0)
     assert summary.usage_cost.status == "UNAVAILABLE"
+    assert summary.usage_cost.reason == (
+        "current_adapter_does_not_expose_provider_usage_or_cost"
+    )
     assert summary.usage_cost.input_tokens is None
     assert summary.usage_cost.output_tokens is None
     assert summary.usage_cost.total_tokens is None
@@ -1996,6 +2250,60 @@ async def test_record_baseline_executes_complete_frozen_case_set(
     assert observations.cases[1].response.status == "ABSTAIN"
     assert observations.implementation == evaluation.implementation_binding()
     evaluation.validate_observation_bundle(benchmark, observations)
+
+
+@pytest.mark.asyncio
+async def test_record_baseline_preserves_agy_mode_for_complete_and_failed_runs(
+    tmp_path: Path,
+):
+    payload = _benchmark_payload()
+    for index, case in enumerate(payload["cases"], start=1):
+        case["query"] = f"xqzvnonexistent{index}"
+    benchmark_path = tmp_path / "no-call-benchmark.json"
+    benchmark = evaluation.load_benchmark(
+        benchmark_path,
+        _write_json(benchmark_path, payload),
+    )
+
+    async def no_call_agy_runner(request, *, store):
+        response, artifacts = await run_grounded_rag_recorded(
+            request,
+            store=store,
+        )
+        return response, artifacts, ()
+
+    complete = await evaluation.record_baseline(
+        benchmark,
+        recorded_runner=no_call_agy_runner,
+        external_cost_limit_usd=1.0,
+        provider_observation_mode="AGY_SDK",
+    )
+
+    assert complete.status == "COMPLETE"
+    assert complete.provider_observation_mode == "AGY_SDK"
+    assert len(complete.cases) == len(benchmark.definition.cases)
+    assert {
+        case.provider_observation_mode for case in complete.cases
+    } == {"AGY_SDK"}
+    assert all(not case.stage_invocations for case in complete.cases)
+    assert all(not case.provider_invocations for case in complete.cases)
+
+    async def failed_agy_runner(*_args, **_kwargs):
+        raise AgyEvaluationProviderError("WORKER_TIMEOUT")
+
+    incomplete = await evaluation.record_baseline(
+        benchmark,
+        recorded_runner=failed_agy_runner,
+        external_cost_limit_usd=1.0,
+        provider_observation_mode="AGY_SDK",
+    )
+
+    assert incomplete.status == "INCOMPLETE"
+    assert incomplete.provider_observation_mode == "AGY_SDK"
+    assert incomplete.cases == []
+    assert incomplete.failure is not None
+    assert incomplete.failure.kind == "PROVIDER_OR_PIPELINE_ERROR"
+    assert incomplete.failure.failed_case_id == benchmark.definition.cases[0].case_id
 
 
 @pytest.mark.asyncio

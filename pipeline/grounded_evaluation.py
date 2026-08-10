@@ -49,12 +49,14 @@ from pipeline.knowledge_store import (
 
 
 BENCHMARK_SCHEMA_VERSION = "grounded-rag-benchmark-v1"
-OBSERVATION_SCHEMA_VERSION = "grounded-rag-observations-v1"
+OBSERVATION_SCHEMA_VERSION = "grounded-rag-observations-v2"
 ADJUDICATION_SCHEMA_VERSION = "grounded-rag-adjudication-v1"
 SUMMARY_SCHEMA_VERSION = "grounded-rag-baseline-summary-v1"
 EXPECTED_BENCHMARK_SHA256 = (
     "178e2398a526c3f5e37ecbb57c88ec173ffbdab58cf6ce7741855f9e7edbd2e6"
 )
+# Persist the published v1 reason literal unchanged. Observation v2 can carry
+# per-invocation SDK token counts, but the v1 aggregate remains unavailable.
 USAGE_UNAVAILABLE_REASON = "current_adapter_does_not_expose_provider_usage_or_cost"
 MAX_EVALUATION_FILE_BYTES = 256 * 1024 * 1024
 
@@ -109,6 +111,26 @@ _RUNTIME_PACKAGES = (
     "anthropic",
     "httpx",
 )
+_AGY_INVOCATION_POLICY = {
+    "adapter_retries": 0,
+    "api_retries": 0,
+    "custom_tools": [],
+    "enabled_builtin_tools": ["finish"],
+    "hooks": [],
+    "mcp_servers": [],
+    "skills": [],
+    "subagents": [],
+    "triggers": [],
+    "workspaces": [],
+}
+AGY_INVOCATION_POLICY_SHA256 = hashlib.sha256(
+    json.dumps(
+        _AGY_INVOCATION_POLICY,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 
 
 class EvaluationDataError(ValueError):
@@ -221,9 +243,9 @@ class BenchmarkExecutionPolicy(ClosedModel):
     usage_unavailable_is_null: Literal[True]
     live_execution_requires_separate_authorization: Literal[True]
     maximum_wall_time_seconds: int = Field(..., ge=1, le=86_400)
-    # This is an external authorization ceiling. The current provider adapter
-    # exposes no trustworthy usage/cost data, so the recorder cannot meter it.
-    # A caller must separately configure and attest an enforceable provider cap.
+    # This is an external authorization ceiling. Invocation receipts may retain
+    # provider-reported token counts, but no adapter exposes trustworthy dollar
+    # cost, so a caller must separately enforce and attest the provider cap.
     external_authorization_maximum_cost_usd: float = Field(
         ...,
         alias="maximum_cost_usd",
@@ -540,6 +562,100 @@ class UnavailableUsageCost(ClosedModel):
     cost_usd: None = None
 
 
+class ReportedProviderUsage(ClosedModel):
+    """Token counts reported by a provider SDK; never estimated by the harness."""
+
+    status: Literal["REPORTED"] = "REPORTED"
+    input_tokens: int = Field(..., ge=0)
+    output_tokens: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    cached_input_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    service_tier: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def reported_totals_are_possible(self) -> ReportedProviderUsage:
+        if self.total_tokens < max(self.input_tokens, self.output_tokens):
+            raise ValueError("reported total tokens are smaller than a component")
+        if self.service_tier is not None and (
+            self.service_tier != self.service_tier.strip()
+            or any(ord(character) < 0x20 for character in self.service_tier)
+        ):
+            raise ValueError("reported service tier is malformed")
+        return self
+
+
+class ProviderInvocationObservation(ClosedModel):
+    """Sanitized identity and usage for one evaluation-only structured call."""
+
+    schema_version: Literal["grounded-provider-invocation-v1"] = (
+        "grounded-provider-invocation-v1"
+    )
+    stage: Literal["gpt1", "gpt2", "gpt3"]
+    provider: Literal["google-antigravity-sdk"]
+    requested_model: str = Field(..., min_length=1, max_length=160)
+    reported_model: str | None = Field(default=None, min_length=1, max_length=160)
+    model_attestation: Literal["REQUESTED_ONLY", "PROVIDER_REPORTED"]
+    sdk_distribution: Literal["google-antigravity"]
+    sdk_version: Literal["0.1.10"]
+    sdk_artifact_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    localharness_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    worker_protocol_version: Literal["agy-evaluation-worker-v1"]
+    worker_source_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    invocation_policy_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    system_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    user_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    response_schema_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    response_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    duration_ms: float = Field(..., ge=0, allow_inf_nan=False)
+    outcome: Literal["SUCCESS"] = "SUCCESS"
+    logical_model_calls: Literal[1] = 1
+    adapter_retries: Literal[0] = 0
+    observed_tool_names: list[Literal["finish"]] = Field(
+        default_factory=list,
+        max_length=1,
+    )
+    usage: ReportedProviderUsage | None = None
+    cost_usd: None = None
+
+    @model_validator(mode="after")
+    def identity_and_attestation_are_consistent(
+        self,
+    ) -> ProviderInvocationObservation:
+        if len(self.observed_tool_names) != len(set(self.observed_tool_names)):
+            raise ValueError("observed tool names must be unique")
+        if self.model_attestation == "REQUESTED_ONLY" and self.reported_model is not None:
+            raise ValueError("requested-only identity cannot carry a reported model")
+        if self.model_attestation == "PROVIDER_REPORTED" and self.reported_model is None:
+            raise ValueError("provider-reported identity requires a reported model")
+        for value in (self.requested_model, self.reported_model):
+            if value is not None and (
+                value != value.strip()
+                or any(ord(character) < 0x20 for character in value)
+            ):
+                raise ValueError("provider model identity is malformed")
+        return self
+
+
+class StageInvocationObservation(ClosedModel):
+    """Engine-captured identity and hashes independent of provider receipts."""
+
+    stage: Literal["gpt1", "gpt2", "gpt3"]
+    provider: str = Field(..., min_length=1, max_length=80)
+    model: str = Field(..., min_length=1, max_length=160)
+    system_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    user_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    response_schema_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    response_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("provider", "model")
+    @classmethod
+    def invocation_identity_is_log_safe(cls, value: str) -> str:
+        if value != value.strip() or any(ord(character) < 0x20 for character in value):
+            raise ValueError("stage invocation identity is malformed")
+        return value
+
+
 class RuntimeBinding(ClosedModel):
     python_implementation: str = Field(..., min_length=1, max_length=40)
     python_version: str = Field(..., min_length=1, max_length=40)
@@ -612,7 +728,6 @@ def implementation_binding() -> ImplementationBinding:
             _canonical_json_bytes(aggregate_body)
         ).hexdigest(),
     )
-
 
 class RetrievedEvidenceObservation(ClosedModel):
     evidence_id: str = Field(..., min_length=1, max_length=80)
@@ -1023,6 +1138,18 @@ class CaseObservation(ClosedModel):
     finalizer: FinalizerStageObservation
     response: FinalResponseObservation
     latency: StageLatencyObservation
+    provider_observation_mode: Literal[
+        "CONFIGURED_UNOBSERVED",
+        "AGY_SDK",
+    ] = "CONFIGURED_UNOBSERVED"
+    stage_invocations: list[StageInvocationObservation] = Field(
+        default_factory=list,
+        max_length=3,
+    )
+    provider_invocations: list[ProviderInvocationObservation] = Field(
+        default_factory=list,
+        max_length=3,
+    )
     usage_cost: UnavailableUsageCost = Field(default_factory=UnavailableUsageCost)
 
     @model_validator(mode="after")
@@ -1033,6 +1160,64 @@ class CaseObservation(ClosedModel):
             raise ValueError("case and response corpus revisions differ")
         if self.response.retrieval_count != len(self.retrieval):
             raise ValueError("response retrieval_count differs from captured retrieval")
+        expected_provider_stages = [
+            stage
+            for stage, called in (
+                ("gpt1", self.answerer.called),
+                ("gpt2", self.verifier.called),
+                ("gpt3", self.finalizer.called),
+            )
+            if called
+        ]
+        if (
+            [item.stage for item in self.stage_invocations]
+            != expected_provider_stages
+        ):
+            raise ValueError("stage invocation captures do not match called stage order")
+        fingerprints = self.execution_identity.stage_fingerprints
+        for invocation in self.stage_invocations:
+            expected_fingerprint = hashlib.sha256(_canonical_json_bytes({
+                "model": invocation.model,
+                "provider": invocation.provider,
+            })).hexdigest()
+            if getattr(fingerprints, invocation.stage) != expected_fingerprint:
+                raise ValueError(
+                    "stage invocation identity does not match its fingerprint"
+                )
+
+        if self.provider_observation_mode == "CONFIGURED_UNOBSERVED":
+            if self.provider_invocations:
+                raise ValueError(
+                    "configured-unobserved mode cannot carry provider invocations"
+                )
+            if any(
+                item.provider == "google-antigravity-sdk"
+                for item in self.stage_invocations
+            ):
+                raise ValueError("AGY stage invocation requires AGY receipt mode")
+        else:
+            actual_provider_stages = [
+                invocation.stage for invocation in self.provider_invocations
+            ]
+            if actual_provider_stages != expected_provider_stages:
+                raise ValueError("provider invocations do not match called stage order")
+            for captured, invocation in zip(
+                self.stage_invocations,
+                self.provider_invocations,
+                strict=True,
+            ):
+                if (
+                    captured.provider != invocation.provider
+                    or captured.model != invocation.requested_model
+                    or captured.system_sha256 != invocation.system_sha256
+                    or captured.user_sha256 != invocation.user_sha256
+                    or captured.response_schema_sha256
+                    != invocation.response_schema_sha256
+                    or captured.response_sha256 != invocation.response_sha256
+                ):
+                    raise ValueError(
+                        "provider invocation does not match engine capture"
+                    )
         ranks = [item.rank for item in self.retrieval]
         if ranks != list(range(1, len(ranks) + 1)):
             raise ValueError("retrieval ranks must be sequential")
@@ -1205,13 +1390,17 @@ class ObservationFailure(ClosedModel):
 
 
 class ObservationBundle(ClosedModel):
-    schema_version: Literal["grounded-rag-observations-v1"] = (
+    schema_version: Literal["grounded-rag-observations-v2"] = (
         OBSERVATION_SCHEMA_VERSION
     )
     benchmark_id: str = Field(..., pattern=r"^[a-z0-9][a-z0-9_-]{0,79}$")
     benchmark_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
     implementation: ImplementationBinding
     run_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
+    provider_observation_mode: Literal[
+        "CONFIGURED_UNOBSERVED",
+        "AGY_SDK",
+    ] = "CONFIGURED_UNOBSERVED"
     status: Literal["COMPLETE", "INCOMPLETE"]
     cases: list[CaseObservation] = Field(default_factory=list, max_length=100)
     failure: ObservationFailure | None = None
@@ -1226,6 +1415,38 @@ class ObservationBundle(ClosedModel):
             raise ValueError("a complete run cannot have a failure")
         if self.status == "INCOMPLETE" and self.failure is None:
             raise ValueError("an incomplete run requires a closed failure code")
+        if any(
+            case.provider_observation_mode != self.provider_observation_mode
+            for case in self.cases
+        ):
+            raise ValueError("case provider mode differs from the recording runner")
+        runtime_bindings = {
+            (
+                invocation.provider,
+                invocation.requested_model,
+                invocation.sdk_distribution,
+                invocation.sdk_version,
+                invocation.sdk_artifact_sha256,
+                invocation.localharness_sha256,
+                invocation.worker_protocol_version,
+                invocation.worker_source_sha256,
+                invocation.invocation_policy_sha256,
+            )
+            for case in self.cases
+            for invocation in case.provider_invocations
+        }
+        if len(runtime_bindings) > 1:
+            raise ValueError("provider runtime identity changed during recording")
+        if self.provider_observation_mode == "AGY_SDK":
+            if any(
+                invocation.invocation_policy_sha256
+                != AGY_INVOCATION_POLICY_SHA256
+                for case in self.cases
+                for invocation in case.provider_invocations
+            ):
+                raise ValueError(
+                    "provider receipt does not match the bound worker policy"
+                )
         return self
 
 
@@ -2394,7 +2615,12 @@ def _private_span_from_artifact(value: Any) -> PrivateSpanObservation:
     )
 
 
-def case_observation_from_artifacts(case_id: str, artifacts: Any) -> CaseObservation:
+def case_observation_from_artifacts(
+    case_id: str,
+    artifacts: Any,
+    *,
+    provider_invocations: Sequence[Any] | None = None,
+) -> CaseObservation:
     """Project private engine artifacts into the closed observation schema."""
     try:
         retrieval = [
@@ -2545,6 +2771,27 @@ def case_observation_from_artifacts(case_id: str, artifacts: Any) -> CaseObserva
                 total_ms=artifacts.latency_ms.total,
                 capture_sha256=artifacts.latency_capture_sha256,
             ),
+            provider_observation_mode=(
+                "CONFIGURED_UNOBSERVED"
+                if provider_invocations is None
+                else "AGY_SDK"
+            ),
+            stage_invocations=[
+                StageInvocationObservation.model_validate(
+                    invocation.model_dump(mode="json")
+                    if isinstance(invocation, BaseModel)
+                    else invocation
+                )
+                for invocation in artifacts.stage_invocations
+            ],
+            provider_invocations=[
+                ProviderInvocationObservation.model_validate(
+                    invocation.model_dump(mode="json")
+                    if isinstance(invocation, BaseModel)
+                    else invocation
+                )
+                for invocation in (provider_invocations or ())
+            ],
         )
     except EvaluationDataError:
         raise
@@ -2559,6 +2806,10 @@ async def record_baseline(
     *,
     recorded_runner: Any | None = None,
     external_cost_limit_usd: float | None = None,
+    provider_observation_mode: Literal[
+        "CONFIGURED_UNOBSERVED",
+        "AGY_SDK",
+    ] = "CONFIGURED_UNOBSERVED",
 ) -> ObservationBundle:
     """Execute each frozen case once against a fresh temporary corpus.
 
@@ -2616,16 +2867,35 @@ async def record_baseline(
             ):
                 for benchmark_case in benchmark.definition.cases:
                     current_case_id = benchmark_case.case_id
-                    _response, artifacts = await runner(
+                    runner_result = await runner(
                         GroundedQueryRequest(
                             prompt=benchmark_case.query,
                             top_k=benchmark.definition.top_k,
                         ),
                         store=store,
                     )
+                    if not isinstance(runner_result, tuple) or len(runner_result) not in {
+                        2,
+                        3,
+                    }:
+                        raise EvaluationDataError(
+                            "recorded runner returned an invalid closed result"
+                        )
+                    _response, artifacts = runner_result[:2]
+                    provider_invocations = (
+                        None if len(runner_result) == 2 else runner_result[2]
+                    )
+                    if provider_invocations is not None and not isinstance(
+                        provider_invocations,
+                        (list, tuple),
+                    ):
+                        raise EvaluationDataError(
+                            "recorded provider receipts are not an ordered sequence"
+                        )
                     completed.append(case_observation_from_artifacts(
                         benchmark_case.case_id,
                         artifacts,
+                        provider_invocations=provider_invocations,
                     ))
         except (asyncio.CancelledError, TimeoutError, KeyboardInterrupt):
             failed_case_id = current_case_id
@@ -2644,6 +2914,7 @@ async def record_baseline(
             benchmark_sha256=benchmark.raw_sha256,
             implementation=frozen_implementation,
             run_id=run_id,
+            provider_observation_mode=provider_observation_mode,
             status="INCOMPLETE",
             cases=completed,
             failure=ObservationFailure(
@@ -2658,6 +2929,7 @@ async def record_baseline(
         benchmark_sha256=benchmark.raw_sha256,
         implementation=frozen_implementation,
         run_id=run_id,
+        provider_observation_mode=provider_observation_mode,
         status="COMPLETE",
         cases=completed,
     )
