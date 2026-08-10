@@ -287,14 +287,130 @@ counts as valid only when its labeled evidence ID is both retrieved and present
 in the expected relevant-evidence set. The scorer does not execute retrieval or
 validate source quotations itself.
 
-There is no live recording runner, independently human-labeled benchmark, stage
-ablation runner, or verifier precision/recall evaluator yet. Do not describe the
-synthetic fixture as a quality baseline or use its numbers to select retrieval
-or model changes. A future explicitly initiated runner must freeze a real corpus
-and independent labels before comparing answerer-only, answerer-plus-verifier,
-and the complete constrained path. Only those measurements may justify
-embeddings, hybrid retrieval, reranking, or bounded claim-specific retrieval.
-False abstention remains preferable to unmeasured recall machinery in the first
+Do not describe this synthetic fixture as a quality baseline or use its numbers
+to select retrieval or model changes.
+
+## Measured Grounded-RAG Baseline v1 harness
+
+The repository also includes an evaluation-only harness for recording and
+scoring the real three-stage grounded path against a frozen, human-owned
+benchmark. The harness is executable, but adding it does **not** establish a
+measured baseline: no provider run is performed during implementation or CI.
+Only an explicitly authorized, complete recording plus independent human
+adjudication produces measurements.
+
+The protected benchmark is a single closed-schema JSON file outside the source
+tree. Its exact raw-byte SHA-256 is supplied to every command. Validation checks
+that hash before model configuration or calls, rejects unknown schema fields,
+unsafe paths, duplicate or missing IDs, and gold quotes that do not resolve
+uniquely in their declared documents. `record` then creates a fresh temporary
+`KnowledgeStore`, ingests documents in deterministic document-ID order, and
+runs every case exactly once through the same internal engine used by
+`run_grounded_rag`:
+
+```bash
+python scripts/measure_grounded_rag.py validate \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256>
+
+# Requires separate authorization for provider execution and spend.
+python scripts/measure_grounded_rag.py record \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --output-dir /absolute/private/path/run-id \
+  --external-cost-limit-usd <provider-side-hard-cap> \
+  --allow-live-execution
+
+python scripts/measure_grounded_rag.py score \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --observations /absolute/private/path/run-id/observations.json \
+  --observations-sha256 <retained-record-output-sha256> \
+  --adjudication /absolute/private/path/adjudication.json \
+  --adjudication-sha256 <human-retained-raw-byte-sha256> \
+  --output-dir /absolute/private/path/summary-id
+
+# Recompute every metric from the exact private inputs and verify the retained
+# digest printed by score.
+python scripts/measure_grounded_rag.py verify-summary \
+  --benchmark /absolute/path/to/benchmark.json \
+  --benchmark-sha256 <frozen-raw-byte-sha256> \
+  --observations /absolute/private/path/run-id/observations.json \
+  --observations-sha256 <retained-record-output-sha256> \
+  --adjudication /absolute/private/path/adjudication.json \
+  --adjudication-sha256 <human-retained-raw-byte-sha256> \
+  --summary /absolute/private/path/summary-id/summary.json \
+  --summary-sha256 <retained-score-output-sha256>
+```
+
+Normal and recorded execution return the same `GroundedRAGResponse`. Recording
+uses an inert private accumulator at deterministic stage boundaries; it cannot
+change retrieval, model inputs, verdicts, selection, receipt persistence, or
+rendering. The private observation bundle contains ordered retrieval metadata;
+normalized draft claims and proposed-citation validity; verifier raw and
+effective verdicts and validated spans; eligible IDs; finalizer decision,
+protocol validity, requested and accepted IDs; final response metadata and
+citations; and stage and total latency. Per-stage timing is observation-bound,
+while total latency is derived directly from the production receipt's durable
+integer measurement. `score` therefore refuses to read observations without the
+raw-byte digest printed by `record`; a caller cannot edit stage timing and keep
+the retained measurement identity. An invalid verifier quote therefore
+remains observable as raw `SUPPORTED` but effective `INSUFFICIENT`.
+Each case also retains the grounded contract, packet, retriever, chunker, prompt
+versions, safe provider/model fingerprints, draft and verification hashes, and
+the requested retrieval `k`. It also retains the exact metadata-only production
+receipt and its digest. The observation bundle hashes the exact source files
+that define the recorder and grounded execution and binds the resolved Python,
+SQLite, Pydantic, provider-SDK, and HTTP-client versions. An uncommitted,
+later-modified, or runtime-different implementation therefore cannot masquerade
+as the measured implementation.
+
+Observation files may contain claim text and exact quotes. They are private
+evaluation artifacts and must not be published, logged, or confused with the
+metadata-only production receipt. They never contain prompts, full evidence
+packets, provider responses, reasoning, credentials, API keys, endpoint URLs,
+or provider configuration. Publication exclusively reserves the output
+directory and atomically links the complete JSON file under its final name; it
+never replaces an existing path. Because another process can rename any
+pathname after the final inode check, every downstream command also requires
+and verifies the retained raw-byte digest for observations, human adjudication,
+and summary. If durability confirmation fails after a file
+is linked, the private directory is retained for quarantine rather than deleting
+a path that another process may have replaced. Provider errors and interruption
+produce an `INCOMPLETE` bundle; an incomplete or selectively omitted run cannot
+be scored.
+
+Human truth remains separate from model observations. The adjudication file is
+bound to the SHA-256 of the exact canonical observation bytes and must label
+every draft claim and every released citation exactly once. The summary binds
+both the observation and adjudication digests. Corpus
+support is never inferred from the answerer, verifier, finalizer, pipeline
+status, or citation presence. The scorer reports retrieval recall over gold
+spans; unsupported-claim rates at answerer, verifier-supported, and released
+cuts; verifier `SUPPORTED` precision and recall; citation validity and
+completeness; correct and false abstention; answer coverage; coverage reasons;
+and stage and total latency. Provider usage and cost are `UNAVAILABLE` with
+`null` values because the current adapter does not expose trustworthy usage;
+zero and estimates would be false data.
+
+Latency aggregates retain their sorted finite samples so percentile arithmetic
+is independently derivable. A summary is not trusted merely because its fields
+are internally consistent: `verify-summary` checks the externally retained
+summary digest and recomputes the complete artifact from the bound observations,
+adjudication, and frozen benchmark.
+
+The benchmark's cost number is an external authorization ceiling, not measured
+spend. Because the current adapter cannot meter cost, `record` requires the
+caller to name a separately enforced provider-side hard cap no greater than
+that ceiling. The flag records the prerequisite; it does not create a provider
+budget. A scored summary has an explicit `PASS` or `FAIL` result. `FAIL` is
+retained as diagnostic evidence and the CLI exits with status `4`, so publishing
+a failed measurement cannot be mistaken for a promotion gate passing.
+
+The v1 harness records the complete constrained path, not stage ablations.
+Only a completed and independently adjudicated run may justify embeddings,
+hybrid retrieval, reranking, or bounded claim-specific retrieval. False
+abstention remains preferable to unmeasured recall machinery in the first
 evidence-enforcement slice.
 
 Do not report the existing hand-weighted confidence label as a probability of
