@@ -2033,12 +2033,39 @@ def test_publication_rejects_staging_and_destination_substitution(
 ):
     benchmark = _load_unit_benchmark(tmp_path)
     observations = _complete_observations(benchmark)
+    original_open = evaluation.os.open
     original_link = evaluation.os.link
+    staging_fd = -1
+    staging_identity: tuple[int, int] | None = None
+
+    def capture_staging_open(path, flags, *args, **kwargs):
+        nonlocal staging_fd, staging_identity
+        file_descriptor = original_open(path, flags, *args, **kwargs)
+        if (
+            staging_fd < 0
+            and isinstance(path, str)
+            and path.startswith(".observations.json.")
+            and path.endswith(".tmp")
+        ):
+            staging_fd = file_descriptor
+            opened = evaluation.os.fstat(file_descriptor)
+            staging_identity = (opened.st_dev, opened.st_ino)
+        return file_descriptor
 
     def substitute_staging(source, destination, **kwargs):
+        assert staging_fd >= 0
+        assert staging_identity is not None
         source_fd = kwargs["src_dir_fd"]
+        live_staging = evaluation.os.fstat(staging_fd)
+        named_staging = evaluation.os.stat(
+            source,
+            dir_fd=source_fd,
+            follow_symlinks=False,
+        )
+        assert (live_staging.st_dev, live_staging.st_ino) == staging_identity
+        assert (named_staging.st_dev, named_staging.st_ino) == staging_identity
         evaluation.os.unlink(source, dir_fd=source_fd)
-        attacker_fd = evaluation.os.open(
+        attacker_fd = original_open(
             source,
             evaluation.os.O_WRONLY | evaluation.os.O_CREAT | evaluation.os.O_EXCL,
             0o600,
@@ -2050,6 +2077,7 @@ def test_publication_rejects_staging_and_destination_substitution(
             evaluation.os.close(attacker_fd)
         return original_link(source, destination, **kwargs)
 
+    monkeypatch.setattr(evaluation.os, "open", capture_staging_open)
     monkeypatch.setattr(evaluation.os, "link", substitute_staging)
     with pytest.raises(evaluation.EvaluationDataError, match="staged bytes"):
         evaluation.publish_private_json_directory(
@@ -2057,7 +2085,10 @@ def test_publication_rejects_staging_and_destination_substitution(
             "observations.json",
             observations,
         )
+    with pytest.raises(OSError):
+        evaluation.os.fstat(staging_fd)
 
+    monkeypatch.setattr(evaluation.os, "open", original_open)
     monkeypatch.setattr(evaluation.os, "link", original_link)
     destination = tmp_path / "directory-substitution"
     displaced = tmp_path / "displaced-canonical"

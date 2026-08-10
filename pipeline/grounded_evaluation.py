@@ -3005,8 +3005,7 @@ def publish_private_json_directory(
             dir_fd=destination_fd,
         )
         payload = canonical_artifact_bytes(value)
-        with os.fdopen(output_fd, "wb") as handle:
-            output_fd = -1
+        with os.fdopen(os.dup(output_fd), "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
