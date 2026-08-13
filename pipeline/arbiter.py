@@ -10,14 +10,44 @@ from typing import List
 from pipeline.models import EditEntry, GPT3ResponseSchema
 from pipeline.helpers import extract_json
 
+VALID_ARBITER_DECISIONS = frozenset({
+    "BLOCK",
+    "ALLOW_WITH_EDITS",
+    "ALLOW_AS_UNKNOWN_ONLY",
+})
+
+
+def _as_str_list(value) -> list:
+    """Coerce arbiter list fields; a bare string becomes a one-item list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return value
+    return []
+
+
+def _coerce_decision(raw_decision, rationale: list) -> tuple[str, list]:
+    """Fail closed: unknown arbiter decisions become BLOCK."""
+    decision = str(raw_decision or "BLOCK").upper()
+    if decision in VALID_ARBITER_DECISIONS:
+        return decision, rationale
+    note = f"Invalid arbiter_decision {raw_decision!r}; failing closed to BLOCK"
+    return "BLOCK", [note] + list(rationale)
+
 
 def parse_gpt3(raw: str):
     """Parse GPT-3 Arbiter JSON output."""
     try:
         parsed = extract_json(raw)
-        decision = parsed.get("arbiter_decision", "BLOCK").upper()
-        rationale = parsed.get("rationale", [])
+        rationale = _as_str_list(parsed.get("rationale", []))
+        decision, rationale = _coerce_decision(
+            parsed.get("arbiter_decision", "BLOCK"), rationale,
+        )
         edits_raw = parsed.get("edits_for_gpt1", [])
+        if not isinstance(edits_raw, list):
+            edits_raw = []
         edits = [
             EditEntry(
                 action=str(e.get("action", "")).upper(),
@@ -27,7 +57,7 @@ def parse_gpt3(raw: str):
             )
             for e in edits_raw
         ]
-        policy_notes = parsed.get("final_policy_notes", [])
+        policy_notes = _as_str_list(parsed.get("final_policy_notes", []))
         return decision, rationale, edits, policy_notes
     except Exception:
         return "BLOCK", ["GPT-3 parse error: could not extract valid JSON"], [], []
@@ -125,8 +155,8 @@ def parse_gpt3_structured(parsed: GPT3ResponseSchema):
     Returns: (decision, rationale, edits, policy_notes)
     """
     try:
-        decision = parsed.arbiter_decision.upper()
-        rationale = parsed.rationale
+        rationale = _as_str_list(parsed.rationale)
+        decision, rationale = _coerce_decision(parsed.arbiter_decision, rationale)
         edits = [
             EditEntry(
                 action=str(e.action).upper(),
@@ -136,7 +166,7 @@ def parse_gpt3_structured(parsed: GPT3ResponseSchema):
             )
             for e in parsed.edits_for_gpt1
         ]
-        policy_notes = parsed.final_policy_notes
+        policy_notes = _as_str_list(parsed.final_policy_notes)
         return decision, rationale, edits, policy_notes
     except Exception:
         return "BLOCK", ["GPT-3 structured parse error"], [], []

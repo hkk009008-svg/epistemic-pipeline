@@ -319,3 +319,4 @@ class TestStageDecompose:
         result = await stage_decompose(state)
         assert result["atomic_claims"] == []
         assert result["decomposition_ran"] is False
+        assert result["decomp_kwargs"] == {"atomic_claims": [], "decomposition_ran": False}

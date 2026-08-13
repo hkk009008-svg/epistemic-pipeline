@@ -108,7 +108,7 @@ def call_openai(client, model: str, system: str, user_content: str,
                 ],
                 timeout=60,
             )
-            result = resp.choices[0].message.content
+            result = resp.choices[0].message.content or ""
 
             # Schema-enforced JSON retry
             if expect_json:
@@ -131,7 +131,7 @@ def call_openai(client, model: str, system: str, user_content: str,
                         ],
                         timeout=60,
                     )
-                    result = retry_resp.choices[0].message.content
+                    result = retry_resp.choices[0].message.content or ""
 
             return result
         except openai.AuthenticationError:
@@ -247,7 +247,7 @@ def _call_anthropic(client, model: str, system: str, user_content: str,
                 system=system,
                 messages=[{"role": "user", "content": user_content}],
             )
-            result = resp.content[0].text
+            result = resp.content[0].text or ""
 
             if expect_json:
                 try:
@@ -266,7 +266,7 @@ def _call_anthropic(client, model: str, system: str, user_content: str,
                             )},
                         ],
                     )
-                    result = retry_resp.content[0].text
+                    result = retry_resp.content[0].text or ""
 
             return result
         except anthropic_sdk.AuthenticationError:
@@ -364,7 +364,7 @@ async def call_openai_async(
                 ],
                 timeout=60,
             )
-            result = resp.choices[0].message.content
+            result = resp.choices[0].message.content or ""
 
             if expect_json:
                 try:
@@ -386,7 +386,7 @@ async def call_openai_async(
                         ],
                         timeout=60,
                     )
-                    result = retry_resp.choices[0].message.content
+                    result = retry_resp.choices[0].message.content or ""
 
             return result
         except openai.AuthenticationError:
@@ -431,7 +431,7 @@ async def _call_anthropic_async(
                 system=system,
                 messages=[{"role": "user", "content": user_content}],
             )
-            result = resp.content[0].text
+            result = resp.content[0].text or ""
 
             if expect_json:
                 try:
@@ -450,7 +450,7 @@ async def _call_anthropic_async(
                             )},
                         ],
                     )
-                    result = retry_resp.content[0].text
+                    result = retry_resp.content[0].text or ""
 
             return result
         except anthropic_sdk.AuthenticationError:
@@ -493,6 +493,19 @@ async def call_llm_async(
         return await call_openai_async(client, model, system, user_content, expect_json)
 
 
+def supports_structured_outputs(stage_config: dict) -> bool:
+    """True only for native OpenAI (no custom base_url).
+
+    OpenRouter and Ollama share the OpenAI SDK client type, but they do not
+    implement the beta parse API. Routing them into parse() costs an extra
+    failed round-trip on every GPT-2/GPT-3 call before JSON fallback.
+    """
+    return (
+        stage_config.get("provider", "openai") == "openai"
+        and not stage_config.get("base_url")
+    )
+
+
 async def call_llm_structured(
     stage_config: dict,
     system: str,
@@ -519,11 +532,10 @@ async def call_llm_structured(
     Returns:
         A fully instantiated, validated Pydantic object.
     """
-    provider_type, client = _make_async_client(stage_config)
+    _provider_type, client = _make_async_client(stage_config)
     model = stage_config["model"]
 
-    # Structured outputs only supported by OpenAI-compatible APIs
-    if provider_type != "openai":
+    if not supports_structured_outputs(stage_config):
         raw = await call_llm_async(stage_config, system, user_content, expect_json=True)
         parsed = extract_json(raw)
         return response_model.model_validate(parsed)

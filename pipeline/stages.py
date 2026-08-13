@@ -21,11 +21,13 @@ from pipeline.models import (
 )
 from pipeline.prompts import (
     DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM,
-    GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation,
+    PROMPT_VERSION, build_augmentation,
 )
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_llm_async, call_llm_structured, is_activation_phrase
-from pipeline.verifier import parse_gpt2, parse_gpt2_structured, _all_soft, recompute_verdict
+from pipeline.verifier import (
+    parse_gpt2, parse_gpt2_structured, _all_soft, recompute_verdict, build_gpt2_user_content,
+)
 from pipeline.arbiter import parse_gpt3, parse_gpt3_structured, apply_edits, apply_edits_by_id
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search, refine_search_query, fetch_claim_evidence
@@ -53,13 +55,18 @@ async def _verify_text(state: PipelineState, text_to_verify: str) -> dict:
     Deduplicates the identical verify-and-correct pattern that appears 4 times
     in the original orchestrator (initial verify, soft-retry, first rewrite, loop rewrites).
 
+    Atomic claims are attached only when re-verifying the same sanitized draft
+    they were decomposed from. Rewritten text must not be scored against a
+    stale claim list.
+
     Returns dict: {gpt2_raw, claim_table, violations, verdict, findings, reasoning}.
     """
-    gpt2_user = (
-        f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-        f"=== TASK ===\n"
-        f"ORIGINAL PROMPT:\n{state['prompt']}\n\n"
-        f"GPT-1 RESPONSE TO VERIFY:\n{text_to_verify}"
+    include_claims = text_to_verify == state.get("sanitized_output")
+    gpt2_user = build_gpt2_user_content(
+        state["prompt"],
+        text_to_verify,
+        atomic_claims=(state.get("atomic_claims") or None) if include_claims else None,
+        nli_grounding=(state.get("nli_grounding") or None) if include_claims else None,
     )
     gpt2_cfg = state["gpt2_cfg"]
     gpt2_system = state["gpt2_system"]
@@ -70,6 +77,8 @@ async def _verify_text(state: PipelineState, text_to_verify: str) -> dict:
         parsed = await call_llm_structured(gpt2_cfg, gpt2_system, gpt2_user, GPT2ResponseSchema)
         gpt2_raw = parsed.model_dump_json()
         ct, viol, verdict, findings, reasoning = parse_gpt2_structured(parsed, flags=flags, tier=tier)
+    except PipelineError:
+        raise
     except Exception:
         gpt2_raw = await call_llm_async(gpt2_cfg, gpt2_system, gpt2_user, expect_json=True)
         ct, viol, verdict, findings, reasoning = parse_gpt2(gpt2_raw, flags=flags, tier=tier)
@@ -358,7 +367,7 @@ async def stage_check_fast_paths(state: PipelineState) -> dict:
         )
         metrics.final_verdict = "PASS"
         metrics.confidence_label = "Low"
-        metrics.bypassed = True
+        metrics.bypassed = False
         metrics.finish()
         record_run(metrics)
         return {"early_return": _base_response(
@@ -412,7 +421,11 @@ async def stage_decompose(state: PipelineState) -> dict:
     do_decompose = is_nli_available() or is_high_stakes(flags)
 
     if not do_decompose:
-        return {"atomic_claims": [], "decomposition_ran": False}
+        return {
+            "atomic_claims": [],
+            "decomposition_ran": False,
+            "decomp_kwargs": dict(atomic_claims=[], decomposition_ran=False),
+        }
 
     _emit_stage_start(emit, "decomposition")
     sm = metrics.start_stage("decomposition")
@@ -423,7 +436,11 @@ async def stage_decompose(state: PipelineState) -> dict:
     _emit_stage_complete(emit, "decomposition", data={"claim_count": len(claims)})
     metrics.decomposition_ran = len(claims) > 0
     metrics.atomic_claims_count = len(claims)
-    return {"atomic_claims": claims, "decomposition_ran": len(claims) > 0}
+    return {
+        "atomic_claims": claims,
+        "decomposition_ran": len(claims) > 0,
+        "decomp_kwargs": dict(atomic_claims=claims, decomposition_ran=len(claims) > 0),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -491,46 +508,12 @@ async def stage_verify(state: PipelineState) -> dict:
     flags = state["flags"]
     tier = state["tier"]
 
-    # Build GPT-2 user content (with NLI signals if available)
-    if atomic_claims:
-        claims_json = json.dumps(atomic_claims, indent=2)
-        nli_block = ""
-        nli_lines = []
-        for c in atomic_claims:
-            nli = c.get("nli_result", {})
-            nli_tier = nli.get("confidence_tier", "")
-            if nli_tier == "strong_support":
-                nli_lines.append(f'  NLI-STRONG-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
-            elif nli_tier == "weak_support":
-                nli_lines.append(f'  NLI-WEAK-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
-            elif nli_tier == "strong_contradiction":
-                nli_lines.append(f'  NLI-CONTRADICTED (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
-            elif nli_tier == "weak_contradiction":
-                nli_lines.append(f'  NLI-WEAK-CONTRADICTION (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
-        if nli_lines:
-            grounding_str = ""
-            if nli_grounding:
-                grounding_str = (
-                    f"\nGrounding Rate: {nli_grounding['grounding_rate']:.1%} "
-                    f"({nli_grounding['grounded_count']}/{nli_grounding['total_evaluated']} claims grounded)"
-                )
-            nli_block = "\n\nNLI PRE-VERIFICATION SIGNALS:\n" + "\n".join(nli_lines) + grounding_str
-
-        gpt2_user = (
-            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-            f"=== TASK ===\n"
-            f"ORIGINAL PROMPT:\n{state['prompt']}\n\n"
-            f"GPT-1 RESPONSE TO VERIFY:\n{state['sanitized_output']}\n\n"
-            f"PRE-DECOMPOSED ATOMIC CLAIMS (verify each independently):\n{claims_json}"
-            f"{nli_block}"
-        )
-    else:
-        gpt2_user = (
-            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-            f"=== TASK ===\n"
-            f"ORIGINAL PROMPT:\n{state['prompt']}\n\n"
-            f"GPT-1 RESPONSE TO VERIFY:\n{state['sanitized_output']}"
-        )
+    gpt2_user = build_gpt2_user_content(
+        state["prompt"],
+        state["sanitized_output"],
+        atomic_claims=atomic_claims or None,
+        nli_grounding=nli_grounding or None,
+    )
 
     _emit_stage_start(emit, "gpt2", data={
         "provider": gpt2_cfg.get("provider", ""), "model": gpt2_cfg.get("model", ""),
@@ -543,6 +526,8 @@ async def stage_verify(state: PipelineState) -> dict:
         claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2_structured(
             gpt2_parsed, flags=flags, tier=tier,
         )
+    except PipelineError:
+        raise
     except Exception:
         gpt2_raw = await call_llm_async(gpt2_cfg, state["gpt2_system"], gpt2_user, expect_json=True)
         claim_table, violations, gpt2_verdict, findings, gpt2_reasoning = parse_gpt2(
@@ -615,7 +600,11 @@ async def stage_verify(state: PipelineState) -> dict:
         "gpt2_verdict": gpt2_verdict,
         "findings": findings,
         "gpt2_reasoning": gpt2_reasoning,
-        "max_rewrite_loops": getattr(config, "MAX_REWRITE_LOOPS", 1),
+        "max_rewrite_loops": config.MAX_REWRITE_LOOPS,
+        "decomp_kwargs": state["decomp_kwargs"],
+        "search_sources": search_sources,
+        "src_kw_sets": state.get("src_kw_sets"),
+        "search_kwargs": state.get("search_kwargs", {}),
     }
 
     # If PASS: compute confidence and return
@@ -743,6 +732,8 @@ async def stage_arbiter(state: PipelineState) -> dict:
         gpt3_parsed = await call_llm_structured(gpt3_cfg, state["gpt3_system"], gpt3_user, GPT3ResponseSchema)
         gpt3_raw = gpt3_parsed.model_dump_json()
         arbiter_decision, arbiter_rationale, arbiter_edits, arbiter_policy_notes = parse_gpt3_structured(gpt3_parsed)
+    except PipelineError:
+        raise
     except Exception:
         gpt3_raw = await call_llm_async(gpt3_cfg, state["gpt3_system"], gpt3_user, expect_json=True)
         arbiter_decision, arbiter_rationale, arbiter_edits, arbiter_policy_notes = parse_gpt3(gpt3_raw)

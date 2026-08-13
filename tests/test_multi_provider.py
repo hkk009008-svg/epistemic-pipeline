@@ -43,12 +43,16 @@ class TestStageConfig:
         assert cfg["api_key"] == config.get_api_key()  # inherits global key
 
     def test_invalid_stage_raises(self):
-        with pytest.raises(AssertionError, match="Invalid stage"):
+        with pytest.raises(ValueError, match="Invalid stage"):
             config.set_stage_config("gpt4", "openai", "key", "model")
 
     def test_invalid_provider_raises(self):
-        with pytest.raises(AssertionError, match="Invalid provider"):
+        with pytest.raises(ValueError, match="Invalid provider"):
             config.set_stage_config("gpt1", "gemini", "key", "model")
+
+    def test_get_invalid_stage_raises(self):
+        with pytest.raises(ValueError, match="Invalid stage"):
+            config.get_stage_config("gpt4")
 
     def test_all_three_stages_independent(self):
         config.set_stage_config("gpt1", "openai", "key1", "gpt-4o")

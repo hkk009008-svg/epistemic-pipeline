@@ -28,13 +28,13 @@ User Question
 
 | Code | Violation | Example |
 |------|-----------|---------|
-| T1 | Fabricated Statistic | "73% of startups fail" (no source) |
-| T2 | False Certainty | "This will definitely work" |
-| T3 | Causal Claim as Fact | "X causes Y" without evidence |
-| T4 | Ranking Violation | "Country A is best" without criteria |
-| T5 | Prescriptive Creep | "You should do X" framed as fact |
-| T6 | Unsupported Evidence | Citing a study that doesn't exist |
-| T7 | Unverified Current Fact | Stating future laws/prices as known |
+| T1 | Fabricated statistic / citation | "73% of startups fail" (no source) |
+| T2 | Typicality without evidence | "Startups usually fail because..." |
+| T3 | Causal claim as fact | "X causes Y" without evidence |
+| T4 | Ranking without discriminators | "Country A is best" without criteria |
+| T5 | Prescriptive creep | "You should do X" framed as fact |
+| T6 | Reassurance framing | "Great question — you're already ahead" |
+| T7 | Unverified current fact | Stating future laws/prices as known |
 
 ## Quick Start
 

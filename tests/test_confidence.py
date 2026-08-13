@@ -76,6 +76,19 @@ class TestComputeConfidenceHardFindings:
         result = compute_confidence(_claims(["Observed"] * 5), findings=findings)
         assert result.confidence_label == "High"
 
+    def test_legacy_fabricated_statistic_uses_t1_weight(self):
+        """Legacy type names must not get the default 1.0 weight."""
+        legacy = [{"type": "Fabricated statistic", "severity": "hard", "detail": "73%"}]
+        coded = [{"type": "T1", "severity": "hard", "detail": "73%"}]
+        a = compute_confidence(_claims(["Observed"] * 5), findings=legacy)
+        b = compute_confidence(_claims(["Observed"] * 5), findings=coded)
+        assert a.confidence_label == b.confidence_label == "Medium"
+
+    def test_t7_hard_blocks_high_confidence(self):
+        findings = [{"type": "T7", "severity": "hard", "detail": "stale rate"}]
+        result = compute_confidence(_claims(["Observed"] * 5), findings=findings)
+        assert result.confidence_label == "Medium"
+
 
 class TestComputeConfidenceNLIGrounding:
     """Test NLI grounding rate integration into confidence."""

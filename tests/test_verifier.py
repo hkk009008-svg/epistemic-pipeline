@@ -207,8 +207,14 @@ class TestParseGpt2PrescriptiveCreepFiltering:
         assert findings[0]["type"] == "Prescriptive creep"
         assert "will improve" in findings[0]["detail"]
 
-    def test_hard_prescriptive_creep_not_filtered(self, flags_advice_requested: dict):
-        """Hard-severity prescriptive creep should never be filtered (even with advice flag)."""
+    def test_hard_prescriptive_creep_without_outcome_filtered_when_advice_requested(
+        self, flags_advice_requested: dict
+    ):
+        """Advice was requested and there is no outcome promise.
+
+        Audit v7 treats T5 as soft. A model marking it hard must not bypass
+        the advice filter or fail the run on a single stylistic finding.
+        """
         raw = json.dumps({
             "claim_table": [],
             "findings": [
@@ -221,8 +227,24 @@ class TestParseGpt2PrescriptiveCreepFiltering:
             "verdict": "FAIL",
         })
         _, _, verdict, findings, _ = parse_gpt2(raw, flags=flags_advice_requested)
-        assert verdict == "FAIL"
+        assert verdict == "PASS"
+        assert findings == []
+
+    def test_hard_t5_with_outcome_kept_as_soft(self, flags_advice_requested: dict):
+        """Outcome promises stay as findings, but T5 cannot be hard."""
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{
+                "type": "T5",
+                "severity": "hard",
+                "detail": "This will improve your odds of success.",
+            }],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _ = parse_gpt2(raw, flags=flags_advice_requested)
         assert len(findings) == 1
+        assert findings[0]["severity"] == "soft"
+        assert verdict == "PASS"
 
     def test_filtering_changes_verdict_from_fail_to_pass(self, flags_advice_requested: dict):
         """Three soft findings, but two are filterable prescriptive creep -> PASS."""
@@ -640,3 +662,80 @@ class TestParseGpt2TierSeverity:
         })
         _, _, verdict, _, _ = parse_gpt2(raw, tier="light")
         assert verdict == "PASS"
+
+
+class TestSoftTripwiresCannotBeHard:
+    """Audit v7 T4/T5/T6 stay soft even if the model marks them hard."""
+
+    def test_t5_reported_hard_is_forced_soft(self):
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "T5", "severity": "hard", "detail": "You should file today."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _ = parse_gpt2(raw, tier="strict")
+        assert findings[0]["severity"] == "soft"
+        assert verdict == "PASS"  # one soft finding is below the strict threshold
+
+    def test_prescriptive_creep_reported_hard_is_forced_soft(self):
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [{"type": "Prescriptive creep", "severity": "hard", "detail": "Do this now."}],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _ = parse_gpt2(raw)
+        assert findings[0]["severity"] == "soft"
+        assert verdict == "PASS"
+
+    def test_t4_and_t6_reported_hard_are_forced_soft(self):
+        raw = json.dumps({
+            "claim_table": [],
+            "findings": [
+                {"type": "T4", "severity": "hard", "detail": "Best option."},
+                {"type": "T6", "severity": "hard", "detail": "Great question."},
+            ],
+            "verdict": "FAIL",
+        })
+        _, _, verdict, findings, _ = parse_gpt2(raw)
+        assert all(f["severity"] == "soft" for f in findings)
+        assert verdict == "PASS"
+
+
+class TestBuildGpt2UserContent:
+    """Shared GPT-2 user-content builder used by sync and async paths."""
+
+    def test_includes_tripwire_and_task(self):
+        from pipeline.verifier import build_gpt2_user_content
+        from pipeline.prompts import GPT2_TRIPWIRE_REFERENCE
+        text = build_gpt2_user_content("What is an LLC?", "An LLC is a company.")
+        assert text.startswith(GPT2_TRIPWIRE_REFERENCE)
+        assert "ORIGINAL PROMPT:\nWhat is an LLC?" in text
+        assert "GPT-1 RESPONSE TO VERIFY:\nAn LLC is a company." in text
+        assert "PRE-DECOMPOSED ATOMIC CLAIMS" not in text
+
+    def test_includes_atomic_claims_when_provided(self):
+        from pipeline.verifier import build_gpt2_user_content
+        text = build_gpt2_user_content(
+            "Q",
+            "A",
+            atomic_claims=[{"text": "Water boils at 100C.", "claim_id": "abc"}],
+        )
+        assert "PRE-DECOMPOSED ATOMIC CLAIMS" in text
+        assert "Water boils at 100C." in text
+
+    def test_includes_nli_signals(self):
+        from pipeline.verifier import build_gpt2_user_content
+        text = build_gpt2_user_content(
+            "Q",
+            "A",
+            atomic_claims=[{
+                "text": "Water boils at 100C.",
+                "nli_result": {
+                    "confidence_tier": "strong_support",
+                    "best_entailment": 0.91,
+                },
+            }],
+            nli_grounding={"grounding_rate": 1.0, "grounded_count": 1, "total_evaluated": 1},
+        )
+        assert "NLI-STRONG-SUPPORT" in text
+        assert "Grounding Rate: 100.0%" in text

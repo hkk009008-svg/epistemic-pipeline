@@ -118,6 +118,7 @@ _stage_lock = threading.Lock()
 
 # Valid provider types
 PROVIDERS = {"openai", "anthropic", "openrouter", "ollama"}
+VALID_STAGES = ("gpt1", "gpt2", "gpt3")
 
 
 def set_stage_config(stage: str, provider: str = "openai", api_key: str = "",
@@ -129,8 +130,10 @@ def set_stage_config(stage: str, provider: str = "openai", api_key: str = "",
     model: Model identifier (falls back to global model)
     base_url: Custom API endpoint (optional, needed for openrouter/ollama)
     """
-    assert stage in ("gpt1", "gpt2", "gpt3"), f"Invalid stage: {stage}"
-    assert provider in PROVIDERS, f"Invalid provider: {provider}"
+    if stage not in VALID_STAGES:
+        raise ValueError(f"Invalid stage: {stage}")
+    if provider not in PROVIDERS:
+        raise ValueError(f"Invalid provider: {provider}")
     with _stage_lock:
         _stage_configs[stage] = {
             "provider": provider,
@@ -153,6 +156,8 @@ def get_stage_config(stage: str) -> dict:
     value.  Missing fields inherit from the global OpenAI config.  This
     allows "model-only" overrides without duplicating the API key.
     """
+    if stage not in VALID_STAGES:
+        raise ValueError(f"Invalid stage: {stage}")
     global_defaults = {
         "provider": "openai",
         "api_key": get_api_key(),

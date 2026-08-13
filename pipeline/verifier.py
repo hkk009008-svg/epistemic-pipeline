@@ -6,11 +6,13 @@ parsing (parse_gpt2_structured) for the V4 async pipeline.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import List, Optional
 
-from pipeline.models import ClaimEntry, GPT2ResponseSchema
 from pipeline.helpers import extract_json
+from pipeline.models import ClaimEntry, GPT2ResponseSchema
+from pipeline.prompts import GPT2_TRIPWIRE_REFERENCE
 
 # Module-level compiled regex for outcome-promise keywords
 _OUTCOME_KW = re.compile(
@@ -29,18 +31,35 @@ _LEGACY_SEVERITY = {
     "Unverified current fact": "hard",
 }
 
-# Map legacy finding type names to Audit v7 tripwire codes
-_LEGACY_TO_TRIPWIRE = {
+# Map legacy finding type names to Audit v7 tripwire codes.
+# Used for severity, skip-sets, and confidence weights. Output type strings
+# stay as the model reported them so API consumers and tests keep working.
+# "Unsupported evidence reference" is intentionally unmapped: it is a legacy
+# soft label, not T2 (typicality).
+_FINDING_TYPE_ALIASES = {
     "Fabricated statistic": "T1",
     "Fabricated citation": "T1",
     "False legal conclusion": "T1",
-    "Unsupported evidence reference": "T2",
+    "Evidence instantiation": "T1",
+    "Typicality violation": "T2",
+    "Causal claim as fact": "T3",
+    "Ranking violation": "T4",
     "Prescriptive creep": "T5",
-    "Overconfidence": "Overconfidence",
-    "Missing jurisdiction": "Missing jurisdiction",
+    "Prescriptive violation": "T5",
+    "Reassurance framing": "T6",
+    "Unverified current fact": "T7",
 }
 
-# Tier-specific severity maps — keys absent from a tier's map default to "soft".
+# Tier-specific severity maps. Unknown types keep GPT-2's self-reported
+# severity. T4/T5/T6 are always soft under Audit v7 even if the model
+# marks them hard — otherwise a single stylistic finding fails the run.
+_SOFT_TRIPWIRES = {
+    "T4": "soft", "T5": "soft", "T6": "soft",
+    "Ranking violation": "soft",
+    "Prescriptive creep": "soft",
+    "Prescriptive violation": "soft",
+    "Reassurance framing": "soft",
+}
 _TIER_SEVERITY = {
     "strict": {
         "Fabricated statistic": "hard",
@@ -49,7 +68,9 @@ _TIER_SEVERITY = {
         "Evidence instantiation": "hard",
         "Causal claim as fact": "hard",
         "Unverified current fact": "hard",
+        "Typicality violation": "hard",
         "T1": "hard", "T2": "hard", "T3": "hard", "T7": "hard",
+        **_SOFT_TRIPWIRES,
     },
     "standard": {
         "Fabricated statistic": "hard",
@@ -58,7 +79,9 @@ _TIER_SEVERITY = {
         "Evidence instantiation": "hard",
         "Unverified current fact": "hard",
         "Causal claim as fact": "soft",
+        "Typicality violation": "soft",
         "T1": "hard", "T2": "soft", "T3": "soft", "T7": "hard",
+        **_SOFT_TRIPWIRES,
     },
     "light": {
         "Fabricated statistic": "hard",
@@ -67,7 +90,9 @@ _TIER_SEVERITY = {
         "Evidence instantiation": "hard",
         "Causal claim as fact": "soft",
         "Unverified current fact": "soft",
+        "Typicality violation": "soft",
         "T1": "hard", "T2": "soft", "T3": "soft", "T7": "soft",
+        **_SOFT_TRIPWIRES,
     },
 }
 
@@ -85,6 +110,11 @@ _SKIP_TYPES = {
 _PRESCRIPTIVE_TYPES = {"Prescriptive creep", "T5", "Prescriptive violation"}
 
 
+def canonical_finding_type(ftype: str) -> str:
+    """Return the Audit v7 T-code for a finding type, or the original label."""
+    return _FINDING_TYPE_ALIASES.get(ftype, ftype)
+
+
 def _all_soft(findings: List[dict]) -> bool:
     """Return True if every finding has severity == 'soft'."""
     return len(findings) > 0 and all(f.get("severity") == "soft" for f in findings)
@@ -98,6 +128,117 @@ def recompute_verdict(findings: List[dict], tier: str = "strict") -> str:
     if hard_count > 0 or soft_count >= soft_threshold:
         return "FAIL"
     return "PASS"
+
+
+def _process_findings(
+    raw_findings: list,
+    flags: Optional[dict] = None,
+    tier: str = "strict",
+) -> List[dict]:
+    """Normalize, filter, and assign tier-aware severity for GPT-2 findings.
+
+    Shared by parse_gpt2 and parse_gpt2_structured so the two parsers cannot
+    drift. Reported type strings are preserved; aliases are used only for
+    skip/severity decisions.
+    """
+    severity_map = _TIER_SEVERITY.get(tier, _TIER_SEVERITY["strict"])
+    skip_types = _SKIP_TYPES.get(tier, set())
+
+    findings: List[dict] = []
+    for f in raw_findings:
+        ftype = f.get("type", "")
+        canonical = canonical_finding_type(ftype)
+        severity = f.get("severity", "soft").lower()
+        detail = f.get("detail", "")
+
+        if ftype in skip_types or canonical in skip_types:
+            continue
+
+        if canonical in severity_map:
+            severity = severity_map[canonical]
+        elif ftype in severity_map:
+            severity = severity_map[ftype]
+
+        if (
+            flags
+            and flags.get("advice_requested")
+            and (ftype in _PRESCRIPTIVE_TYPES or canonical in _PRESCRIPTIVE_TYPES)
+            and severity == "soft"
+            and not _OUTCOME_KW.search(detail)
+        ):
+            continue
+
+        if (
+            flags
+            and flags.get("jurisdiction_present")
+            and ftype in ("Missing jurisdiction",)
+        ):
+            continue
+
+        findings.append({"type": ftype, "severity": severity, "detail": detail})
+    return findings
+
+
+def build_gpt2_user_content(
+    prompt: str,
+    text_to_verify: str,
+    atomic_claims: list | None = None,
+    nli_grounding: dict | None = None,
+) -> str:
+    """Build GPT-2 user content with the tripwire reference first.
+
+    Placing the tripwire block at the start of user content avoids
+    lost-in-the-middle attention drop on long generator outputs.
+    Atomic claims / NLI signals are included only when provided — rewrite
+    re-verification must not attach claims decomposed from a prior draft.
+    """
+    claims_block = ""
+    if atomic_claims:
+        claims_json = json.dumps(atomic_claims, indent=2)
+        nli_lines = []
+        for c in atomic_claims:
+            nli = c.get("nli_result") or {}
+            nli_tier = nli.get("confidence_tier", "")
+            text = str(c.get("text", ""))[:80]
+            if nli_tier == "strong_support":
+                nli_lines.append(
+                    f'  NLI-STRONG-SUPPORT (ent={nli["best_entailment"]:.2f}): "{text}"'
+                )
+            elif nli_tier == "weak_support":
+                nli_lines.append(
+                    f'  NLI-WEAK-SUPPORT (ent={nli["best_entailment"]:.2f}): "{text}"'
+                )
+            elif nli_tier == "strong_contradiction":
+                nli_lines.append(
+                    f'  NLI-CONTRADICTED (con={nli["worst_contradiction"]:.2f}): "{text}"'
+                )
+            elif nli_tier == "weak_contradiction":
+                nli_lines.append(
+                    f'  NLI-WEAK-CONTRADICTION (con={nli["worst_contradiction"]:.2f}): "{text}"'
+                )
+        nli_block = ""
+        if nli_lines:
+            grounding_str = ""
+            if nli_grounding:
+                grounding_str = (
+                    f"\nGrounding Rate: {nli_grounding['grounding_rate']:.1%} "
+                    f"({nli_grounding['grounded_count']}/{nli_grounding['total_evaluated']} claims grounded)"
+                )
+            nli_block = (
+                "\n\nNLI PRE-VERIFICATION SIGNALS:\n" + "\n".join(nli_lines) + grounding_str
+            )
+        claims_block = (
+            f"\n\nPRE-DECOMPOSED ATOMIC CLAIMS (verify each independently):\n{claims_json}"
+            f"{nli_block}"
+        )
+
+    return (
+        f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
+        f"=== TASK ===\n"
+        f"ORIGINAL PROMPT:\n{prompt}\n\n"
+        f"GPT-1 RESPONSE TO VERIFY:\n{text_to_verify}"
+        f"{claims_block}"
+    )
 
 
 def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
@@ -145,58 +286,9 @@ def parse_gpt2(raw: str, flags: Optional[dict] = None, tier: str = "strict"):
                 for v in parsed["violations"]
             ]
 
-        # Resolve severity map and skip-set for the active tier
-        severity_map = _TIER_SEVERITY.get(tier, _TIER_SEVERITY["strict"])
-        skip_types = _SKIP_TYPES.get(tier, set())
-
-        findings = []  # type: List[dict]
-        for f in raw_findings:
-            ftype = f.get("type", "")
-            severity = f.get("severity", "soft").lower()
-            detail = f.get("detail", "")
-
-            # Skip finding types not applicable in this tier
-            if ftype in skip_types:
-                continue
-
-            # Override severity for known types in this tier's map;
-            # for unknown types, keep GPT-2's self-reported severity
-            if ftype in severity_map:
-                severity = severity_map[ftype]
-
-            # Context-aware filter: if advice was requested, drop soft
-            # prescriptive findings unless they contain outcome promises.
-            if (
-                flags
-                and flags.get("advice_requested")
-                and ftype in _PRESCRIPTIVE_TYPES
-                and severity == "soft"
-                and not _OUTCOME_KW.search(detail)
-            ):
-                continue
-
-            # Context-aware filter: if jurisdiction is present, drop
-            # "Missing jurisdiction" findings.
-            if (
-                flags
-                and flags.get("jurisdiction_present")
-                and ftype in ("Missing jurisdiction",)
-            ):
-                continue
-
-            findings.append({"type": ftype, "severity": severity, "detail": detail})
-
-        # Derive violations list (backward compat)
+        findings = _process_findings(raw_findings, flags=flags, tier=tier)
         violations = [f["type"] for f in findings]
-
-        # Recompute verdict based on tier-specific severity rules
-        hard_count = sum(1 for f in findings if f["severity"] == "hard")
-        soft_count = sum(1 for f in findings if f["severity"] == "soft")
-        soft_threshold = _SOFT_THRESHOLD.get(tier, 3)
-        if hard_count > 0 or soft_count >= soft_threshold:
-            verdict = "FAIL"
-        else:
-            verdict = "PASS"
+        verdict = recompute_verdict(findings, tier=tier)
 
         return claim_table, violations, verdict, findings, reasoning_trace
     except Exception:
@@ -233,55 +325,14 @@ def parse_gpt2_structured(
             for c in parsed.claim_table
         ]
 
-        # Convert FindingSchema objects to dicts for processing
         raw_findings = [
             {"type": f.type, "severity": f.severity, "detail": f.detail}
             for f in parsed.findings
         ]
 
-        # Resolve severity map and skip-set for the active tier
-        severity_map = _TIER_SEVERITY.get(tier, _TIER_SEVERITY["strict"])
-        skip_types = _SKIP_TYPES.get(tier, set())
-
-        findings = []
-        for f in raw_findings:
-            ftype = f.get("type", "")
-            severity = f.get("severity", "soft").lower()
-            detail = f.get("detail", "")
-
-            if ftype in skip_types:
-                continue
-
-            if ftype in severity_map:
-                severity = severity_map[ftype]
-
-            if (
-                flags
-                and flags.get("advice_requested")
-                and ftype in _PRESCRIPTIVE_TYPES
-                and severity == "soft"
-                and not _OUTCOME_KW.search(detail)
-            ):
-                continue
-
-            if (
-                flags
-                and flags.get("jurisdiction_present")
-                and ftype in ("Missing jurisdiction",)
-            ):
-                continue
-
-            findings.append({"type": ftype, "severity": severity, "detail": detail})
-
+        findings = _process_findings(raw_findings, flags=flags, tier=tier)
         violations = [f["type"] for f in findings]
-
-        hard_count = sum(1 for f in findings if f["severity"] == "hard")
-        soft_count = sum(1 for f in findings if f["severity"] == "soft")
-        soft_threshold = _SOFT_THRESHOLD.get(tier, 3)
-        if hard_count > 0 or soft_count >= soft_threshold:
-            verdict = "FAIL"
-        else:
-            verdict = "PASS"
+        verdict = recompute_verdict(findings, tier=tier)
 
         return claim_table, violations, verdict, findings, reasoning_trace
     except Exception:

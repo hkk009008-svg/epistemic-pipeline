@@ -187,6 +187,44 @@ class TestParseGpt3MalformedInput:
         assert edits == []
 
 
+class TestParseGpt3InvalidDecisionFailsClosed:
+    """Unrecognized arbiter decisions must BLOCK, not fall through to rewrite."""
+
+    def test_unknown_decision_becomes_block(self):
+        raw = json.dumps({
+            "arbiter_decision": "ALLOW",
+            "rationale": ["Looks fine."],
+            "edits_for_gpt1": [],
+            "final_policy_notes": [],
+        })
+        decision, rationale, edits, _ = parse_gpt3(raw)
+        assert decision == "BLOCK"
+        assert edits == []
+        assert any("Invalid arbiter_decision" in line for line in rationale)
+
+    def test_empty_decision_becomes_block(self):
+        raw = json.dumps({
+            "arbiter_decision": "",
+            "rationale": [],
+            "edits_for_gpt1": [],
+            "final_policy_notes": [],
+        })
+        decision, _, _, _ = parse_gpt3(raw)
+        assert decision == "BLOCK"
+
+    def test_string_rationale_is_coerced_to_list(self):
+        raw = json.dumps({
+            "arbiter_decision": "BLOCK",
+            "rationale": "single string",
+            "edits_for_gpt1": [],
+            "final_policy_notes": "note",
+        })
+        decision, rationale, _, policy_notes = parse_gpt3(raw)
+        assert decision == "BLOCK"
+        assert rationale == ["single string"]
+        assert policy_notes == ["note"]
+
+
 # ===================================================================
 # parse_gpt3() -- markdown-wrapped JSON
 # ===================================================================

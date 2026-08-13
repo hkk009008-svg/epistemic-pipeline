@@ -183,6 +183,19 @@ class TestStageConfig:
             assert data["stage"] == stage
             assert "provider" in data
 
+    def test_get_unknown_stage_404(self):
+        r = client.get("/api/stage/config/gpt4")
+        assert r.status_code == 404
+
+    def test_set_invalid_stage_rejected(self):
+        r = client.post("/api/stage/config", json={
+            "stage": "gpt4",
+            "provider": "openai",
+            "api_key": "sk-test123",
+            "model": "gpt-4o-mini",
+        })
+        assert r.status_code == 422
+
     def test_set_stage_config(self):
         r = client.post("/api/stage/config", json={
             "stage": "gpt1",

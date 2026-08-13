@@ -104,6 +104,7 @@ class TestVerifyClaimsWithNli:
         assert result[0]["nli_result"]["supported"] is True
         assert result[0]["nli_result"]["contradicted"] is False
         assert result[0]["nli_result"]["confidence_tier"] == "strong_support"
+        assert "nli_result" not in claims[0]
 
     @patch("pipeline.nli.is_nli_available", return_value=True)
     @patch("pipeline.nli.batch_classify_nli")

@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from pipeline.helpers import extract_json, is_activation_phrase
+from pipeline.helpers import extract_json, is_activation_phrase, supports_structured_outputs
 
 
 # ===================================================================
@@ -297,3 +297,31 @@ class TestIsActivationPhraseCaseInsensitive:
 
     def test_mixed_case_system(self):
         assert is_activation_phrase("system initialized") is True
+
+
+class TestSupportsStructuredOutputs:
+    """Native OpenAI only — OpenRouter/Ollama share the SDK type but not parse()."""
+
+    def test_native_openai(self):
+        assert supports_structured_outputs({"provider": "openai", "base_url": ""}) is True
+
+    def test_openai_with_custom_base_url(self):
+        assert supports_structured_outputs({
+            "provider": "openai",
+            "base_url": "https://openrouter.ai/api/v1",
+        }) is False
+
+    def test_openrouter(self):
+        assert supports_structured_outputs({
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+        }) is False
+
+    def test_ollama(self):
+        assert supports_structured_outputs({
+            "provider": "ollama",
+            "base_url": "http://localhost:11434/v1",
+        }) is False
+
+    def test_anthropic(self):
+        assert supports_structured_outputs({"provider": "anthropic", "base_url": ""}) is False

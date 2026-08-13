@@ -18,11 +18,11 @@ from pipeline.models import (
     PipelineRequest, PipelineResponse, ConfidenceBreakdown,
     SearchSource, GroundingInfo, UnsupportedSpan,
 )
-from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, GPT2_TRIPWIRE_REFERENCE, PROMPT_VERSION, build_augmentation
+from pipeline.prompts import DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM, PROMPT_VERSION, build_augmentation
 from pipeline.sanitizer import route_prompt, sanitize_output
 from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
-from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
-from pipeline.arbiter import parse_gpt3, apply_edits
+from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict, build_gpt2_user_content, canonical_finding_type
+from pipeline.arbiter import parse_gpt3, apply_edits, apply_edits_by_id
 from pipeline.convergence import should_continue_rewrite
 from pipeline.search import should_search, perform_web_search, refine_search_query, fetch_claim_evidence, compute_source_authority
 from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
@@ -92,15 +92,17 @@ def _fail_message(flags: dict, search_performed: bool) -> str:
     return "NO PASS - Output blocked by verification"
 
 
-# Weighted violation penalties (T1 fabrication is far worse than T6 reassurance)
+# Weighted violation penalties aligned with Audit v7:
+# T1 fabrication is worst; T7 unverified current facts are also hard;
+# T2 typicality is a language issue, not missing evidence.
 _VIOLATION_WEIGHTS = {
-    "T1": 2.0,   # Fabricated evidence
-    "T2": 1.5,   # Unsupported evidence reference
+    "T1": 2.0,   # Fabricated statistic / citation / legal conclusion
+    "T2": 1.0,   # Typicality language without citation
     "T3": 1.5,   # Causal claim stated as fact
-    "T4": 1.0,   # Missing structural qualifier
+    "T4": 1.0,   # Ranking without discriminators
     "T5": 1.0,   # Prescriptive creep
     "T6": 0.75,  # Reassurance framing
-    "T7": 0.75,  # Unverified current fact
+    "T7": 1.5,   # Unverified current fact
 }
 
 
@@ -167,7 +169,7 @@ def compute_confidence(
     weighted_penalty = 0.0
     if findings:
         for f in findings:
-            w = _VIOLATION_WEIGHTS.get(f.get("type", ""), 1.0)
+            w = _VIOLATION_WEIGHTS.get(canonical_finding_type(f.get("type", "")), 1.0)
             if f.get("severity") == "hard":
                 hard_count += 1
                 weighted_penalty += w
@@ -469,7 +471,7 @@ def run_pipeline(
         )
         metrics.final_verdict = "PASS"
         metrics.confidence_label = "Low"
-        metrics.bypassed = True
+        metrics.bypassed = False
         metrics.finish()
         record_run(metrics)
         return _finalize_response(
@@ -555,43 +557,11 @@ def run_pipeline(
 
     # ---- Step 2: GPT-2 Verify (on sanitized output) ----
     # Tripwire reference placed at START of user content (lost-in-middle fix)
-    if atomic_claims:
-        claims_json = json.dumps(atomic_claims, indent=2)
-        # Build NLI signals block if any claims have NLI results
-        nli_block = ""
-        nli_lines = []
-        for c in atomic_claims:
-            nli = c.get("nli_result", {})
-            nli_tier = nli.get("confidence_tier", "")
-            if nli_tier == "strong_support":
-                nli_lines.append(f'  NLI-STRONG-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
-            elif nli_tier == "weak_support":
-                nli_lines.append(f'  NLI-WEAK-SUPPORT (ent={nli["best_entailment"]:.2f}): "{c["text"][:80]}"')
-            elif nli_tier == "strong_contradiction":
-                nli_lines.append(f'  NLI-CONTRADICTED (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
-            elif nli_tier == "weak_contradiction":
-                nli_lines.append(f'  NLI-WEAK-CONTRADICTION (con={nli["worst_contradiction"]:.2f}): "{c["text"][:80]}"')
-        if nli_lines:
-            grounding_str = ""
-            if nli_grounding:
-                grounding_str = f"\nGrounding Rate: {nli_grounding['grounding_rate']:.1%} ({nli_grounding['grounded_count']}/{nli_grounding['total_evaluated']} claims grounded)"
-            nli_block = "\n\nNLI PRE-VERIFICATION SIGNALS:\n" + "\n".join(nli_lines) + grounding_str
-
-        gpt2_user = (
-            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-            f"=== TASK ===\n"
-            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
-            f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}\n\n"
-            f"PRE-DECOMPOSED ATOMIC CLAIMS (verify each independently):\n{claims_json}"
-            f"{nli_block}"
-        )
-    else:
-        gpt2_user = (
-            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-            f"=== TASK ===\n"
-            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
-            f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
-        )
+    gpt2_user = build_gpt2_user_content(
+        req.prompt, sanitized_output,
+        atomic_claims=atomic_claims or None,
+        nli_grounding=nli_grounding or None,
+    )
     _emit_stage_start(emit, "gpt2", data={"provider": gpt2_cfg.get("provider", ""), "model": gpt2_cfg.get("model", "")})
     gpt2_sm = metrics.start_stage("gpt2", gpt2_cfg.get("provider", ""), gpt2_cfg.get("model", ""))
     gpt2_raw = call_llm(gpt2_cfg, gpt2_system, gpt2_user, expect_json=True)
@@ -695,14 +665,13 @@ def run_pipeline(
             )
 
     # ---- GPT-2 FAIL: soft-only auto-repair path ----
-    max_rewrite_loops = getattr(config, "MAX_REWRITE_LOOPS", 1)
+    max_rewrite_loops = config.MAX_REWRITE_LOOPS
     if _all_soft(findings):
         # Re-verify with GPT-2 directly (sanitizer already ran on sanitized_output)
-        re_gpt2_user = (
-            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-            f"=== TASK ===\n"
-            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
-            f"GPT-1 RESPONSE TO VERIFY:\n{sanitized_output}"
+        re_gpt2_user = build_gpt2_user_content(
+            req.prompt, sanitized_output,
+            atomic_claims=atomic_claims or None,
+            nli_grounding=nli_grounding or None,
         )
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
@@ -862,18 +831,17 @@ def run_pipeline(
             f"\n\nPrevious verification found these specific issues:\n{finding_lines}\n"
             f"Please address each finding in your rewrite."
         )
+    has_id_edits = any(getattr(e, "target_id", "") for e in arbiter_edits)
+    if has_id_edits and atomic_claims:
+        _modified_claims, edit_summary = apply_edits_by_id(atomic_claims, arbiter_edits)
+        rewrite_prompt += f"\n\nDeterministic edits applied to claim metadata: {edit_summary}"
     rewrite_output = call_llm(gpt1_cfg, gpt1_system, rewrite_prompt)
 
     # Sanitize the rewrite before re-verification
     rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
 
     # Re-verify the rewritten output with GPT-2
-    re_gpt2_user = (
-            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-            f"=== TASK ===\n"
-            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
-            f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
-        )
+    re_gpt2_user = build_gpt2_user_content(req.prompt, rewrite_output)
     re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
     re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
     if search_sources:
@@ -915,12 +883,7 @@ def run_pipeline(
         rewrite_output = call_llm(gpt1_cfg, gpt1_system, rewrite_instruction)
         rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
         # Re-verify
-        re_gpt2_user = (
-            f"{GPT2_TRIPWIRE_REFERENCE}\n\n"
-            f"=== TASK ===\n"
-            f"ORIGINAL PROMPT:\n{req.prompt}\n\n"
-            f"GPT-1 RESPONSE TO VERIFY:\n{rewrite_output}"
-        )
+        re_gpt2_user = build_gpt2_user_content(req.prompt, rewrite_output)
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
         if search_sources:

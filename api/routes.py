@@ -284,12 +284,17 @@ def set_stage_config_endpoint(cfg: StageConfig):
     # Validate base_url against allowlist to prevent SSRF
     if cfg.base_url:
         _validate_base_url(cfg.base_url)
-    config.set_stage_config(cfg.stage, cfg.provider, clean_key, cfg.model, cfg.base_url)
+    try:
+        config.set_stage_config(cfg.stage, cfg.provider, clean_key, cfg.model, cfg.base_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "ok", "stage": cfg.stage, "provider": cfg.provider}
 
 
 @router.get("/api/stage/config/{stage}")
 def get_stage_config_endpoint(stage: str):
+    if stage not in config.VALID_STAGES:
+        raise HTTPException(status_code=404, detail=f"Unknown stage: {stage}")
     cfg = config.get_stage_config(stage)
     return {
         "stage": stage,
@@ -583,7 +588,10 @@ def v2_admin_config(cfg: StageConfig):
     clean_key = cfg.api_key.strip().encode("ascii", errors="ignore").decode("ascii").replace(" ", "")
     if cfg.base_url:
         _validate_base_url(cfg.base_url)
-    config.set_stage_config(cfg.stage, cfg.provider, clean_key, cfg.model, cfg.base_url)
+    try:
+        config.set_stage_config(cfg.stage, cfg.provider, clean_key, cfg.model, cfg.base_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return {"status": "ok", "stage": cfg.stage, "provider": cfg.provider}
 
 

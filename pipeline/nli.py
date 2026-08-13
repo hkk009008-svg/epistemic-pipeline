@@ -240,9 +240,10 @@ def verify_claims_with_nli(
         pairs = [(snippet, claim_text) for snippet in evidence_snippets]
         results = batch_classify_nli(pairs)
         nli_result = _nli_result_from_classifications(results)
+        updated = dict(claim)
         if nli_result is not None:
-            claim["nli_result"] = nli_result
-        enriched.append(claim)
+            updated["nli_result"] = nli_result
+        enriched.append(updated)
 
     return enriched
 

@@ -174,8 +174,8 @@ class PipelineResponse(BaseModel):
 
 
 class StageConfig(BaseModel):
-    stage: str  # "gpt1", "gpt2", "gpt3"
-    provider: str = "openai"
+    stage: Literal["gpt1", "gpt2", "gpt3"]
+    provider: Literal["openai", "anthropic", "openrouter", "ollama"] = "openai"
     api_key: str = ""
     model: str = ""
     base_url: str = ""
