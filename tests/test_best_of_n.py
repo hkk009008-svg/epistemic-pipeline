@@ -104,6 +104,18 @@ class TestGenerateBestOfN:
         assert info["candidates_generated"] == 1
 
     @patch("pipeline.best_of_n.call_llm")
+    def test_middle_failure_still_tries_later_candidates(self, mock_call):
+        mock_call.side_effect = [
+            "Studies suggest a weak answer.",
+            Exception("LLM failed"),
+            "According to [CDC 2024], coverage may vary.",
+        ]
+        cfg = {"provider": "openai", "api_key": "k", "model": "m", "base_url": ""}
+        result, info = generate_best_of_n(cfg, "sys", "user", {}, n=3)
+        assert info["candidates_generated"] == 2
+        assert "CDC" in result
+
+    @patch("pipeline.best_of_n.call_llm")
     def test_all_fail_raises(self, mock_call):
         mock_call.side_effect = Exception("LLM failed")
         cfg = {"provider": "openai", "api_key": "k", "model": "m", "base_url": ""}

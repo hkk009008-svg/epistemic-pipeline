@@ -37,6 +37,20 @@ class TestParseGpt3Block:
         decision, _, _, _ = parse_gpt3(raw)
         assert decision == "BLOCK"
 
+    def test_lowercase_edit_action_is_normalized(self):
+        raw = json.dumps({
+            "arbiter_decision": "ALLOW_WITH_EDITS",
+            "rationale": [],
+            "edits_for_gpt1": [
+                {"action": "delete", "target": "bad claim", "replacement": ""},
+            ],
+            "final_policy_notes": [],
+        })
+        _, _, edits, _ = parse_gpt3(raw)
+        assert edits[0].action == "DELETE"
+        result = apply_edits("Original with bad claim.", edits)
+        assert "DELETE the following text" in result
+
 
 # ===================================================================
 # parse_gpt3() -- ALLOW_WITH_EDITS decision

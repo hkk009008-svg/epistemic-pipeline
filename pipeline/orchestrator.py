@@ -24,7 +24,7 @@ from pipeline.helpers import PipelineError, call_llm, is_activation_phrase
 from pipeline.verifier import parse_gpt2, _all_soft, recompute_verdict
 from pipeline.arbiter import parse_gpt3, apply_edits
 from pipeline.convergence import should_continue_rewrite
-from pipeline.search import should_search, perform_web_search, refine_search_query, fetch_claim_evidence
+from pipeline.search import should_search, perform_web_search, refine_search_query, fetch_claim_evidence, compute_source_authority
 from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
 from pipeline.decomposer import decompose_claims
 from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
@@ -70,6 +70,14 @@ def clean_for_display(text: str) -> str:
     for pattern, replacement in _DISPLAY_PATTERNS:
         text = pattern.sub(replacement, text)
     return text.strip()
+
+
+def _finalize_response(**kwargs) -> PipelineResponse:
+    """Build a PipelineResponse and strip sanitizer markers from user-facing text."""
+    final_result = kwargs.get("final_result")
+    if final_result:
+        kwargs["final_result"] = clean_for_display(final_result)
+    return PipelineResponse(**kwargs)
 
 
 def _fail_message(flags: dict, search_performed: bool) -> str:
@@ -178,7 +186,7 @@ def compute_confidence(
     # Evidence confidence: source authority signal (when search sources available)
     evidence_confidence = 0.0
     if search_sources:
-        authorities = [getattr(s, "score", 0.5) for s in search_sources]
+        authorities = [compute_source_authority(getattr(s, "url", "") or "") for s in search_sources]
         evidence_confidence = sum(authorities) / len(authorities) if authorities else 0.0
         if evidence_confidence >= 0.8:
             reasoning.append(f"Evidence quality: high (avg authority {evidence_confidence:.2f} from {len(search_sources)} sources)")
@@ -464,7 +472,7 @@ def run_pipeline(
         metrics.bypassed = True
         metrics.finish()
         record_run(metrics)
-        return PipelineResponse(
+        return _finalize_response(
             prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw="(current-events fast path — no web search available)",
@@ -485,7 +493,7 @@ def run_pipeline(
         metrics.final_verdict = "PASS"
         metrics.finish()
         record_run(metrics)
-        return PipelineResponse(
+        return _finalize_response(
             prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=True,
             gpt2_raw="(bypassed)", claim_table=[], violations=[], gpt2_verdict="PASS",
@@ -594,7 +602,7 @@ def run_pipeline(
     # ---- Source-match correction: fix GPT-2's over-strict categorization ----
     if search_sources:
         claim_table = recategorize_with_sources(claim_table, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
-        findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets)
+        findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
         violations = [f["type"] for f in findings]
         gpt2_verdict = recompute_verdict(findings, tier=tier)
 
@@ -631,7 +639,7 @@ def run_pipeline(
                 _src_kw_sets = build_source_keyword_sets(search_sources)
                 # Re-run source-match correction with expanded evidence
                 claim_table = recategorize_with_sources(claim_table, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
-                findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets)
+                findings = filter_findings_with_sources(findings, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
                 violations = [f["type"] for f in findings]
                 gpt2_verdict = recompute_verdict(findings, tier=tier)
                 search_kwargs["search_sources"] = search_sources
@@ -650,7 +658,7 @@ def run_pipeline(
         metrics.confidence_label = conf.confidence_label
         metrics.finish()
         record_run(metrics)
-        return PipelineResponse(
+        return _finalize_response(
             prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
@@ -674,7 +682,7 @@ def run_pipeline(
             metrics.confidence_label = conf.confidence_label
             metrics.finish()
             record_run(metrics)
-            return PipelineResponse(
+            return _finalize_response(
                 prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
                 gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
@@ -699,8 +707,8 @@ def run_pipeline(
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
         if search_sources:
-            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
-            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
+            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
+            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
             re_viol = [f["type"] for f in re_findings]
             re_verdict = recompute_verdict(re_findings, tier=tier)
 
@@ -712,7 +720,7 @@ def run_pipeline(
             metrics.convergence_outcome = "pass"
             metrics.finish()
             record_run(metrics)
-            return PipelineResponse(
+            return _finalize_response(
                 prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
                 gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
                 gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
@@ -770,7 +778,7 @@ def run_pipeline(
         metrics.confidence_label = block_conf.confidence_label
         metrics.finish()
         record_run(metrics)
-        return PipelineResponse(
+        return _finalize_response(
             prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
@@ -820,7 +828,7 @@ def run_pipeline(
         metrics.convergence_outcome = "arbiter_unknown"
         metrics.finish()
         record_run(metrics)
-        return PipelineResponse(
+        return _finalize_response(
             prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
@@ -869,8 +877,8 @@ def run_pipeline(
     re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
     re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
     if search_sources:
-        re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
-        re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
+        re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
+        re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
         re_viol = [f["type"] for f in re_findings]
         re_verdict = recompute_verdict(re_findings, tier=tier)
 
@@ -916,8 +924,8 @@ def run_pipeline(
         re_gpt2_raw = call_llm(gpt2_cfg, gpt2_system, re_gpt2_user, expect_json=True)
         re_ct, re_viol, re_verdict, re_findings, re_reasoning = parse_gpt2(re_gpt2_raw, flags=flags, tier=tier)
         if search_sources:
-            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets)
-            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets)
+            re_ct = recategorize_with_sources(re_ct, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
+            re_findings = filter_findings_with_sources(re_findings, search_sources, _src_kw_sets, nli_claims=atomic_claims or None)
             re_viol = [f["type"] for f in re_findings]
             re_verdict = recompute_verdict(re_findings, tier=tier)
         findings_history.append(re_findings)
@@ -932,7 +940,7 @@ def run_pipeline(
         metrics.convergence_outcome = "pass"
         metrics.finish()
         record_run(metrics)
-        return PipelineResponse(
+        return _finalize_response(
             prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
             gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
             gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
@@ -973,7 +981,7 @@ def run_pipeline(
     metrics.convergence_outcome = "fallback"
     metrics.finish()
     record_run(metrics)
-    return PipelineResponse(
+    return _finalize_response(
         prompt_version=PROMPT_VERSION, tier=tier, output_format=output_format,
         gpt1_input=req.prompt, gpt1_output=gpt1_output, bypassed=False,
         gpt2_raw=gpt2_raw, claim_table=claim_table, violations=violations,
@@ -983,7 +991,7 @@ def run_pipeline(
         arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
         rewrite_occurred=True, rewrite_output=fallback_output,
         rewrite_gpt2_raw=re_gpt2_raw, rewrite_claim_table=re_ct,
-        rewrite_violations=re_viol, rewrite_verdict="PASS",
+        rewrite_violations=re_viol, rewrite_verdict=re_verdict,
         rewrite_reasoning=re_reasoning,
         final_verdict="PASS",
         final_result=fallback_output,

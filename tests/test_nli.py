@@ -71,6 +71,9 @@ class TestConfidenceTier:
     def test_just_below_weak(self):
         assert _compute_confidence_tier(0.39, 0.39) == "neutral"
 
+    def test_contradiction_outranks_strong_support(self):
+        assert _compute_confidence_tier(0.8, 0.85) == "strong_contradiction"
+
 
 # ---------------------------------------------------------------------------
 # verify_claims_with_nli (integration-level, mocked NLI)
@@ -175,6 +178,30 @@ class TestVerifyClaimsWithNli:
         result = verify_claims_with_nli(claims, evidence)
         assert result == claims
         assert "nli_result" not in result[0]
+
+    @patch("pipeline.nli.is_nli_available", return_value=True)
+    @patch("pipeline.nli.batch_classify_nli")
+    def test_all_failed_classifications_omit_nli_result(self, mock_batch, mock_avail):
+        mock_batch.return_value = [None, None]
+        claims = [{"text": "Water boils at 100C."}]
+        result = verify_claims_with_nli(claims, ["a", "b"])
+        assert "nli_result" not in result[0]
+        grounding = compute_grounding_rate(result)
+        assert grounding["total_evaluated"] == 0
+
+    @patch("pipeline.nli.is_nli_available", return_value=True)
+    @patch("pipeline.nli.batch_classify_nli")
+    def test_mixed_evidence_is_contradicted_not_supported(self, mock_batch, mock_avail):
+        mock_batch.return_value = [
+            {"label": "entailment", "scores": {"entailment": 0.8, "contradiction": 0.1, "neutral": 0.1}},
+            {"label": "contradiction", "scores": {"entailment": 0.05, "contradiction": 0.85, "neutral": 0.1}},
+        ]
+        claims = [{"text": "The rate is 73%."}]
+        result = verify_claims_with_nli(claims, ["supports", "refutes"])
+        nli = result[0]["nli_result"]
+        assert nli["contradicted"] is True
+        assert nli["supported"] is False
+        assert nli["confidence_tier"] == "strong_contradiction"
 
 
 # ---------------------------------------------------------------------------

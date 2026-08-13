@@ -1,8 +1,9 @@
 """Tests for compute_confidence() and verdict labels — upgraded with NLI grounding rate."""
 from __future__ import annotations
 
-from pipeline.orchestrator import compute_confidence
-from pipeline.models import ClaimEntry, ConfidenceBreakdown, PipelineResponse, compute_verdict_label
+from pipeline.orchestrator import compute_confidence, _finalize_response
+from pipeline.models import ClaimEntry, ConfidenceBreakdown, PipelineResponse, SearchSource, compute_verdict_label
+from pipeline.search import rank_sources
 
 
 def _claims(categories: list[str]) -> list[ClaimEntry]:
@@ -222,3 +223,36 @@ class TestVerdictLabels:
             confidence=ConfidenceBreakdown(confidence_label="High"),
         )
         assert resp.verdict_label == "Verified with evidence"
+
+
+class TestComputeConfidenceAuthority:
+    """Evidence confidence must use domain authority, not mutated rank scores."""
+
+    def test_rank_score_does_not_inflate_authority(self):
+        sources = [
+            SearchSource(title="Blog", url="https://blog.example.com/a", snippet="x" * 400, score=0.95),
+            SearchSource(title="Blog2", url="https://other.example.com/b", snippet="y" * 400, score=0.95),
+        ]
+        ranked = rank_sources(sources)
+        result = compute_confidence(
+            _claims(["Observed"] * 3 + ["Unsupported"] * 2),
+            search_sources=ranked,
+        )
+        assert result.confidence_label == "Medium"
+
+
+class TestFinalizeResponse:
+    def test_strips_sanitizer_markers(self):
+        resp = _finalize_response(
+            gpt1_input="q", gpt1_output="raw", bypassed=False,
+            gpt2_raw="", claim_table=[], violations=[], gpt2_verdict="PASS",
+            arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
+            arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
+            rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
+            rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
+            final_verdict="PASS",
+            final_result="Time is [Typicality language removed] relative.",
+            confidence=ConfidenceBreakdown(confidence_label="Low"),
+        )
+        assert "[Typicality language removed]" not in resp.final_result
+        assert "Time is" in resp.final_result

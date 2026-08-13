@@ -60,6 +60,15 @@ class TestSourceAuthority:
     def test_subdomain_of_known(self):
         assert compute_source_authority("https://pubmed.ncbi.nlm.nih.gov/12345") == 1.0
 
+    def test_gov_uk_is_high_authority(self):
+        assert compute_source_authority("https://www.gov.uk/guidance") == 1.0
+
+    def test_nhs_uk_is_high_authority(self):
+        assert compute_source_authority("https://www.nhs.uk/conditions/flu/") == 1.0
+
+    def test_gov_uk_subdomain(self):
+        assert compute_source_authority("https://www.education.gov.uk/schools") == 1.0
+
 
 # ---------------------------------------------------------------------------
 # rank_sources

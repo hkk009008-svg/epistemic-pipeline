@@ -118,8 +118,9 @@ def run_baseline_test(test: dict) -> dict:
     start = time.time()
     try:
         response = call_llm(
-            system="You are a helpful assistant. Answer the user's question accurately and concisely.",
-            user=test["prompt"],
+            config.get_stage_config("gpt1"),
+            "You are a helpful assistant. Answer the user's question accurately and concisely.",
+            test["prompt"],
         )
         duration = time.time() - start
         return {

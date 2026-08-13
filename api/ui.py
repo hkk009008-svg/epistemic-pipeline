@@ -2067,7 +2067,9 @@ function updateInsightPanel(d) {
   if (d.arbiter_invoked) {
     h += '<div class="insight-kv"><strong>Arbiter</strong> · ' + esc(String(d.arbiter_decision || '')) + '</div>';
   }
-  const claims = d.claim_table || [];
+  const claims = (d.rewrite_occurred && d.rewrite_claim_table && d.rewrite_claim_table.length)
+    ? d.rewrite_claim_table
+    : (d.claim_table || []);
   if (claims.length > 0) {
     h += '<div class="insight-section-title">Claims</div>';
     claims.slice(0, 8).forEach(function(c) {
@@ -2812,8 +2814,8 @@ async function go(e) {
     // ---- Hero: Final Output with integrated metadata + feedback ----
     const fbHtml = '<div class="fb-row" aria-label="Was this verification correct?">' +
       '<span class="fb-label">Was this helpful?</span>' +
-      '<button class="fb-btn fb-up" onclick="sendFeedback(this,\\'accurate\\',\\''+esc(d.gpt1_input).replace(/'/g,"\\\\'")+'\\')" aria-label="Mark as accurate" title="Accurate">&#x1F44D;</button>' +
-      '<button class="fb-btn fb-down" onclick="sendFeedback(this,\\'inaccurate\\',\\''+esc(d.gpt1_input).replace(/'/g,"\\\\'")+'\\')" aria-label="Mark as inaccurate" title="Inaccurate">&#x1F44E;</button>' +
+      '<button class="fb-btn fb-up" data-rating="accurate" aria-label="Mark as accurate" title="Accurate">&#x1F44D;</button>' +
+      '<button class="fb-btn fb-down" data-rating="inaccurate" aria-label="Mark as inaccurate" title="Inaccurate">&#x1F44E;</button>' +
       '</div>';
     if (d.final_verdict === 'PASS') {
       ab('fo', 'Final Output', formatOutput(d.final_result) + metaHtml + fbHtml);
@@ -2823,6 +2825,15 @@ async function go(e) {
         blockMsg += '\\n\\nArbiter rationale:\\n' + d.arbiter_rationale.map(r => '\\u2022 ' + r).join('\\n');
       }
       ab('fo blk', 'Blocked', esc(blockMsg) + metaHtml + fbHtml);
+    }
+    const fbRows = ch.querySelectorAll('.fb-row');
+    const lastFb = fbRows[fbRows.length - 1];
+    if (lastFb) {
+      lastFb.querySelectorAll('.fb-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          sendFeedback(btn, btn.getAttribute('data-rating'), d.gpt1_input);
+        });
+      });
     }
 
     // ---- L2: Verification Summary (auto-expand on FAIL) ----
@@ -2849,12 +2860,16 @@ async function go(e) {
     if (d.rewrite_occurred) stages.push('Rewrite + Re-verify');
     l2Html += '<div class="l2-row"><span class="l2-label">Stages:</span> ' + stages.join(' \\u2192 ') + '</div>';
     // Claim count
-    if (d.claim_table && d.claim_table.length > 0) {
-      l2Html += '<div class="l2-row"><span class="l2-label">Claims verified:</span> ' + d.claim_table.length + '</div>';
+    const summaryClaims = (d.rewrite_occurred && d.rewrite_claim_table && d.rewrite_claim_table.length)
+      ? d.rewrite_claim_table
+      : (d.claim_table || []);
+    const summaryViolations = d.rewrite_occurred ? (d.rewrite_violations || []) : (d.violations || []);
+    if (summaryClaims.length > 0) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Claims verified:</span> ' + summaryClaims.length + '</div>';
     }
     // Violations summary in plain English
-    if (d.violations && d.violations.length > 0) {
-      l2Html += '<div class="l2-row"><span class="l2-label">Issues found:</span> ' + d.violations.length + ' violation(s) \\u2014 ' + d.violations.map(function(v) { return expandViolation(v); }).join(', ') + '</div>';
+    if (summaryViolations.length > 0) {
+      l2Html += '<div class="l2-row"><span class="l2-label">Issues found:</span> ' + summaryViolations.length + ' violation(s) \\u2014 ' + summaryViolations.map(function(v) { return esc(expandViolation(v)); }).join(', ') + '</div>';
     } else if (!d.bypassed) {
       l2Html += '<div class="l2-row"><span class="l2-label">Issues found:</span> None</div>';
     }

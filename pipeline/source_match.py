@@ -66,14 +66,30 @@ def _extract_keywords(text: str) -> set[str]:
     return {w for w in words if w not in _STOP_WORDS and len(w) > 1}
 
 
-def _is_source_backed(text: str, source_keyword_sets: list[set[str]]) -> bool:
+def _has_nli_scores(nli_claims: list[dict] | None) -> bool:
+    """True only when at least one claim actually carries an NLI result."""
+    if not nli_claims:
+        return False
+    return any(isinstance(c, dict) and c.get("nli_result") for c in nli_claims)
+
+
+def _keyword_threshold(nli_claims: list[dict] | None) -> float:
+    """Use the strict overlap cutoff only when NLI scores are present."""
+    return _STRICT_MATCH_THRESHOLD if _has_nli_scores(nli_claims) else _MATCH_THRESHOLD
+
+
+def _is_source_backed(
+    text: str,
+    source_keyword_sets: list[set[str]],
+    threshold: float = _MATCH_THRESHOLD,
+) -> bool:
     """Check if text content is supported by any source snippet."""
     kw = _extract_keywords(text)
     if len(kw) < _MIN_KEYWORDS:
         return False
     for src_kw in source_keyword_sets:
         overlap = kw & src_kw
-        if len(overlap) / len(kw) >= _MATCH_THRESHOLD:
+        if len(overlap) / len(kw) >= threshold:
             return True
     return False
 
@@ -169,8 +185,8 @@ def recategorize_with_sources(
                 best_overlap = ratio
                 best_source_idx = i
 
-        # Use stricter threshold for keyword-only matches
-        threshold = _STRICT_MATCH_THRESHOLD if nli_claims else _MATCH_THRESHOLD
+        # Use stricter threshold for keyword-only matches when NLI actually ran
+        threshold = _keyword_threshold(nli_claims)
         if best_overlap >= threshold:
             src = sources[best_source_idx]
             result.append(ClaimEntry(
@@ -191,11 +207,15 @@ def filter_findings_with_sources(
     findings: List[dict],
     sources: List[SearchSource],
     source_keyword_sets: list[set[str]] | None = None,
+    nli_claims: list[dict] | None = None,
 ) -> List[dict]:
     """Remove T1/T7 findings whose detail text is supported by search sources.
 
     Returns a new list of findings (leaves originals unchanged).
     Only removes findings of overridable types (T1, T7, etc.).
+
+    Uses the same keyword threshold as recategorize_with_sources so a finding
+    is not dropped while its claim stays Unsupported.
 
     Pass pre-computed *source_keyword_sets* to avoid redundant extraction
     when calling both recategorize_with_sources and filter_findings_with_sources.
@@ -205,6 +225,8 @@ def filter_findings_with_sources(
 
     if source_keyword_sets is None:
         source_keyword_sets = build_source_keyword_sets(sources)
+
+    threshold = _keyword_threshold(nli_claims)
 
     result = []
     for f in findings:
@@ -217,7 +239,7 @@ def filter_findings_with_sources(
             continue
 
         # Check if the finding's detail text matches source content
-        if _is_source_backed(detail, source_keyword_sets):
+        if _is_source_backed(detail, source_keyword_sets, threshold):
             continue  # Drop this finding — it's about source-backed content
 
         result.append(f)

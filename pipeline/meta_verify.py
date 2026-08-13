@@ -184,16 +184,21 @@ def meta_verify_fail(
         is_hedged = any(marker in detail for marker in hedging_markers)
 
         # T4 (missing qualifier) on already-hedged text is a false FAIL
-        if ftype == "T4" and is_hedged:
+        if ftype in ("T4", "Missing qualifier") and is_hedged:
             dropped_count += 1
             continue
 
         # T3 (causal as fact) on hedged language is a false FAIL
-        if ftype == "T3" and is_hedged and severity == "hard":
+        if ftype in ("T3", "Causal claim as fact") and is_hedged and severity == "hard":
             f = {**f, "severity": "soft"}  # downgrade from hard to soft
 
-        # T5 (prescriptive creep) when advice was requested is wrong
-        if ftype == "T5" and flags.get("advice_requested"):
+        # Soft T5 (prescriptive creep) when advice was requested is a false FAIL.
+        # Hard T5 (outcome promises / commands) is kept — matching parse_gpt2.
+        if (
+            ftype in ("T5", "Prescriptive creep", "Prescriptive violation")
+            and flags.get("advice_requested")
+            and severity != "hard"
+        ):
             dropped_count += 1
             continue
 

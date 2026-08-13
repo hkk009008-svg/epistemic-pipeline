@@ -118,8 +118,8 @@ def generate_best_of_n(
             resp = call_llm(stage_config, system_prompt, user_content)
             candidates.append(resp)
         except Exception:
-            # If a generation fails, continue with what we have
-            break
+            # If a generation fails, continue with remaining candidates
+            continue
 
     if not candidates:
         raise ValueError("All candidate generations failed")

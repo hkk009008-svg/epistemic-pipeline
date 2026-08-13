@@ -78,8 +78,9 @@ async def _verify_text(state: PipelineState, text_to_verify: str) -> dict:
     search_sources = state.get("search_sources", [])
     if search_sources:
         src_kw = state.get("src_kw_sets")
-        ct = recategorize_with_sources(ct, search_sources, src_kw)
-        findings = filter_findings_with_sources(findings, search_sources, src_kw)
+        nli_claims = state.get("atomic_claims") or None
+        ct = recategorize_with_sources(ct, search_sources, src_kw, nli_claims=nli_claims)
+        findings = filter_findings_with_sources(findings, search_sources, src_kw, nli_claims=nli_claims)
         viol = [f["type"] for f in findings]
         verdict = recompute_verdict(findings, tier=tier)
 
@@ -558,7 +559,7 @@ async def stage_verify(state: PipelineState) -> dict:
     if search_sources:
         src_kw = state.get("src_kw_sets")
         claim_table = recategorize_with_sources(claim_table, search_sources, src_kw, nli_claims=atomic_claims or None)
-        findings = filter_findings_with_sources(findings, search_sources, src_kw)
+        findings = filter_findings_with_sources(findings, search_sources, src_kw, nli_claims=atomic_claims or None)
         violations = [f["type"] for f in findings]
         gpt2_verdict = recompute_verdict(findings, tier=tier)
 
@@ -592,7 +593,7 @@ async def stage_verify(state: PipelineState) -> dict:
                 search_sources = search_sources + new_sources
                 src_kw_sets = build_source_keyword_sets(search_sources)
                 claim_table = recategorize_with_sources(claim_table, search_sources, src_kw_sets, nli_claims=atomic_claims or None)
-                findings = filter_findings_with_sources(findings, search_sources, src_kw_sets)
+                findings = filter_findings_with_sources(findings, search_sources, src_kw_sets, nli_claims=atomic_claims or None)
                 violations = [f["type"] for f in findings]
                 gpt2_verdict = recompute_verdict(findings, tier=tier)
                 # Update search state
@@ -996,7 +997,7 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
         gpt2_verdict=state["gpt2_verdict"], gpt2_reasoning=state["gpt2_reasoning"],
         rewrite_occurred=True, rewrite_output=fallback_output,
         rewrite_gpt2_raw=re["gpt2_raw"], rewrite_claim_table=re["claim_table"],
-        rewrite_violations=re["violations"], rewrite_verdict="PASS",
+        rewrite_violations=re["violations"], rewrite_verdict=re["verdict"],
         rewrite_reasoning=re["reasoning"],
         final_verdict="PASS", final_result=fallback_output,
         sanitizer_applied=True,

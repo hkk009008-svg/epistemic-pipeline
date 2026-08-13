@@ -21,6 +21,11 @@ _tavily_lock = threading.Lock()
 _AUTHORITY_HIGH = {
     "gov", "edu", "mil",  # TLD-based
 }
+# Public-sector second-level domains (TLD split of gov.uk is "uk", not "gov")
+_AUTHORITY_PUBLIC_SLDS = frozenset({
+    "gov.uk", "nhs.uk", "ac.uk", "gov.au", "govt.nz", "gc.ca", "gouv.fr",
+    "gob.es", "gov.in", "go.jp",
+})
 _AUTHORITY_KNOWN_DOMAINS = {
     # Government / official
     "who.int", "cdc.gov", "nih.gov", "fda.gov", "epa.gov",
@@ -51,14 +56,20 @@ def compute_source_authority(url: str) -> float:
         parsed = urlparse(url)
         hostname = parsed.hostname or ""
         hostname = hostname.lower()
+        clean_host = hostname.removeprefix("www.")
+        labels = clean_host.split(".") if clean_host else []
+
+        for i in range(max(0, len(labels) - 1)):
+            suffix = ".".join(labels[i:])
+            if suffix in _AUTHORITY_PUBLIC_SLDS:
+                return 1.0
 
         # Check TLD
-        tld = hostname.rsplit(".", 1)[-1] if "." in hostname else ""
+        tld = labels[-1] if labels else ""
         if tld in _AUTHORITY_HIGH:
             return 1.0
 
         # Check known domains (strip www. prefix)
-        clean_host = hostname.removeprefix("www.")
         for known in _AUTHORITY_KNOWN_DOMAINS:
             if clean_host == known or clean_host.endswith("." + known):
                 return 0.9

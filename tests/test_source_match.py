@@ -260,3 +260,28 @@ class TestFindNLISupport:
         }]
         result = _find_nli_support("BTS has seven members", nli_claims)
         assert result is None
+
+
+class TestSourceMatchThresholdAlignment:
+    """Findings and claims must use the same keyword overlap cutoff."""
+
+    def test_mid_overlap_does_not_drop_finding_when_claim_stays_unsupported(self):
+        sources = [_src("Lexicon", "alpha beta gamma unused")]
+        claim_text = "alpha beta gamma delta epsilon"
+        claims = [_claim(claim_text)]
+        findings = [{"type": "T1", "severity": "hard", "detail": claim_text}]
+        nli_claims = [{
+            "text": claim_text,
+            "nli_result": {"best_entailment": 0.2, "worst_contradiction": 0.1},
+        }]
+        recat = recategorize_with_sources(claims, sources, nli_claims=nli_claims)
+        filtered = filter_findings_with_sources(findings, sources, nli_claims=nli_claims)
+        assert recat[0].category == "Unsupported"
+        assert len(filtered) == 1
+
+    def test_empty_nli_result_uses_keyword_threshold(self):
+        sources = [_src("Lexicon", "alpha beta gamma unused")]
+        claims = [_claim("alpha beta gamma delta epsilon")]
+        nli_claims = [{"text": "alpha beta gamma delta epsilon"}]
+        recat = recategorize_with_sources(claims, sources, nli_claims=nli_claims)
+        assert recat[0].category == "Observed"

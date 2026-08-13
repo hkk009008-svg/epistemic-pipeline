@@ -20,7 +20,7 @@ def parse_gpt3(raw: str):
         edits_raw = parsed.get("edits_for_gpt1", [])
         edits = [
             EditEntry(
-                action=e.get("action", ""),
+                action=str(e.get("action", "")).upper(),
                 target=e.get("target", ""),
                 replacement=e.get("replacement", ""),
                 target_id=e.get("target_id", ""),
@@ -42,12 +42,13 @@ def apply_edits(gpt1_output: str, edits: List[EditEntry]) -> str:
     """
     instructions = []
     for e in edits:
+        action = (e.action or "").upper()
         id_tag = f" [claim_id={e.target_id}]" if getattr(e, "target_id", "") else ""
-        if e.action == "DELETE":
+        if action == "DELETE":
             instructions.append(f'DELETE the following text{id_tag}: "{e.target}"')
-        elif e.action == "REWRITE":
+        elif action == "REWRITE":
             instructions.append(f'REWRITE{id_tag} "{e.target}" to: "{e.replacement}"')
-        elif e.action == "MOVE_TO_UNKNOWN":
+        elif action == "MOVE_TO_UNKNOWN":
             instructions.append(
                 f'MOVE the following to the Unknowns section{id_tag}: "{e.target}" '
                 f'\u2014 reframe as: "{e.replacement}"'
@@ -96,13 +97,14 @@ def apply_edits_by_id(
         if idx is None:
             continue
 
-        if e.action == "DELETE":
+        action = (e.action or "").upper()
+        if action == "DELETE":
             modified_claims.pop(idx)
             applied.append(f"DELETED claim {target_id}: {claim['text'][:60]}...")
-        elif e.action == "REWRITE":
+        elif action == "REWRITE":
             modified_claims[idx] = {**claim, "text": e.replacement}
             applied.append(f"REWROTE claim {target_id}")
-        elif e.action == "MOVE_TO_UNKNOWN":
+        elif action == "MOVE_TO_UNKNOWN":
             modified_claims[idx] = {
                 **claim,
                 "text": e.replacement or f"Unknown(Actionable): {claim['text']}",
@@ -127,7 +129,7 @@ def parse_gpt3_structured(parsed: GPT3ResponseSchema):
         rationale = parsed.rationale
         edits = [
             EditEntry(
-                action=e.action,
+                action=str(e.action).upper(),
                 target=e.target,
                 replacement=e.replacement,
                 target_id=getattr(e, "target_id", ""),

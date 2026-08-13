@@ -152,18 +152,66 @@ def batch_classify_nli(pairs: List[Tuple[str, str]]) -> List[Optional[dict]]:
 def _compute_confidence_tier(entailment: float, contradiction: float) -> str:
     """Map continuous NLI scores to a confidence tier.
 
+    Contradiction outranks support: mixed evidence is a conflict, not verification.
+
     Returns: "strong_support", "weak_support", "neutral",
              "weak_contradiction", "strong_contradiction"
     """
-    if entailment >= ENTAILMENT_THRESHOLD:
-        return "strong_support"
-    if entailment >= WEAK_SUPPORT_THRESHOLD:
-        return "weak_support"
     if contradiction >= CONTRADICTION_THRESHOLD:
         return "strong_contradiction"
+    if entailment >= ENTAILMENT_THRESHOLD:
+        return "strong_support"
+    if contradiction >= WEAK_SUPPORT_THRESHOLD and contradiction >= entailment:
+        return "weak_contradiction"
+    if entailment >= WEAK_SUPPORT_THRESHOLD:
+        return "weak_support"
     if contradiction >= WEAK_SUPPORT_THRESHOLD:
         return "weak_contradiction"
     return "neutral"
+
+
+def _nli_result_from_classifications(results: List[Optional[dict]]) -> Optional[dict]:
+    """Aggregate per-snippet NLI scores into one claim-level result.
+
+    Returns None if every classification failed so callers omit nli_result
+    instead of treating a dead NLI layer as 'all ungrounded'.
+    """
+    best_entailment = 0.0
+    worst_contradiction = 0.0
+    best_source_idx = -1
+    all_scores = []
+
+    for i, r in enumerate(results):
+        if r is None:
+            continue
+        scores = r.get("scores") or {}
+        ent_score = scores.get("entailment", 0.0)
+        con_score = scores.get("contradiction", 0.0)
+        all_scores.append({
+            "source_idx": i,
+            "entailment": ent_score,
+            "contradiction": con_score,
+        })
+        if ent_score > best_entailment:
+            best_entailment = ent_score
+            best_source_idx = i
+        if con_score > worst_contradiction:
+            worst_contradiction = con_score
+
+    if not all_scores:
+        return None
+
+    contradicted = worst_contradiction >= CONTRADICTION_THRESHOLD
+    supported = (best_entailment >= ENTAILMENT_THRESHOLD) and not contradicted
+    return {
+        "best_entailment": round(best_entailment, 4),
+        "worst_contradiction": round(worst_contradiction, 4),
+        "best_source_idx": best_source_idx,
+        "supported": supported,
+        "contradicted": contradicted,
+        "confidence_tier": _compute_confidence_tier(best_entailment, worst_contradiction),
+        "per_source_scores": all_scores,
+    }
 
 
 def verify_claims_with_nli(
@@ -191,36 +239,9 @@ def verify_claims_with_nli(
         # Check claim against each evidence snippet
         pairs = [(snippet, claim_text) for snippet in evidence_snippets]
         results = batch_classify_nli(pairs)
-
-        # Aggregate: best entailment score, worst contradiction score
-        best_entailment = 0.0
-        worst_contradiction = 0.0
-        best_source_idx = -1
-        all_scores = []
-
-        for i, r in enumerate(results):
-            if r is None:
-                continue
-            ent_score = r["scores"].get("entailment", 0.0)
-            con_score = r["scores"].get("contradiction", 0.0)
-            all_scores.append({"source_idx": i, "entailment": ent_score, "contradiction": con_score})
-            if ent_score > best_entailment:
-                best_entailment = ent_score
-                best_source_idx = i
-            if con_score > worst_contradiction:
-                worst_contradiction = con_score
-
-        confidence_tier = _compute_confidence_tier(best_entailment, worst_contradiction)
-
-        claim["nli_result"] = {
-            "best_entailment": round(best_entailment, 4),
-            "worst_contradiction": round(worst_contradiction, 4),
-            "best_source_idx": best_source_idx,
-            "supported": best_entailment > ENTAILMENT_THRESHOLD,
-            "contradicted": worst_contradiction > CONTRADICTION_THRESHOLD,
-            "confidence_tier": confidence_tier,
-            "per_source_scores": all_scores,
-        }
+        nli_result = _nli_result_from_classifications(results)
+        if nli_result is not None:
+            claim["nli_result"] = nli_result
         enriched.append(claim)
 
     return enriched
@@ -458,34 +479,9 @@ async def verify_claims_concurrently(
             # Fallback to sync in-process if process pool fails
             results = batch_classify_nli(pairs)
 
-        best_entailment = 0.0
-        worst_contradiction = 0.0
-        best_source_idx = -1
-        all_scores = []
-
-        for i, r in enumerate(results):
-            if r is None:
-                continue
-            ent_score = r["scores"].get("entailment", 0.0)
-            con_score = r["scores"].get("contradiction", 0.0)
-            all_scores.append({"source_idx": i, "entailment": ent_score, "contradiction": con_score})
-            if ent_score > best_entailment:
-                best_entailment = ent_score
-                best_source_idx = i
-            if con_score > worst_contradiction:
-                worst_contradiction = con_score
-
-        confidence_tier = _compute_confidence_tier(best_entailment, worst_contradiction)
-
-        claim["nli_result"] = {
-            "best_entailment": round(best_entailment, 4),
-            "worst_contradiction": round(worst_contradiction, 4),
-            "best_source_idx": best_source_idx,
-            "supported": best_entailment > ENTAILMENT_THRESHOLD,
-            "contradicted": worst_contradiction > CONTRADICTION_THRESHOLD,
-            "confidence_tier": confidence_tier,
-            "per_source_scores": all_scores,
-        }
+        nli_result = _nli_result_from_classifications(results)
+        if nli_result is not None:
+            claim["nli_result"] = nli_result
         return claim
 
     # Run all claims concurrently

@@ -580,3 +580,59 @@ class TestStaleDateRegression:
         text = "As of January 2020, the rate was 5%."
         result = sanitize_output(text, flags, tier="strict")
         assert "[Stale" not in result
+
+
+class TestRoutePromptCurrentEvents:
+    """Current-events routing should not fire on everyday 'new'/'now'."""
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "What is the latest WHO guidance?",
+            "What is the current president of France?",
+            "Who is the prime minister of Japan?",
+            "Any breaking news on the treaty?",
+        ],
+    )
+    def test_current_events_detected(self, prompt: str):
+        assert route_prompt(prompt)["current_events"] is True
+
+    @pytest.mark.parametrize(
+        "prompt",
+        [
+            "Define a new data structure.",
+            "Explain how a new LLC works.",
+            "New York zoning requirements.",
+            "Please help us understand photosynthesis.",
+        ],
+    )
+    def test_current_events_not_detected(self, prompt: str):
+        assert route_prompt(prompt)["current_events"] is False
+
+
+class TestRoutePromptUsPronoun:
+    """Case-insensitive \\bUS\\b must not treat the pronoun 'us' as a jurisdiction."""
+
+    def test_pronoun_us_is_not_jurisdiction(self):
+        flags = route_prompt("Tell us about gravity.")
+        assert flags["jurisdiction_present"] is False
+
+    def test_uppercase_us_is_jurisdiction(self):
+        flags = route_prompt("What are the tax rules in the US?")
+        assert flags["jurisdiction_present"] is True
+
+
+class TestSanitizeTypicalityDoesNotShieldPercents:
+    """Sanitizer markers must not count as citations that protect bare stats."""
+
+    def test_percent_after_typicality_is_stripped(self, flags_all_false: dict):
+        text = "About 50% typically succeed."
+        result = sanitize_output(text, flags_all_false)
+        assert "50%" not in result
+        assert "Unknown(Actionable)" in result
+
+    def test_percent_before_generally_is_stripped(self, flags_all_false: dict):
+        text = "The approval rate is 73% generally."
+        result = sanitize_output(text, flags_all_false)
+        assert "73%" not in result
+        assert "Unknown(Actionable)" in result

@@ -5,6 +5,7 @@ from pipeline.meta_verify import (
     is_high_stakes,
     check_claim_table_consistency,
     meta_verify_pass,
+    meta_verify_fail,
     _text_overlap,
 )
 from pipeline.models import ClaimEntry
@@ -172,3 +173,38 @@ class TestMetaVerifyPass:
         )
         assert result["adjusted_label"] == "High"
         assert result["should_reverify"] is False
+
+
+class TestMetaVerifyFail:
+    """False-FAIL overrides must not drop hard T5."""
+
+    def test_hard_t5_kept_when_advice_requested(self):
+        findings = [{
+            "type": "T5",
+            "severity": "hard",
+            "detail": "GPT-1 told the user this will improve outcomes.",
+        }]
+        result = meta_verify_fail(
+            flags={"legal_mode": True, "advice_requested": True},
+            claim_table=[],
+            findings=findings,
+            atomic_claims=[],
+        )
+        assert result["ran"] is True
+        assert result["override_to_pass"] is False
+        assert len(result["adjusted_findings"]) == 1
+
+    def test_soft_t5_dropped_when_advice_requested(self):
+        findings = [{
+            "type": "T5",
+            "severity": "soft",
+            "detail": "Suggested next steps for the user.",
+        }]
+        result = meta_verify_fail(
+            flags={"percent_requested": True, "advice_requested": True},
+            claim_table=[],
+            findings=findings,
+            atomic_claims=[],
+        )
+        assert result["override_to_pass"] is True
+        assert result["adjusted_findings"] == []

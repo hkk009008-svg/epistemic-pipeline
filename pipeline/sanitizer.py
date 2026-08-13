@@ -21,8 +21,9 @@ _LEGAL_RE = re.compile(
     r"(?i)\b(?:legal|illegal|law|regulation|import|export|IRS|SEC"
     r"|compliance|statute|ordinance|ban|prohibited)\b"
 )
+# US is matched case-sensitively: (?i)\bUS\b also matches the pronoun "us".
 _JURISDICTION_RE = re.compile(
-    r"(?i)\b(?:US|UK|EU|federal|state of"
+    r"(?i:\b(?:UK|EU|federal|state of"
     r"|United States|United Kingdom|Canada|Australia|Germany|France|India"
     r"|China|Japan|Brazil|Mexico|California|Texas|New York|Florida"
     r"|Ohio|Illinois|Pennsylvania|Georgia|Michigan|Virginia"
@@ -32,15 +33,19 @@ _JURISDICTION_RE = re.compile(
     r"|Connecticut|Iowa|Arkansas|Mississippi|Kansas|Utah"
     r"|Nebraska|Oklahoma|New Mexico|Hawaii|Idaho|Montana"
     r"|Wyoming|Vermont|Maine|New Hampshire|Rhode Island"
-    r"|South Dakota|North Dakota|Delaware|West Virginia|Alaska)\b"
+    r"|South Dakota|North Dakota|Delaware|West Virginia|Alaska)\b)"
+    r"|(?<![A-Za-z])(?:US|U\.S\.A?|USA)(?![A-Za-z])"
 )
 # Match plausible 4-digit years (1900-2199) for runtime comparisons.
 # Narrower than \d{4} to avoid false positives on ZIP codes (90210),
 # port numbers (8080), or other non-temporal 4-digit sequences.
 _YEAR_RE = re.compile(r"\b((?:19|20|21)\d{2})\b")
+# Avoid bare "new"/"now"/"current" — they fire on "new data structure", "help us now",
+# and "New York", which then skip GPT-2 entirely when search is unavailable.
 _CURRENT_EVENTS_RE = re.compile(
-    r"(?i)\b(?:current|latest|recent|right now|today|now|this year"
-    r"|as of|who is the|what is the current|new|newest|updated)\b"
+    r"(?i)\b(?:latest|recent|right now|today|this year"
+    r"|as of|who is the|what is the current|currently"
+    r"|current events?|newest|updated|breaking)\b"
 )
 _COMPARATIVE_RE = re.compile(
     r"(?i)(?:"
@@ -98,13 +103,19 @@ _CITATION_RE = re.compile(
     r"(?:\([^)]{3,50}\)|\[[^\]]{1,50}\])"  # (Source 2024) or [CDC 2023] etc.
 )
 
+# Internal sanitizer markers look like bracket citations; ignore them.
+_SANITIZER_MARKER_RE = re.compile(
+    r"\[(?:Typicality language removed|Unverified generalization removed|"
+    r"Legal claim requires citation|Stale [^\]]*)\]"
+)
+
 
 def _has_nearby_citation(text: str, match_start: int, match_end: int,
                          window: int = 80) -> bool:
     """Check if there's a citation within `window` chars of the match."""
     search_start = max(0, match_start - 20)  # Citations sometimes precede the stat
     search_end = min(len(text), match_end + window)
-    context = text[search_start:search_end]
+    context = _SANITIZER_MARKER_RE.sub(" ", text[search_start:search_end])
     return bool(_CITATION_RE.search(context))
 
 
@@ -163,12 +174,8 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
     """
     result = text
 
-    # ---- G1 + G2: Banned evidence & typicality (strict and standard only) ----
-    if tier in ("strict", "standard"):
-        result = _BANNED_EVIDENCE_RE.sub("[Unverified generalization removed]", result)
-        result = _TYPICALITY_RE.sub("[Typicality language removed]", result)
-
     # ---- G3: Bare stats (citation-aware) ----
+    # Run before G1/G2 so sanitizer bracket-markers cannot look like citations.
     # strict: always strip bare stats without nearby citations
     # standard: strip only when percent_requested
     # light: skip entirely
@@ -176,6 +183,11 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
         result = _replace_bare_percents(result)
     elif tier == "standard" and flags.get("percent_requested"):
         result = _replace_bare_percents(result)
+
+    # ---- G1 + G2: Banned evidence & typicality (strict and standard only) ----
+    if tier in ("strict", "standard"):
+        result = _BANNED_EVIDENCE_RE.sub("[Unverified generalization removed]", result)
+        result = _TYPICALITY_RE.sub("[Typicality language removed]", result)
 
     # ---- G4: Outcome promises (strict and standard, skipped in light) ----
     if tier in ("strict", "standard"):
