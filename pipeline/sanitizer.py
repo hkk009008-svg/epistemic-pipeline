@@ -6,7 +6,7 @@ The sanitizer enforces Audit v7 global rules deterministically.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import datetime, timezone
 
 # ---- Prompt Router patterns ----
 _ADVICE_RE = re.compile(
@@ -60,7 +60,7 @@ _COMPARATIVE_RE = re.compile(
 
 def route_prompt(prompt: str) -> dict:
     """Deterministic heuristic router -- classifies prompt features for downstream use."""
-    current_year = date.today().year
+    current_year = datetime.now(timezone.utc).date().year
     future_year = any(
         int(m.group(1)) > current_year for m in _YEAR_RE.finditer(prompt)
     )
@@ -176,73 +176,152 @@ _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,;.:!?])")
 _MULTI_DOT_RE = re.compile(r"\.\s*\.+")
 _COMMA_DOT_RE = re.compile(r",\s*\.")
 _DOT_COMMA_RE = re.compile(r"\.\s*,")
+_SEMICOLON_DOT_RE = re.compile(r"[;:]\s*\.")
+_DOT_SEMICOLON_RE = re.compile(r"\.\s*[;:]")
+_SEMICOLON_COMMA_RE = re.compile(r"[;:]\s*,")
+_COMMA_SEMICOLON_RE = re.compile(r",\s*[;:]")
 _MULTI_COMMA_RE = re.compile(r",\s*,+")
 _MULTI_SEMICOLON_RE = re.compile(r";\s*;+")
 _DANGLING_CONNECTOR_RE = re.compile(
-    r"\b(?:with|in|to|for|on|by|at|from|about|of|and|or|nor|but|whereas|while)\s*([,;.:!?])",
+    r"\b(?:with|in|to|for|on|by|at|from|about|of|and|or|nor|but|whereas|while|yet)\s*([,;.:!?])",
     re.IGNORECASE,
 )
 _LEADING_PUNCT_RE = re.compile(r"(?m)^[ \t]*[,;:.]+\s*")
 _LEADING_COORDINATOR_RE = re.compile(
-    r"(?m)^[ \t]*(?:and|but|or|nor|whereas|while)[,\s]+",
+    r"(?m)^[ \t]*(?:and|but|or|nor|whereas|while|yet)[,\s;:]+",
     re.IGNORECASE,
 )
 _SENTENCE_START_COORDINATOR_RE = re.compile(
-    r"(?<=[.!?]\s)(?:whereas|while)[,\s]+",
+    r"(?<=[.!?]\s)(?:and|but|or|nor|whereas|while|yet)[,\s;:]+",
+    re.IGNORECASE,
+)
+_FULL_PUNCT_RE = re.compile(r"^[\s,;:.—\-]*$")
+_CAP_AFTER_PUNCT_RE = re.compile(r"(?<=[.!?]\s)([a-z])")
+_LINE_LEADING_PUNCT_RE = re.compile(r"^[ \t]*[,;:.]+\s*")
+_LINE_LEADING_COORD_RE = re.compile(
+    r"^[ \t]*(?:and|but|or|nor|whereas|while|yet)[,\s;:]+",
     re.IGNORECASE,
 )
 
 
-def _clean_grammar_and_punctuation(text: str) -> str:
-    """Normalize punctuation, remove dangling prepositions and clean whitespace."""
+def clean_grammar_and_punctuation(text: str) -> str:
+    """Normalize punctuation, remove dangling prepositions, strip orphaned coordinators, and clean whitespace."""
     if not text:
         return ""
 
     # If text contains only punctuation and whitespace, return empty string
-    if re.fullmatch(r"[\s,;:.]*", text):
+    if _FULL_PUNCT_RE.match(text):
         return ""
 
     # Collapse whitespace first
-    text = _MULTI_SPACE_RE.sub(" ", text)
+    if "  " in text:
+        text = _MULTI_SPACE_RE.sub(" ", text)
+
     # Clean space before punctuation
-    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+    if _SPACE_BEFORE_PUNCT_RE.search(text):
+        text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+
     # Clean duplicate / colliding punctuation
-    text = _COMMA_DOT_RE.sub(".", text)
-    text = _DOT_COMMA_RE.sub(".", text)
-    text = _MULTI_DOT_RE.sub(".", text)
-    text = _MULTI_COMMA_RE.sub(",", text)
-    text = _MULTI_SEMICOLON_RE.sub(";", text)
+    if ";" in text or ":" in text or "," in text or ".." in text:
+        text = _COMMA_DOT_RE.sub(".", text)
+        text = _DOT_COMMA_RE.sub(".", text)
+        text = _SEMICOLON_DOT_RE.sub(".", text)
+        text = _DOT_SEMICOLON_RE.sub(".", text)
+        text = _SEMICOLON_COMMA_RE.sub(",", text)
+        text = _COMMA_SEMICOLON_RE.sub(",", text)
+        text = _MULTI_DOT_RE.sub(".", text)
+        text = _MULTI_COMMA_RE.sub(",", text)
+        text = _MULTI_SEMICOLON_RE.sub(";", text)
+
     # Remove dangling prepositions and trailing coordinators before sentence/clause terminators
-    text = _DANGLING_CONNECTOR_RE.sub(r"\1", text)
-    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
-    text = _COMMA_DOT_RE.sub(".", text)
-    text = _MULTI_COMMA_RE.sub(",", text)
-    text = _DANGLING_CONNECTOR_RE.sub(r"\1", text)
-    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
-    # Clean leading punctuation per line
-    text = _LEADING_PUNCT_RE.sub("", text)
-    # Clean leading orphaned coordinators per line
-    text = _LEADING_COORDINATOR_RE.sub("", text)
-    # Clean sentence-start contrastive coordinators
-    text = _SENTENCE_START_COORDINATOR_RE.sub("", text)
-    text = _LEADING_PUNCT_RE.sub("", text)
+    if _DANGLING_CONNECTOR_RE.search(text):
+        text = _DANGLING_CONNECTOR_RE.sub(r"\1", text)
+        if _SPACE_BEFORE_PUNCT_RE.search(text):
+            text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+        if _COMMA_DOT_RE.search(text):
+            text = _COMMA_DOT_RE.sub(".", text)
+        if _SEMICOLON_DOT_RE.search(text):
+            text = _SEMICOLON_DOT_RE.sub(".", text)
+        if _DOT_SEMICOLON_RE.search(text):
+            text = _DOT_SEMICOLON_RE.sub(".", text)
+        if _SEMICOLON_COMMA_RE.search(text):
+            text = _SEMICOLON_COMMA_RE.sub(",", text)
+        if _COMMA_SEMICOLON_RE.search(text):
+            text = _COMMA_SEMICOLON_RE.sub(",", text)
+        if _MULTI_COMMA_RE.search(text):
+            text = _MULTI_COMMA_RE.sub(",", text)
+        if _DANGLING_CONNECTOR_RE.search(text):
+            text = _DANGLING_CONNECTOR_RE.sub(r"\1", text)
+            text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+            if _COMMA_DOT_RE.search(text):
+                text = _COMMA_DOT_RE.sub(".", text)
+            if _SEMICOLON_DOT_RE.search(text):
+                text = _SEMICOLON_DOT_RE.sub(".", text)
+            if _DOT_SEMICOLON_RE.search(text):
+                text = _DOT_SEMICOLON_RE.sub(".", text)
+            if _SEMICOLON_COMMA_RE.search(text):
+                text = _SEMICOLON_COMMA_RE.sub(",", text)
+            if _COMMA_SEMICOLON_RE.search(text):
+                text = _COMMA_SEMICOLON_RE.sub(",", text)
+
+    # Iteratively strip leading punctuation and orphaned coordinators
+    while True:
+        prev = text
+        if _LEADING_PUNCT_RE.search(text):
+            text = _LEADING_PUNCT_RE.sub("", text)
+        if _LEADING_COORDINATOR_RE.search(text):
+            text = _LEADING_COORDINATOR_RE.sub("", text)
+        if _SENTENCE_START_COORDINATOR_RE.search(text):
+            text = _SENTENCE_START_COORDINATOR_RE.sub("", text)
+        if _LEADING_PUNCT_RE.search(text):
+            text = _LEADING_PUNCT_RE.sub("", text)
+        if text == prev:
+            break
+
+    # Fix sentence-internal capitalization after punctuation
+    if _CAP_AFTER_PUNCT_RE.search(text):
+        text = _CAP_AFTER_PUNCT_RE.sub(
+            lambda m: m.group(1).upper(),
+            text,
+        )
 
     # Line-by-line whitespace and capitalization cleanup
-    lines = text.split("\n")
-    cleaned_lines = []
-    for line in lines:
-        line_s = line.strip()
-        line_s = re.sub(r"^[ \t]*[,;:.]+\s*", "", line_s)
-        line_s = re.sub(r"^[ \t]*(?:and|but|or|nor|whereas|while)[,\s]+", "", line_s, flags=re.IGNORECASE)
+    if "\n" in text:
+        lines = text.split("\n")
+        cleaned_lines = []
+        for line in lines:
+            line_s = line.strip()
+            while True:
+                prev = line_s
+                line_s = _LINE_LEADING_PUNCT_RE.sub("", line_s)
+                line_s = _LINE_LEADING_COORD_RE.sub("", line_s)
+                if line_s == prev:
+                    break
+            if line_s and line_s[0].islower() and not line_s.startswith(("http", "www")):
+                line_s = line_s[0].upper() + line_s[1:]
+            cleaned_lines.append(line_s)
+        text = "\n".join(cleaned_lines)
+    else:
+        line_s = text.strip()
+        while True:
+            prev = line_s
+            line_s = _LINE_LEADING_PUNCT_RE.sub("", line_s)
+            line_s = _LINE_LEADING_COORD_RE.sub("", line_s)
+            if line_s == prev:
+                break
         if line_s and line_s[0].islower() and not line_s.startswith(("http", "www")):
             line_s = line_s[0].upper() + line_s[1:]
-        cleaned_lines.append(line_s)
-    text = "\n".join(cleaned_lines)
+        text = line_s
 
     # Final whitespace cleanup
-    text = _MULTI_SPACE_RE.sub(" ", text)
-    text = _TRAILING_SPACE_RE.sub("\n", text)
+    if "  " in text:
+        text = _MULTI_SPACE_RE.sub(" ", text)
+    if " \n" in text:
+        text = _TRAILING_SPACE_RE.sub("\n", text)
     return text.strip()
+
+
+_clean_grammar_and_punctuation = clean_grammar_and_punctuation
 
 # G1: Vague legal claims without statute/regulation citation (pre-compiled)
 _VAGUE_LEGAL_RE = re.compile(
@@ -281,26 +360,23 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
         result = _TYPICALITY_RE.sub("[Typicality language removed]", result)
 
     # ---- G4: Outcome promises (strict and standard, skipped in light) ----
-    if tier in ("strict", "standard"):
-        if not flags.get("advice_requested"):
-            result = _replace_outcome_promises(result)
+    if tier in ("strict", "standard") and not flags.get("advice_requested"):
+        result = _replace_outcome_promises(result)
 
     # ---- G6: Stale dates (strict and standard only) ----
-    if tier in ("strict", "standard"):
-        if flags.get("current_events"):
-            current_year = date.today().year
+    if tier in ("strict", "standard") and flags.get("current_events"):
+        current_year = datetime.now(timezone.utc).date().year
 
-            def _replace_stale(match: re.Match) -> str:
-                if int(match.group(1)) < current_year:
-                    return "[Stale — verify current status from an authoritative source]"
-                return match.group(0)
+        def _replace_stale(match: re.Match) -> str:
+            if int(match.group(1)) < current_year:
+                return "[Stale — verify current status from an authoritative source]"
+            return match.group(0)
 
-            result = _STALE_DATE_BASE_RE.sub(_replace_stale, result)
+        result = _STALE_DATE_BASE_RE.sub(_replace_stale, result)
 
     # ---- Legal mode extra (strict and standard only) ----
-    if tier in ("strict", "standard"):
-        if flags.get("legal_mode"):
-            result = _VAGUE_LEGAL_RE.sub("[Legal claim requires citation]", result)
+    if tier in ("strict", "standard") and flags.get("legal_mode"):
+        result = _VAGUE_LEGAL_RE.sub("[Legal claim requires citation]", result)
 
     # Clean up residual grammar, double-spaces, and punctuation (always)
     return _clean_grammar_and_punctuation(result)

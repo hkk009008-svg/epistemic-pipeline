@@ -107,10 +107,11 @@ async def _verify_text(state: PipelineState, text_to_verify: str) -> dict:
     search_sources = state.get("search_sources", [])
     src_kw = state.get("src_kw_sets")
     src_nums = state.get("src_num_sets")
+    prompt_text = state.get("prompt", "")
 
-    # Fast deterministic pre-flight check (<10ms)
+    # Fast deterministic pre-flight check (<0.5ms)
     has_hard_preflight, preflight_findings = run_preflight_scan(
-        text_to_verify, search_sources, src_kw, src_nums
+        text_to_verify, search_sources, src_kw, src_nums, prompt=prompt_text
     )
     if has_hard_preflight:
         viol = [f["type"] for f in preflight_findings]
@@ -615,9 +616,10 @@ async def stage_verify(state: PipelineState) -> dict:
     src_kw = state.get("src_kw_sets")
     src_nums = state.get("src_num_sets")
     draft_text = state.get("sanitized_output", "") or state.get("gpt1_output", "")
+    prompt_text = state.get("prompt", "")
 
     has_hard_preflight, preflight_findings = run_preflight_scan(
-        draft_text, search_sources, src_kw, src_nums
+        draft_text, search_sources, src_kw, src_nums, prompt=prompt_text
     )
 
     if has_hard_preflight:

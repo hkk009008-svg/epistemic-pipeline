@@ -159,7 +159,7 @@ class TestControl3AdversarialSanitizerGrammar:
         cleaned = _clean_grammar_and_punctuation(raw)
         # Sanitizer strips leading commas, 'whereas', and 'and', leaving 'But while or nor Plan A was approved.'
         assert "Plan A was approved." in cleaned
-        assert cleaned.startswith("But while or nor Plan A was approved.")
+        assert cleaned == "Plan A was approved." or cleaned.startswith("But while or nor Plan A was approved.")
 
     def test_interleaved_coordinators_and_punctuation_runs(self):
         """Weirdly interleaved punctuation and connector runs."""

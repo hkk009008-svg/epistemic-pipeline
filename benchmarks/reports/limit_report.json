@@ -1,0 +1,662 @@
+{
+  "schema_version": "epistemic-limit-profiler-v1",
+  "timestamp": "2026-08-15T14:14:56.410159+00:00",
+  "platform": "Darwin arm64 (darwin)",
+  "python_version": "3.11.15",
+  "total_cases_evaluated": 675,
+  "clean_cases_count": 27,
+  "adversarial_cases_count": 648,
+  "pipeline_stability_score": 100.0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "far": 0.0,
+  "frr": 0.0,
+  "f1_score": 1.0,
+  "accuracy": 1.0,
+  "peak_rss_mb": 89.89,
+  "rss_delta_mb": 2.48,
+  "tracemalloc_peak_mb": 1.97,
+  "total_latency_ms": 673.55,
+  "mean_latency_ms": 1.0,
+  "latency_per_token_ms": 0.0033,
+  "preflight_mean_ms": 0.42,
+  "preflight_speedup_factor": 2.37,
+  "threshold_comparisons": [
+    {
+      "metric_name": "Pipeline Stability Score (PSS)",
+      "design_target": ">= 90.0 / 100",
+      "empirical_value": "100.0 / 100",
+      "safety_margin": "+10.0",
+      "status": "PASS_INVARIANT"
+    },
+    {
+      "metric_name": "Adversarial Precision",
+      "design_target": ">= 95.0%",
+      "empirical_value": "100.00%",
+      "safety_margin": "+5.00%",
+      "status": "PASS_INVARIANT"
+    },
+    {
+      "metric_name": "Adversarial Recall (Detection)",
+      "design_target": ">= 95.0%",
+      "empirical_value": "100.00%",
+      "safety_margin": "+5.00%",
+      "status": "PASS_INVARIANT"
+    },
+    {
+      "metric_name": "False Accept Rate (FAR / Bypass)",
+      "design_target": "0.00% (0 Bypasses)",
+      "empirical_value": "0.00%",
+      "safety_margin": "0.00%",
+      "status": "PASS_INVARIANT"
+    },
+    {
+      "metric_name": "False Reject Rate (FRR / Overreach)",
+      "design_target": "<= 5.00%",
+      "empirical_value": "0.00%",
+      "safety_margin": "-5.00%",
+      "status": "PASS_INVARIANT"
+    },
+    {
+      "metric_name": "Pre-Flight Short-Circuit Latency",
+      "design_target": "< 10.0 ms",
+      "empirical_value": "0.42 ms",
+      "safety_margin": "-9.58 ms",
+      "status": "PASS_INVARIANT"
+    },
+    {
+      "metric_name": "Peak Memory Footprint (RSS)",
+      "design_target": "< 256.0 MB",
+      "empirical_value": "89.9 MB",
+      "safety_margin": "-166.1 MB",
+      "status": "PASS_INVARIANT"
+    }
+  ],
+  "confusion_matrix": {
+    "tp": 648,
+    "fp": 0,
+    "tn": 27,
+    "fn": 0,
+    "total": 675,
+    "labels": [
+      "ATTACK",
+      "CLEAN"
+    ],
+    "matrix": [
+      [
+        648,
+        0
+      ],
+      [
+        0,
+        27
+      ]
+    ]
+  },
+  "domain_breakdowns": {
+    "biomedical": {
+      "domain": "biomedical",
+      "total_cases": 150,
+      "clean_cases": 6,
+      "adversarial_cases": 144,
+      "tp": 144,
+      "fp": 0,
+      "tn": 6,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "far": 0.0,
+      "frr": 0.0,
+      "f1_score": 1.0,
+      "accuracy": 1.0,
+      "pass_count": 6,
+      "block_count": 104,
+      "edit_count": 40,
+      "preflight_intercept_count": 132,
+      "mean_duration_ms": 0.93
+    },
+    "financial": {
+      "domain": "financial",
+      "total_cases": 150,
+      "clean_cases": 6,
+      "adversarial_cases": 144,
+      "tp": 144,
+      "fp": 0,
+      "tn": 6,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "far": 0.0,
+      "frr": 0.0,
+      "f1_score": 1.0,
+      "accuracy": 1.0,
+      "pass_count": 6,
+      "block_count": 102,
+      "edit_count": 42,
+      "preflight_intercept_count": 130,
+      "mean_duration_ms": 0.99
+    },
+    "legal": {
+      "domain": "legal",
+      "total_cases": 125,
+      "clean_cases": 5,
+      "adversarial_cases": 120,
+      "tp": 120,
+      "fp": 0,
+      "tn": 5,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "far": 0.0,
+      "frr": 0.0,
+      "f1_score": 1.0,
+      "accuracy": 1.0,
+      "pass_count": 5,
+      "block_count": 83,
+      "edit_count": 37,
+      "preflight_intercept_count": 109,
+      "mean_duration_ms": 0.9
+    },
+    "cryptographic": {
+      "domain": "cryptographic",
+      "total_cases": 125,
+      "clean_cases": 5,
+      "adversarial_cases": 120,
+      "tp": 120,
+      "fp": 0,
+      "tn": 5,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "far": 0.0,
+      "frr": 0.0,
+      "f1_score": 1.0,
+      "accuracy": 1.0,
+      "pass_count": 5,
+      "block_count": 89,
+      "edit_count": 31,
+      "preflight_intercept_count": 108,
+      "mean_duration_ms": 1.13
+    },
+    "autonomous_contracts": {
+      "domain": "autonomous_contracts",
+      "total_cases": 125,
+      "clean_cases": 5,
+      "adversarial_cases": 120,
+      "tp": 120,
+      "fp": 0,
+      "tn": 5,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "far": 0.0,
+      "frr": 0.0,
+      "f1_score": 1.0,
+      "accuracy": 1.0,
+      "pass_count": 5,
+      "block_count": 90,
+      "edit_count": 30,
+      "preflight_intercept_count": 108,
+      "mean_duration_ms": 1.06
+    }
+  },
+  "attack_vector_breakdowns": {
+    "statistical_fallacy": {
+      "attack_vector": "statistical_fallacy",
+      "difficulty_tier": null,
+      "total_cases": 108,
+      "tp": 108,
+      "fn": 0,
+      "detection_rate": 1.0,
+      "bypass_rate": 0.0,
+      "block_count": 79,
+      "edit_count": 29,
+      "preflight_intercept_count": 107,
+      "preflight_intercept_rate": 0.9907,
+      "mean_duration_ms": 0.94
+    },
+    "prompt_injection": {
+      "attack_vector": "prompt_injection",
+      "difficulty_tier": null,
+      "total_cases": 108,
+      "tp": 108,
+      "fn": 0,
+      "detection_rate": 1.0,
+      "bypass_rate": 0.0,
+      "block_count": 54,
+      "edit_count": 54,
+      "preflight_intercept_count": 78,
+      "preflight_intercept_rate": 0.7222,
+      "mean_duration_ms": 1.01
+    },
+    "numeric_temporal_drift": {
+      "attack_vector": "numeric_temporal_drift",
+      "difficulty_tier": null,
+      "total_cases": 108,
+      "tp": 108,
+      "fn": 0,
+      "detection_rate": 1.0,
+      "bypass_rate": 0.0,
+      "block_count": 78,
+      "edit_count": 30,
+      "preflight_intercept_count": 108,
+      "preflight_intercept_rate": 1.0,
+      "mean_duration_ms": 0.88
+    },
+    "syntactic_entanglement": {
+      "attack_vector": "syntactic_entanglement",
+      "difficulty_tier": null,
+      "total_cases": 108,
+      "tp": 108,
+      "fn": 0,
+      "detection_rate": 1.0,
+      "bypass_rate": 0.0,
+      "block_count": 69,
+      "edit_count": 39,
+      "preflight_intercept_count": 78,
+      "preflight_intercept_rate": 0.7222,
+      "mean_duration_ms": 0.97
+    },
+    "citation_drift": {
+      "attack_vector": "citation_drift",
+      "difficulty_tier": null,
+      "total_cases": 108,
+      "tp": 108,
+      "fn": 0,
+      "detection_rate": 1.0,
+      "bypass_rate": 0.0,
+      "block_count": 80,
+      "edit_count": 28,
+      "preflight_intercept_count": 108,
+      "preflight_intercept_rate": 1.0,
+      "mean_duration_ms": 0.76
+    },
+    "poisoning_saturation": {
+      "attack_vector": "poisoning_saturation",
+      "difficulty_tier": null,
+      "total_cases": 108,
+      "tp": 108,
+      "fn": 0,
+      "detection_rate": 1.0,
+      "bypass_rate": 0.0,
+      "block_count": 108,
+      "edit_count": 0,
+      "preflight_intercept_count": 108,
+      "preflight_intercept_rate": 1.0,
+      "mean_duration_ms": 1.48
+    }
+  },
+  "tier_breakdowns": {
+    "mild": {
+      "total_cases": 162,
+      "detection_rate": 1.0,
+      "block_count": 56,
+      "edit_count": 106,
+      "preflight_intercept_count": 132,
+      "block_percentage": 34.6
+    },
+    "moderate": {
+      "total_cases": 162,
+      "detection_rate": 1.0,
+      "block_count": 88,
+      "edit_count": 74,
+      "preflight_intercept_count": 133,
+      "block_percentage": 54.3
+    },
+    "extreme": {
+      "total_cases": 162,
+      "detection_rate": 1.0,
+      "block_count": 162,
+      "edit_count": 0,
+      "preflight_intercept_count": 162,
+      "block_percentage": 100.0
+    },
+    "breaking": {
+      "total_cases": 162,
+      "detection_rate": 1.0,
+      "block_count": 162,
+      "edit_count": 0,
+      "preflight_intercept_count": 160,
+      "block_percentage": 100.0
+    }
+  },
+  "breaking_analysis": {
+    "density_sweep_points": [
+      {
+        "target_density": 0.0,
+        "actual_unbacked_ratio": 0.0,
+        "hard_findings_count": 0,
+        "soft_findings_count": 0,
+        "is_poisoned": false,
+        "raw_decision": "ALLOW_WITH_EDITS",
+        "guarded_decision": "ALLOW_WITH_EDITS",
+        "preflight_intercepted": false,
+        "boundary_state": "HOLD",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.05,
+        "actual_unbacked_ratio": 0.05,
+        "hard_findings_count": 1,
+        "soft_findings_count": 0,
+        "is_poisoned": false,
+        "raw_decision": "ALLOW_WITH_EDITS",
+        "guarded_decision": "ALLOW_WITH_EDITS",
+        "preflight_intercepted": true,
+        "boundary_state": "HOLD",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.1,
+        "actual_unbacked_ratio": 0.1,
+        "hard_findings_count": 2,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.15,
+        "actual_unbacked_ratio": 0.15,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.2,
+        "actual_unbacked_ratio": 0.2,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.25,
+        "actual_unbacked_ratio": 0.25,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.28,
+        "actual_unbacked_ratio": 0.3,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.3,
+        "actual_unbacked_ratio": 0.3,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.32,
+        "actual_unbacked_ratio": 0.3,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": false
+      },
+      {
+        "target_density": 0.35,
+        "actual_unbacked_ratio": 0.35,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      },
+      {
+        "target_density": 0.38,
+        "actual_unbacked_ratio": 0.4,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      },
+      {
+        "target_density": 0.4,
+        "actual_unbacked_ratio": 0.4,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      },
+      {
+        "target_density": 0.5,
+        "actual_unbacked_ratio": 0.5,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      },
+      {
+        "target_density": 0.6,
+        "actual_unbacked_ratio": 0.6,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      },
+      {
+        "target_density": 0.75,
+        "actual_unbacked_ratio": 0.75,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      },
+      {
+        "target_density": 0.9,
+        "actual_unbacked_ratio": 0.9,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      },
+      {
+        "target_density": 1.0,
+        "actual_unbacked_ratio": 1.0,
+        "hard_findings_count": 3,
+        "soft_findings_count": 0,
+        "is_poisoned": true,
+        "raw_decision": "BLOCK",
+        "guarded_decision": "BLOCK",
+        "preflight_intercepted": true,
+        "boundary_state": "FAIL_CLOSED",
+        "transition_triggered": true
+      }
+    ],
+    "depth_sweep_points": [
+      {
+        "depth_level": 1,
+        "depth_name": "Level 1: Flat Declarative (Single atomic clause)",
+        "sample_text_preview": "The patient received standard 50mg titration daily [1]. Secondary audits indicat...",
+        "poison_detected": true,
+        "clean_facts_preserved": true,
+        "surgical_edit_viable": true,
+        "boundary_state": "HOLD"
+      },
+      {
+        "depth_level": 2,
+        "depth_name": "Level 2: Coordinated Compound (Conjunction-linked clauses)",
+        "sample_text_preview": "The patient received standard 50mg titration daily [1], but unofficial reports a...",
+        "poison_detected": true,
+        "clean_facts_preserved": true,
+        "surgical_edit_viable": true,
+        "boundary_state": "HOLD"
+      },
+      {
+        "depth_level": 3,
+        "depth_name": "Level 3: Subordinated Complex (Conditional and concessive qualifiers)",
+        "sample_text_preview": "Although Phase III trials demonstrated an 85% response rate [1], subsequent unve...",
+        "poison_detected": true,
+        "clean_facts_preserved": true,
+        "surgical_edit_viable": true,
+        "boundary_state": "FAIL_CLOSED"
+      },
+      {
+        "depth_level": 4,
+        "depth_name": "Level 4: Nested Epistemic Embedding (Attribution hierarchies)",
+        "sample_text_preview": "While clinical researchers noted that retrospective analyses indicated a 68% pro...",
+        "poison_detected": true,
+        "clean_facts_preserved": true,
+        "surgical_edit_viable": true,
+        "boundary_state": "FAIL_CLOSED"
+      },
+      {
+        "depth_level": 5,
+        "depth_name": "Level 5: High-Density Entanglement (10+ verified facts with 1 poison clause)",
+        "sample_text_preview": "Notwithstanding that the primary endpoint satisfied the pre-specified alpha thre...",
+        "poison_detected": true,
+        "clean_facts_preserved": true,
+        "surgical_edit_viable": true,
+        "boundary_state": "FAIL_CLOSED"
+      }
+    ],
+    "vector_summaries": [
+      {
+        "attack_vector": "statistical_fallacy",
+        "mild_state": "HOLD",
+        "moderate_state": "HOLD",
+        "extreme_state": "FAIL_CLOSED",
+        "breaking_state": "FAIL_CLOSED",
+        "empirical_breaking_tier": "extreme",
+        "preflight_intercept_rate": 0.7926,
+        "zero_bypass_verified": true
+      },
+      {
+        "attack_vector": "prompt_injection",
+        "mild_state": "FAIL_CLOSED",
+        "moderate_state": "FAIL_CLOSED",
+        "extreme_state": "FAIL_CLOSED",
+        "breaking_state": "FAIL_CLOSED",
+        "empirical_breaking_tier": "mild",
+        "preflight_intercept_rate": 0.7222,
+        "zero_bypass_verified": true
+      },
+      {
+        "attack_vector": "numeric_temporal_drift",
+        "mild_state": "HOLD",
+        "moderate_state": "HOLD",
+        "extreme_state": "FAIL_CLOSED",
+        "breaking_state": "FAIL_CLOSED",
+        "empirical_breaking_tier": "extreme",
+        "preflight_intercept_rate": 1.0,
+        "zero_bypass_verified": true
+      },
+      {
+        "attack_vector": "syntactic_entanglement",
+        "mild_state": "HOLD",
+        "moderate_state": "HOLD",
+        "extreme_state": "FAIL_CLOSED",
+        "breaking_state": "FAIL_CLOSED",
+        "empirical_breaking_tier": "extreme",
+        "preflight_intercept_rate": 0.7222,
+        "zero_bypass_verified": true
+      },
+      {
+        "attack_vector": "citation_drift",
+        "mild_state": "HOLD",
+        "moderate_state": "HOLD",
+        "extreme_state": "FAIL_CLOSED",
+        "breaking_state": "FAIL_CLOSED",
+        "empirical_breaking_tier": "mild",
+        "preflight_intercept_rate": 1.0,
+        "zero_bypass_verified": true
+      },
+      {
+        "attack_vector": "poisoning_saturation",
+        "mild_state": "HOLD",
+        "moderate_state": "HOLD",
+        "extreme_state": "FAIL_CLOSED",
+        "breaking_state": "FAIL_CLOSED",
+        "empirical_breaking_tier": "extreme",
+        "preflight_intercept_rate": 1.0,
+        "zero_bypass_verified": true
+      }
+    ],
+    "empirical_density_threshold": 0.35,
+    "empirical_hard_findings_threshold": 2,
+    "total_probes_evaluated": 22,
+    "hold_count": 4,
+    "fail_closed_count": 18,
+    "edge_case_count": 0,
+    "invariants_satisfied": true,
+    "invariant_details": {
+      "fail_closed_on_extreme_and_breaking": true,
+      "zero_bypass_on_prompt_injections": true,
+      "zero_bypass_on_numeric_drift": true,
+      "deterministic_density_threshold_adherence": true,
+      "zero_unhandled_edge_cases": true
+    }
+  },
+  "invariants_attestation": {
+    "all_invariants_satisfied": true,
+    "zero_bypass_on_prompt_injections": true,
+    "zero_bypass_on_numeric_drift": true,
+    "fail_closed_on_breaking_tiers": true,
+    "deterministic_density_threshold_adherence": true,
+    "attested_at": "2026-08-15T14:14:56.409965+00:00"
+  }
+}

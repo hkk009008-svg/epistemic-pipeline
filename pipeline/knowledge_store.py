@@ -7,6 +7,7 @@ called; models never receive filesystem access or choose their own corpus.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -55,6 +56,14 @@ _UPDATE_REVISION_REASONS = frozenset({
     "metadata_update",
     "correction",
     "restore",
+})
+_LINK_FALLBACK_ERRNOS = frozenset({
+    errno.EXDEV,
+    errno.EPERM,
+    errno.ENOSYS,
+    getattr(errno, "ENOTSUP", errno.EPERM),
+    getattr(errno, "EOPNOTSUPP", errno.EPERM),
+    getattr(errno, "EMLINK", errno.EPERM),
 })
 _FORBIDDEN_RECEIPT_KEYS = frozenset({
     "api_key",
@@ -770,6 +779,14 @@ class KnowledgeStore:
                     os.link(temporary_path, version_path)
                 except FileExistsError:
                     pass
+                except OSError as exc:
+                    if exc.errno in _LINK_FALLBACK_ERRNOS:
+                        try:
+                            os.replace(temporary_path, version_path)
+                        except FileExistsError:
+                            pass
+                    else:
+                        raise
             finally:
                 if temporary_path is not None:
                     temporary_path.unlink(missing_ok=True)
