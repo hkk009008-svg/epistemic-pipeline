@@ -7,34 +7,22 @@ Empirically tests and challenges:
 4. Control 3 & 4: Clause isolation, negative constraint extraction robustness, monotonicity, deduplication.
 """
 import time
-import pytest
-from typing import List, Dict, Any
 
-from pipeline.models import ClaimEntry, EditEntry, SearchSource, GPT2ResponseSchema, GPT3ResponseSchema
+from pipeline.models import ClaimEntry, EditEntry, SearchSource
 from pipeline.arbiter import (
     check_poisoning_threshold,
     guard_arbiter_decision,
     extract_negative_constraints,
     format_negative_constraints_block,
-    apply_edits,
     apply_edits_by_id,
 )
 from pipeline.source_match import (
-    _extract_numbers,
-    _extract_keywords,
-    _get_citation_segments,
-    verify_citation_grounding,
     run_preflight_scan,
     build_source_keyword_sets,
     build_source_number_sets,
-    recategorize_with_sources,
-    filter_findings_with_sources,
 )
 from pipeline.sanitizer import (
     _clean_grammar_and_punctuation,
-    sanitize_output,
-    _replace_bare_percents,
-    _replace_outcome_promises,
 )
 
 
@@ -405,7 +393,7 @@ class TestLatencyBenchmarkPreFlightScanner:
         p95_ms = durations[950]
         p99_ms = durations[990]
 
-        print(f"\n[Pre-Flight Scanner 1000-Iteration Benchmark]")
+        print("\n[Pre-Flight Scanner 1000-Iteration Benchmark]")
         print(f"  Mean:   {mean_ms:.4f} ms")
         print(f"  P50:    {p50_ms:.4f} ms")
         print(f"  P95:    {p95_ms:.4f} ms")
@@ -560,7 +548,6 @@ class TestAdversarialControl3And4SchemasAndRepair:
 
     def test_e2e_two_turn_fail_closed_fallback_simulation(self):
         """Simulate a pathological scenario where GPT-1 fails Turn 1 and Turn 2, triggering Unknown fallback."""
-        from pipeline.stages import stage_rewrite_loop
         from pipeline.metrics import PipelineMetrics
 
         # Construct a pipeline state with persistent hard violation

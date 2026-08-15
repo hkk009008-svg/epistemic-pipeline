@@ -825,7 +825,7 @@ class TestStageRewriteLoopClosedLoop:
     @pytest.mark.asyncio
     async def test_stage_rewrite_loop_fail_closed_fallback_after_two_turns(self, monkeypatch):
         from pipeline.metrics import PipelineMetrics
-        from pipeline.models import ClaimEntry, SearchSource
+        from pipeline.models import ClaimEntry
         from pipeline.orchestrator import _noop_emit
         from pipeline.stages import stage_rewrite_loop
 

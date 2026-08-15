@@ -23,41 +23,29 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
 import pytest
 
 from pipeline.models import (
     ClaimEntry,
     EditEntry,
     SearchSource,
-    ConfidenceBreakdown,
     PipelineResponse,
     GPT2ResponseSchema,
     FindingSchema,
 )
 from pipeline.arbiter import (
-    apply_edits,
     apply_edits_by_id,
-    check_poisoning_threshold,
     extract_negative_constraints,
     format_negative_constraints_block,
-    guard_arbiter_decision,
-    parse_gpt3,
 )
 from pipeline.sanitizer import (
     _clean_grammar_and_punctuation,
-    _replace_bare_percents,
-    _replace_outcome_promises,
-    route_prompt,
     sanitize_output,
 )
 from pipeline.source_match import (
     build_source_keyword_sets,
     build_source_number_sets,
-    run_preflight_scan,
-    verify_citation_grounding,
 )
 from pipeline.convergence import (
     compute_finding_delta,
@@ -67,7 +55,6 @@ from pipeline.prompts import (
     DEFAULT_GPT1_SYSTEM,
     DEFAULT_GPT2_SYSTEM,
     DEFAULT_GPT3_SYSTEM,
-    build_augmentation,
 )
 from pipeline.stages import (
     stage_rewrite_loop,

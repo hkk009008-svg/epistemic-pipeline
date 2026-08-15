@@ -14,8 +14,6 @@ Test Tiers:
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -27,10 +25,8 @@ from pipeline.models import (
     SearchSource,
     ConfidenceBreakdown,
     PipelineResponse,
-    FindingSchema,
 )
 from pipeline.arbiter import (
-    parse_gpt3,
     apply_edits,
     apply_edits_by_id,
 )
@@ -43,12 +39,9 @@ from pipeline.source_match import (
     verify_citation_grounding,
     build_source_keyword_sets,
     build_source_number_sets,
-    _extract_numbers,
 )
 from pipeline.prompts import (
     DEFAULT_GPT1_SYSTEM,
-    DEFAULT_GPT2_SYSTEM,
-    DEFAULT_GPT3_SYSTEM,
     build_augmentation,
 )
 from pipeline.convergence import (

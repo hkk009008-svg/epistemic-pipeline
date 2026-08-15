@@ -23,7 +23,7 @@ from pipeline.arbiter import (
     parse_gpt3,
     parse_gpt3_structured,
 )
-from pipeline.convergence import should_continue_rewrite
+from pipeline.best_of_n import generate_best_of_n_async
 from pipeline.decomposer import decompose_claims
 from pipeline.helpers import (
     PipelineError,
@@ -62,7 +62,6 @@ from pipeline.prompts import (
     DEFAULT_GPT1_SYSTEM,
     DEFAULT_GPT2_SYSTEM,
     DEFAULT_GPT3_SYSTEM,
-    GPT2_TRIPWIRE_REFERENCE,
     PROMPT_VERSION,
     build_augmentation,
 )
@@ -1044,7 +1043,7 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
     max_loops = min(state.get("max_rewrite_loops", 2), 2)
 
     # 1. Initialize and monotonically accumulate negative constraints ledger
-    cumulative_constraints: List[str] = list(state.get("negative_constraints", []))
+    cumulative_constraints: list[str] = list(state.get("negative_constraints", []))
     initial_constraints = extract_negative_constraints(
         findings=findings,
         arbiter_edits=arbiter_edits,
