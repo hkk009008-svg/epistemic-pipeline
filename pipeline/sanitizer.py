@@ -77,10 +77,20 @@ def route_prompt(prompt: str) -> dict:
 
 # ---- Output Sanitizer patterns ----
 
-# G1/G2: Banned evidence phrases — vague evidence language without citation
+# G1/G2: Banned evidence phrases — vague evidence language and unbacked authority claims without citation
 _BANNED_EVIDENCE_RE = re.compile(
-    r"(?i)\b(?:studies suggest|research shows|data indicates"
-    r"|research indicates|studies show|evidence suggests)\b"
+    r"(?i)\b(?:"
+    r"(?:(?:clinical|scientific|empirical|experimental|medical)\s+evidence|evidence)"
+    r"|(?:(?:medical|scientific|expert|market)\s+consensus|consensus)"
+    r"|(?:published\s+(?:papers|literature|studies|data|reports))"
+    r"|(?:(?:scientific|clinical)\s+(?:studies|trials))"
+    r"|(?:studies|study|research|researchers|data|literature)"
+    r"|(?:experts|scientists|clinicians|doctors|specialists)"
+    r")"
+    r"(?:\s+(?:clearly|strongly|consistently|definitely|unequivocally|directly|robustly))?"
+    r"\s+(?:demonstrates?|demonstrated|shows?|showed|shown|indicates?|indicated"
+    r"|suggests?|suggested|confirms?|confirmed|proves?|proved|proven"
+    r"|establish(?:es)?|established|reveals?|revealed|supports?|supported)\b"
     r"(?!\s*\([^)]+\))"    # not followed by a parenthetical citation
     r"(?!\s*\[[^\]]+\])"   # not followed by a bracket citation
 )
@@ -92,10 +102,10 @@ _TYPICALITY_RE = re.compile(
     r"(?!\s*\[[^\]]+\])"   # not followed by a bracket citation
 )
 
-# Bare percent/statistic without citation — fixed: % is non-word, use lookahead
+# Bare percent/statistic without citation
 _BARE_PERCENT_RE = re.compile(
     r"(?i)\b(?:about|roughly|approximately|around|nearly|close to|an estimated|estimated)?\s*"
-    r"\d+(?:\.\d+)?\s*(?:%(?=\s|$|[,;.\)])|percent\b)"
+    r"\d+(?:\.\d+)?\s*(?:%|percent\b)"
 )
 
 # Citation detection for nearby-citation checks
@@ -115,22 +125,46 @@ def _has_nearby_citation(text: str, match_start: int, match_end: int,
     """Check if there's a citation within `window` chars of the match."""
     search_start = max(0, match_start - 20)  # Citations sometimes precede the stat
     search_end = min(len(text), match_end + window)
-    context = _SANITIZER_MARKER_RE.sub(" ", text[search_start:search_end])
+    # Mask out the stat match itself so self-parentheses (e.g. '(around 25%)') don't count as citations
+    masked_text = text[:match_start] + " " * (match_end - match_start) + text[match_end:]
+    context = _SANITIZER_MARKER_RE.sub(" ", masked_text[search_start:search_end])
+    context = re.sub(r"\(\s*\)|\[\s*\]", " ", context)
     return bool(_CITATION_RE.search(context))
 
 
 def _replace_bare_percents(text: str) -> str:
-    """Replace bare percentages that lack nearby citations."""
+    """Replace bare percentages that lack nearby citations with clean boundary padding."""
     matches = list(_BARE_PERCENT_RE.finditer(text))
     if not matches:
         return text
     # Work backwards to preserve indices
     result = text
+    replacement_body = "Unknown(Actionable): No authoritative dataset available for this figure"
     for match in reversed(matches):
         if not _has_nearby_citation(text, match.start(), match.end()):
-            result = (result[:match.start()] +
-                      "Unknown(Actionable): No authoritative dataset available for this figure" +
-                      result[match.end():])
+            start = match.start()
+            end = match.end()
+
+            # Ensure proper spacing before replacement when preceded by non-whitespace
+            need_space_before = (
+                start > 0
+                and not text[start - 1].isspace()
+                and text[start - 1] not in "([{\"'`"
+            )
+
+            # Ensure proper spacing after replacement when followed by non-whitespace
+            need_space_after = (
+                end < len(text)
+                and not text[end].isspace()
+                and text[end] not in ".,;:!?)]}\"'`"
+            )
+
+            replacement = (
+                (" " if need_space_before else "")
+                + replacement_body
+                + (" " if need_space_after else "")
+            )
+            result = result[:start] + replacement + result[end:]
     return result
 
 # Outcome-promise replacement mapping for natural sentence flow (G4)
@@ -186,6 +220,10 @@ _DANGLING_CONNECTOR_RE = re.compile(
     r"\b(?:with|in|to|for|on|by|at|from|about|of|and|or|nor|but|whereas|while|yet)\s*([,;.:!?])",
     re.IGNORECASE,
 )
+_TRAILING_COORD_RE = re.compile(
+    r"\b(?:and|or|nor|but|whereas|while|yet)\s*[,;:]+\s*(?=[.!?]|\s*$)",
+    re.IGNORECASE,
+)
 _LEADING_PUNCT_RE = re.compile(r"(?m)^[ \t]*[,;:.]+\s*")
 _LEADING_COORDINATOR_RE = re.compile(
     r"(?m)^[ \t]*(?:and|but|or|nor|whereas|while|yet)[,\s;:]+",
@@ -232,6 +270,14 @@ def clean_grammar_and_punctuation(text: str) -> str:
         text = _MULTI_DOT_RE.sub(".", text)
         text = _MULTI_COMMA_RE.sub(",", text)
         text = _MULTI_SEMICOLON_RE.sub(";", text)
+
+    # Clean trailing dangling coordinators
+    if _TRAILING_COORD_RE.search(text):
+        text = _TRAILING_COORD_RE.sub(".", text)
+        if _SPACE_BEFORE_PUNCT_RE.search(text):
+            text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+        if _MULTI_DOT_RE.search(text):
+            text = _MULTI_DOT_RE.sub(".", text)
 
     # Remove dangling prepositions and trailing coordinators before sentence/clause terminators
     if _DANGLING_CONNECTOR_RE.search(text):

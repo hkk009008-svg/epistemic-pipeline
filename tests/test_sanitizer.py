@@ -739,3 +739,160 @@ class TestCleanGrammarAndPunctuation:
         assert not cleaned.startswith(".")
         assert "The report indicates progress." in cleaned
         assert "The secondary filing was approved." in cleaned
+
+
+# ===================================================================
+# R6: Whitespace Boundary Padding & Token Gluing Prevention
+# ===================================================================
+
+
+class TestSanitizerWhitespaceBoundaryPadding:
+    """R6: Boundary padding around bare percentage replacements preventing token gluing."""
+
+    def test_bare_percent_with_word_before_without_space(self, flags_all_false: dict):
+        """Preceding word character without space does not glue into Unknown(Actionable)."""
+        text = "The telemetry shows 85% without citation."
+        result = sanitize_output(text, flags_all_false)
+        assert "showsUnknown" not in result
+        assert "shows Unknown(Actionable)" in result
+
+    def test_bare_percent_with_word_after_without_space(self, flags_all_false: dict):
+        """Succeeding word character without space does not glue into Unknown(Actionable)."""
+        text = "We observed 30%improvement in latency."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable)improvement" not in result
+        assert "figure improvement" in result or "improvement" in result
+
+    def test_bare_percent_with_attached_comma(self, flags_all_false: dict):
+        """Bare percent followed immediately by comma does not produce double commas or corrupt spacing."""
+        text = "The survey showed 45%, but later dropped."
+        result = sanitize_output(text, flags_all_false)
+        assert ",," not in result
+        assert "Unknown(Actionable): No authoritative dataset available for this figure," in result
+
+    def test_bare_percent_with_attached_period(self, flags_all_false: dict):
+        """Bare percent at end of sentence preserves trailing period without space before period."""
+        text = "The overall retention was 85%."
+        result = sanitize_output(text, flags_all_false)
+        assert "85%" not in result
+        assert "figure." in result
+        assert "figure ." not in result
+
+    def test_bare_percent_inside_parentheses(self, flags_all_false: dict):
+        """Bare percent enclosed in parentheses is stripped and formatted cleanly."""
+        text = "A minor subgroup (around 25%) responded favorably."
+        result = sanitize_output(text, flags_all_false)
+        assert "25%" not in result
+        assert "(Unknown(Actionable): No authoritative dataset available for this figure)" in result
+
+    def test_bare_percent_at_sentence_start(self, flags_all_false: dict):
+        """Bare percent at start of sentence does not have awkward leading space."""
+        text = "50% of the cohort passed the exam."
+        result = sanitize_output(text, flags_all_false)
+        assert result.startswith("Unknown(Actionable)")
+        assert "50%" not in result
+
+    def test_multiple_consecutive_bare_percents_padded(self, flags_all_false: dict):
+        """Multiple bare percents in a single sentence maintain proper boundaries."""
+        text = "Trial A was 40% while Trial B was 60%."
+        result = sanitize_output(text, flags_all_false)
+        assert "40%" not in result
+        assert "60%" not in result
+        assert result.count("Unknown(Actionable)") == 2
+
+    @pytest.mark.parametrize(
+        "qualifier",
+        [
+            "about",
+            "roughly",
+            "approximately",
+            "around",
+            "nearly",
+            "close to",
+            "an estimated",
+            "estimated",
+        ],
+    )
+    def test_qualified_bare_percents_padded(self, qualifier: str, flags_all_false: dict):
+        """Bare percent with approximate qualifier replaced with clean boundaries."""
+        text = f"The result is {qualifier} 75% for this metric."
+        result = sanitize_output(text, flags_all_false)
+        assert "75%" not in result
+        assert "Unknown(Actionable)" in result
+
+
+# ===================================================================
+# R6: Expanded Authority Vocabulary Filtering
+# ===================================================================
+
+
+class TestSanitizerExpandedAuthorityVocabulary:
+    """R6: Extended authority vocabulary suppression for ungrounded/uncited assertions."""
+
+    @pytest.mark.parametrize(
+        "authority_phrase",
+        [
+            "clinical evidence demonstrates",
+            "medical consensus shows",
+            "published papers confirm",
+            "scientific studies prove",
+            "market consensus confirms",
+            "scientific evidence demonstrates",
+            "empirical evidence shows",
+            "clinical trials demonstrate",
+            "published literature suggests",
+            "published data indicates",
+            "published reports confirm",
+            "experts confirm",
+            "scientists confirm",
+            "clinicians demonstrate",
+            "medical evidence establishes",
+            "medical consensus clearly shows",
+            "clinical evidence strongly demonstrates",
+            "published papers consistently confirm",
+        ],
+    )
+    def test_authority_phrase_stripped_when_uncited(
+        self, authority_phrase: str, flags_all_false: dict
+    ):
+        """Uncited authority phrase is replaced with unverified generalization marker."""
+        text = f"{authority_phrase.capitalize()} that the intervention is beneficial."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert authority_phrase.lower() not in result.lower()
+        assert "[Unverified generalization removed]" in result or "beneficial" in result
+
+    def test_authority_phrase_preserved_with_parenthetical_citation(
+        self, flags_all_false: dict
+    ):
+        """Authority phrase immediately followed by parenthetical citation is preserved."""
+        text = "Clinical evidence demonstrates (Smith et al. 2024) that the compound is effective."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert "clinical evidence demonstrates" in result.lower()
+        assert "Smith et al. 2024" in result
+
+    def test_authority_phrase_preserved_with_bracket_citation(
+        self, flags_all_false: dict
+    ):
+        """Authority phrase immediately followed by bracket citation is preserved."""
+        text = "Medical consensus shows [1] clear benefits for early intervention."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert "medical consensus shows" in result.lower()
+        assert "[1]" in result
+
+    def test_authority_phrase_tier_gating(self, flags_all_false: dict):
+        """Strict and standard tiers strip authority phrases; light tier preserves them."""
+        text = "Published papers confirm the hypothesis."
+        res_strict = sanitize_output(text, flags_all_false, tier="strict")
+        res_standard = sanitize_output(text, flags_all_false, tier="standard")
+        res_light = sanitize_output(text, flags_all_false, tier="light")
+
+        assert "published papers confirm" not in res_strict.lower()
+        assert "published papers confirm" not in res_standard.lower()
+        assert "published papers confirm" in res_light.lower()
+
+    def test_benign_noun_phrase_not_stripped(self, flags_all_false: dict):
+        """Benign noun phrases containing words like consensus or research without assertion verbs are untouched."""
+        text = "The international consensus conference was scheduled for next October."
+        result = sanitize_output(text, flags_all_false, tier="strict")
+        assert "consensus conference" in result
+
