@@ -5,9 +5,13 @@ All functions under test are fully deterministic (no LLM calls).
 from __future__ import annotations
 
 import json
+import pytest
 
-from pipeline.arbiter import parse_gpt3, apply_edits
-from pipeline.models import EditEntry
+from pipeline.arbiter import (
+    parse_gpt3, apply_edits, apply_edits_by_id,
+    check_poisoning_threshold, guard_arbiter_decision,
+)
+from pipeline.models import EditEntry, ClaimEntry
 
 
 # ===================================================================
@@ -391,3 +395,280 @@ class TestApplyEditsOutputStructure:
         original = "Line 1.\nLine 2.\nLine 3."
         result = apply_edits(original, [])
         assert "Line 1.\nLine 2.\nLine 3." in result
+
+
+# ===================================================================
+# apply_edits_by_id() -- deterministic claim edits
+# ===================================================================
+
+
+class TestApplyEditsById:
+    """Verify deterministic ID-based edits on atomic claim dictionaries."""
+
+    def test_delete_by_id(self):
+        claims = [
+            {"claim_id": "c1", "text": "Claim 1"},
+            {"claim_id": "c2", "text": "Claim 2 to delete"},
+            {"claim_id": "c3", "text": "Claim 3"},
+        ]
+        edits = [EditEntry(action="DELETE", target="", replacement="", target_id="c2")]
+        modified, summary = apply_edits_by_id(claims, edits)
+        assert len(modified) == 2
+        assert [c["claim_id"] for c in modified] == ["c1", "c3"]
+        assert "DELETED claim c2" in summary
+
+    def test_delete_claim_with_claim_key_instead_of_text(self):
+        claims = [
+            {"claim_id": "c1", "claim": "Claim with claim key"},
+        ]
+        edits = [EditEntry(action="DELETE", target="", replacement="", target_id="c1")]
+        modified, summary = apply_edits_by_id(claims, edits)
+        assert len(modified) == 0
+        assert "DELETED claim c1" in summary
+
+    def test_rewrite_by_id(self):
+        claims = [
+            {"claim_id": "c1", "text": "Original text"},
+        ]
+        edits = [EditEntry(action="REWRITE", target="", replacement="Rewritten text", target_id="c1")]
+        modified, summary = apply_edits_by_id(claims, edits)
+        assert modified[0]["text"] == "Rewritten text"
+        assert "REWROTE claim c1" in summary
+
+    def test_move_to_unknown_by_id(self):
+        claims = [
+            {"claim_id": "c1", "text": "Speculative claim"},
+        ]
+        edits = [EditEntry(action="MOVE_TO_UNKNOWN", target="", replacement="", target_id="c1")]
+        modified, summary = apply_edits_by_id(claims, edits)
+        assert modified[0]["is_unknown"] is True
+        assert "Unknown(Actionable)" in modified[0]["text"]
+        assert "MOVED claim c1" in summary
+
+
+# ===================================================================
+# check_poisoning_threshold() -- Unit Tests
+# ===================================================================
+
+
+class TestCheckPoisoningThreshold:
+    """Unit tests for check_poisoning_threshold calculations and boundaries."""
+
+    def test_exact_boundary_35_percent_not_poisoned(self):
+        """Exactly 35.0% unsupported claims (<= 0.35) and 0 hard findings -> is_poisoned = False."""
+        # 7 unsupported out of 20 = 35.0%
+        claims = [
+            ClaimEntry(claim=f"Supported claim {i}", category="Supported", justification="Source")
+            for i in range(13)
+        ] + [
+            ClaimEntry(claim=f"Unsupported claim {i}", category="Unsupported", justification="None")
+            for i in range(7)
+        ]
+        res = check_poisoning_threshold(claims, [], unsupported_threshold=0.35, hard_threshold=2)
+        assert res["total_claims"] == 20
+        assert res["unsupported_count"] == 7
+        assert res["unsupported_ratio"] == pytest.approx(0.35)
+        assert res["hard_count"] == 0
+        assert res["is_poisoned"] is False
+
+    def test_exact_boundary_35_1_percent_is_poisoned(self):
+        """35.1% unsupported claims (> 0.35) -> is_poisoned = True."""
+        # 351 unsupported out of 1000 = 35.1%
+        claims = [
+            {"claim": f"Good {i}", "category": "supported"} for i in range(649)
+        ] + [
+            {"claim": f"Bad {i}", "category": "unsupported"} for i in range(351)
+        ]
+        res = check_poisoning_threshold(claims, [], unsupported_threshold=0.35, hard_threshold=2)
+        assert res["total_claims"] == 1000
+        assert res["unsupported_count"] == 351
+        assert res["unsupported_ratio"] == pytest.approx(0.351)
+        assert res["is_poisoned"] is True
+
+    def test_hard_violation_boundary_1_vs_2(self):
+        """1 hard violation is not poisoned; 2 hard violations is poisoned."""
+        claims = [
+            ClaimEntry(claim="Claim 1", category="Supported", justification="Source"),
+            ClaimEntry(claim="Claim 2", category="Supported", justification="Source"),
+        ]
+        findings_1 = [{"type": "T1", "severity": "hard", "detail": "Single hard violation"}]
+        findings_2 = [
+            {"type": "T1", "severity": "hard", "detail": "First hard violation"},
+            {"type": "T1", "severity": "hard", "detail": "Second hard violation"},
+        ]
+
+        res_1 = check_poisoning_threshold(claims, findings_1, hard_threshold=2)
+        assert res_1["hard_count"] == 1
+        assert res_1["is_poisoned"] is False
+
+        res_2 = check_poisoning_threshold(claims, findings_2, hard_threshold=2)
+        assert res_2["hard_count"] == 2
+        assert res_2["is_poisoned"] is True
+
+    def test_zero_claims_empty_claim_table(self):
+        """Empty claim table: 0 hard findings is not poisoned, 2 hard findings is poisoned."""
+        res_empty = check_poisoning_threshold([], [])
+        assert res_empty["total_claims"] == 0
+        assert res_empty["unsupported_count"] == 0
+        assert res_empty["unsupported_ratio"] == 0.0
+        assert res_empty["hard_count"] == 0
+        assert res_empty["is_poisoned"] is False
+
+        res_with_hard = check_poisoning_threshold(
+            [],
+            [
+                {"type": "T1", "severity": "hard", "detail": "Out of bounds citation"},
+                {"type": "T1", "severity": "hard", "detail": "Fabricated statistic"},
+            ],
+        )
+        assert res_with_hard["total_claims"] == 0
+        assert res_with_hard["hard_count"] == 2
+        assert res_with_hard["is_poisoned"] is True
+
+    def test_all_supported_claims(self):
+        """100% supported claims -> ratio 0.0, is_poisoned False."""
+        claims = [
+            ClaimEntry(claim="Clean claim 1", category="Observed", justification="Ref 1"),
+            ClaimEntry(claim="Clean claim 2", category="Supported", justification="Ref 2"),
+        ]
+        res = check_poisoning_threshold(claims, [])
+        assert res["total_claims"] == 2
+        assert res["unsupported_count"] == 0
+        assert res["unsupported_ratio"] == 0.0
+        assert res["is_poisoned"] is False
+
+    def test_all_unsupported_claims(self):
+        """100% unsupported claims -> ratio 1.0, is_poisoned True."""
+        claims = [
+            {"claim": "Bad claim 1", "category": "unsupported"},
+            {"claim": "Bad claim 2", "category": "unsupported_inferential"},
+        ]
+        res = check_poisoning_threshold(claims, [])
+        assert res["total_claims"] == 2
+        assert res["unsupported_count"] == 2
+        assert res["unsupported_ratio"] == 1.0
+        assert res["is_poisoned"] is True
+
+    def test_unsupported_inferential_and_contradicted_categories(self):
+        """Includes unsupported, unsupported_inferential, contradicted, refuted, fabricated."""
+        claims = [
+            {"claim": "c1", "category": "unsupported_inferential"},
+            {"claim": "c2", "category": "contradicted"},
+            {"claim": "c3", "category": "refuted"},
+            {"claim": "c4", "category": "fabricated"},
+            {"claim": "c5", "category": "supported"},
+        ]
+        res = check_poisoning_threshold(claims, [])
+        assert res["unsupported_count"] == 4
+        assert res["unsupported_ratio"] == pytest.approx(0.8)
+        assert res["is_poisoned"] is True
+
+    def test_soft_findings_do_not_increase_hard_count(self):
+        """Soft findings do not count toward hard_count threshold."""
+        claims = [{"claim": "Clean", "category": "supported"}]
+        soft_findings = [
+            {"type": "T4", "severity": "soft", "detail": f"Soft issue {i}"}
+            for i in range(10)
+        ]
+        res = check_poisoning_threshold(claims, soft_findings, hard_threshold=2)
+        assert res["hard_count"] == 0
+        assert res["is_poisoned"] is False
+
+
+# ===================================================================
+# guard_arbiter_decision() -- Unit Tests
+# ===================================================================
+
+
+class TestGuardArbiterDecision:
+    """Unit tests for guard_arbiter_decision transitions and rationale notes."""
+
+    def test_heavily_poisoned_overrides_allow_with_edits_to_block(self):
+        """ALLOW_WITH_EDITS is overridden to BLOCK when unsupported ratio > 35%."""
+        claims = [
+            {"claim": "Good", "category": "supported"},
+            {"claim": "Bad 1", "category": "unsupported"},
+            {"claim": "Bad 2", "category": "unsupported"},
+        ]  # 2/3 = 66.7%
+        decision, notes = guard_arbiter_decision("ALLOW_WITH_EDITS", claims, [])
+        assert decision == "BLOCK"
+        assert len(notes) >= 1
+        assert "overridden" in notes[0].lower()
+        assert "heavily poisoned" in notes[0].lower()
+
+    def test_heavily_poisoned_overrides_allow_as_unknown_to_block(self):
+        """ALLOW_AS_UNKNOWN_ONLY is overridden to BLOCK when >= 2 hard violations."""
+        findings = [
+            {"type": "T1", "severity": "hard", "detail": "Fabricated citation"},
+            {"type": "T1", "severity": "hard", "detail": "Fabricated number"},
+        ]
+        decision, notes = guard_arbiter_decision("ALLOW_AS_UNKNOWN_ONLY", [], findings)
+        assert decision == "BLOCK"
+        assert any("overridden" in n.lower() for n in notes)
+
+    def test_heavily_poisoned_confirms_block(self):
+        """BLOCK decision is confirmed when heavily poisoned."""
+        claims = [{"claim": "Bad", "category": "unsupported"}]
+        decision, notes = guard_arbiter_decision("BLOCK", claims, [])
+        assert decision == "BLOCK"
+        assert any("confirmed" in n.lower() for n in notes)
+
+    def test_lightly_poisoned_overrides_block_to_allow_with_edits_when_truthful(self):
+        """BLOCK is overridden to ALLOW_WITH_EDITS when lightly poisoned with truthful claims."""
+        claims = [
+            ClaimEntry(claim="Supported fact 1", category="Supported", justification="Source 1"),
+            ClaimEntry(claim="Supported fact 2", category="Observed", justification="Source 2"),
+            ClaimEntry(claim="Inferred fact", category="Inference", justification="Source 3"),
+            ClaimEntry(claim="Bad claim", category="Unsupported", justification="None"),
+        ]  # 1/4 = 25% unsupported (<= 35%)
+        findings = [{"type": "T1", "severity": "hard", "detail": "Single hard violation"}]  # 1 hard (< 2)
+
+        decision, notes = guard_arbiter_decision("BLOCK", claims, findings)
+        assert decision == "ALLOW_WITH_EDITS"
+        assert any("overridden from block to allow_with_edits" in n.lower() for n in notes)
+
+    def test_lightly_poisoned_keeps_block_when_no_truthful_claims(self):
+        """BLOCK is preserved if there are no salvageable truthful claims in claim table."""
+        claims = [
+            ClaimEntry(claim="Hypothesis 1", category="Hypothesis", justification="Speculation"),
+            ClaimEntry(claim="Unknown 1", category="Unknown", justification="Unknown"),
+        ]  # 0% unsupported, 0 hard, but 0 truthful (no supported, observed, inference, user-provided)
+        decision, notes = guard_arbiter_decision("BLOCK", claims, [])
+        assert decision == "BLOCK"
+        assert any("no salvageable" in n.lower() for n in notes)
+
+    def test_allow_as_unknown_preserved_when_zero_hard_violations(self):
+        """ALLOW_AS_UNKNOWN_ONLY is preserved when 0 hard violations exist and ratio <= 35%."""
+        claims = [
+            ClaimEntry(claim="Speculative point", category="Hypothesis", justification="Unknown context"),
+        ]
+        decision, notes = guard_arbiter_decision("ALLOW_AS_UNKNOWN_ONLY", claims, [])
+        assert decision == "ALLOW_AS_UNKNOWN_ONLY"
+        assert any("preserved" in n.lower() for n in notes)
+
+    def test_allow_as_unknown_with_one_hard_violation_and_truthful_content(self):
+        """ALLOW_AS_UNKNOWN_ONLY with 1 hard violation and truthful content transitions to ALLOW_WITH_EDITS."""
+        claims = [
+            ClaimEntry(claim="Supported point", category="Supported", justification="Source"),
+        ]
+        findings = [{"type": "T1", "severity": "hard", "detail": "Hard violation in non-essential part"}]
+        decision, notes = guard_arbiter_decision("ALLOW_AS_UNKNOWN_ONLY", claims, findings)
+        assert decision == "ALLOW_WITH_EDITS"
+        assert any("allow_with_edits" in n.lower() for n in notes)
+
+    def test_allow_with_edits_confirmed_when_lightly_poisoned(self):
+        """ALLOW_WITH_EDITS is confirmed when draft is lightly poisoned."""
+        claims = [
+            ClaimEntry(claim="Clean fact", category="Observed", justification="Ref"),
+        ]
+        decision, notes = guard_arbiter_decision("ALLOW_WITH_EDITS", claims, [])
+        assert decision == "ALLOW_WITH_EDITS"
+        assert any("confirmed" in n.lower() for n in notes)
+
+    def test_empty_decision_defaults_to_block_safely(self):
+        """Empty string decision defaults safely."""
+        claims = [{"claim": "Clean", "category": "supported"}]
+        decision, notes = guard_arbiter_decision("", claims, [])
+        # Default was BLOCK, converted to ALLOW_WITH_EDITS because of truthful claim
+        assert decision == "ALLOW_WITH_EDITS"
+

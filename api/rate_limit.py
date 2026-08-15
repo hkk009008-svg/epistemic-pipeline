@@ -53,9 +53,12 @@ def _extract_client_ip(request: Request) -> str:
     """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        parts = [p.strip() for p in forwarded.split(",")]
-        # Pick the entry at position -(depth), clamped to the first entry
-        idx = max(0, len(parts) - _TRUSTED_PROXY_DEPTH)
+        parts = [p.strip() for p in forwarded.split(",") if p.strip()]
+        if not parts:
+            return request.client.host if request.client else "unknown"
+        # Pick the entry at position -(depth), clamped safely to valid indices
+        depth = max(1, _TRUSTED_PROXY_DEPTH)
+        idx = max(0, min(len(parts) - 1, len(parts) - depth))
         return parts[idx]
     return request.client.host if request.client else "unknown"
 

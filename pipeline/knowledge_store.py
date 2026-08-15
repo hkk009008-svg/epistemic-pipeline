@@ -42,11 +42,12 @@ _QUERY_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _STOP_WORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "been", "by", "can",
     "did", "do", "does", "for", "from", "had", "has", "have", "how", "i",
-    "in", "into", "is", "it", "its", "may", "of", "on", "or", "our",
+    "in", "into", "is", "it", "its", "may", "of", "on", "or", "our", "s",
     "should", "that", "the", "their", "them", "they", "this", "to", "was",
     "were", "what", "when", "where", "which", "who", "why", "will", "with",
     "would", "you", "your",
 })
+_TABLE_CELL_DELIMITER_RE = re.compile(r"^\s*:?-{1,}:?\s*$")
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_INIT_RETRIES = 20
 _UPDATE_REVISION_REASONS = frozenset({
@@ -299,6 +300,81 @@ def normalize_folder(folder: str) -> str:
     return "/".join(parts)
 
 
+def _is_table_delimiter_row(line: str) -> bool:
+    """Return True if line is a valid Markdown table delimiter row."""
+    stripped = line.strip()
+    if not stripped or "|" not in stripped:
+        return False
+    content = stripped.removeprefix("|").removesuffix("|")
+    cells = content.split("|")
+    if not cells:
+        return False
+    return all(_TABLE_CELL_DELIMITER_RE.match(cell) is not None for cell in cells)
+
+
+@dataclass(frozen=True)
+class _MarkdownTable:
+    start_char: int
+    end_char: int
+    header_start_char: int
+    header_end_char: int
+    header_text: str
+    first_data_row_start: int
+
+
+def _find_markdown_tables(content: str) -> list[_MarkdownTable]:
+    """Identify valid multi-row Markdown tables and their header blocks."""
+    if "|" not in content:
+        return []
+    lines = content.splitlines(keepends=True)
+    if len(lines) < 3:
+        return []
+
+    line_starts: list[int] = []
+    current_pos = 0
+    for line in lines:
+        line_starts.append(current_pos)
+        current_pos += len(line)
+
+    tables: list[_MarkdownTable] = []
+    i = 0
+    while i < len(lines) - 1:
+        line = lines[i]
+        next_line = lines[i + 1]
+        if (
+            "|" in line
+            and line.strip()
+            and not _is_table_delimiter_row(line)
+            and _is_table_delimiter_row(next_line)
+        ):
+            header_start = line_starts[i]
+            header_end = line_starts[i + 1] + len(next_line)
+            header_text = line.rstrip("\r\n") + "\n" + next_line.rstrip("\r\n")
+            first_data_start = header_end
+
+            j = i + 2
+            while j < len(lines) and "|" in lines[j] and lines[j].strip():
+                j += 1
+
+            if j > i + 2:
+                table_end = line_starts[j - 1] + len(lines[j - 1])
+                tables.append(
+                    _MarkdownTable(
+                        start_char=header_start,
+                        end_char=table_end,
+                        header_start_char=header_start,
+                        header_end_char=header_end,
+                        header_text=header_text,
+                        first_data_row_start=first_data_start,
+                    )
+                )
+                i = j
+                continue
+        i += 1
+
+    return tables
+
+
 def chunk_text(content: str, max_words: int = 180, overlap_words: int = 30) -> list[dict]:
     """Split text into deterministic, overlapping exact-source spans."""
     if max_words < 1 or overlap_words < 0 or overlap_words >= max_words:
@@ -307,20 +383,32 @@ def chunk_text(content: str, max_words: int = 180, overlap_words: int = 30) -> l
     if not words:
         return []
     newline_offsets = [index for index, character in enumerate(content) if character == "\n"]
+    tables = _find_markdown_tables(content)
 
     chunks: list[dict] = []
 
     def append_span(span_start: int, span_end: int) -> None:
         while span_start < span_end:
             bounded_end = min(span_start + MAX_CHUNK_CHARS, span_end)
-            text = content[span_start:bounded_end]
+            raw_text = content[span_start:bounded_end]
+            chunk_text_value = raw_text
+            for table in tables:
+                if table.start_char < span_start < table.end_char:
+                    if not raw_text.startswith(table.header_text):
+                        if span_start < table.first_data_row_start:
+                            data_part = content[table.first_data_row_start:bounded_end]
+                            if data_part:
+                                chunk_text_value = f"{table.header_text}\n{data_part}"
+                        else:
+                            chunk_text_value = f"{table.header_text}\n{raw_text}"
+                    break
             chunks.append({
                 "ordinal": len(chunks),
                 "start_char": span_start,
                 "end_char": bounded_end,
                 "start_line": bisect_right(newline_offsets, span_start - 1) + 1,
                 "end_line": bisect_right(newline_offsets, bounded_end - 1) + 1,
-                "text": text,
+                "text": chunk_text_value,
             })
             if bounded_end == span_end:
                 break
@@ -973,7 +1061,19 @@ class KnowledgeStore:
             if start_line != expected_start_line or end_line != expected_end_line:
                 raise StaleKnowledgeIndexError("indexed source lines do not match source span")
             if source_text[start:end] != indexed_text:
-                raise StaleKnowledgeIndexError("indexed chunk does not match source span")
+                tables = _find_markdown_tables(source_text)
+                expected_with_header = None
+                for table in tables:
+                    if table.start_char < start < table.end_char:
+                        if start < table.first_data_row_start:
+                            data_part = source_text[table.first_data_row_start:end]
+                            if data_part:
+                                expected_with_header = f"{table.header_text}\n{data_part}"
+                        else:
+                            expected_with_header = f"{table.header_text}\n{source_text[start:end]}"
+                        break
+                if expected_with_header != indexed_text:
+                    raise StaleKnowledgeIndexError("indexed chunk does not match source span")
             if _sha256_bytes(indexed_text.encode("utf-8")) != row["chunk_sha256"]:
                 raise StaleKnowledgeIndexError("indexed chunk hash does not match chunk text")
 
@@ -1011,7 +1111,7 @@ class KnowledgeStore:
         try:
             conn.execute("BEGIN")
             corpus_revision = self._corpus_revision(conn)
-            rows = conn.execute(
+            candidate_rows = conn.execute(
                 """
                 SELECT chunks.evidence_id, chunks.document_id,
                        documents.active_revision_id AS document_revision_id,
@@ -1043,10 +1143,21 @@ class KnowledgeStore:
                 ORDER BY score ASC, chunks.evidence_id ASC
                 LIMIT ?
                 """,
-                (match_query, top_k + 1),
+                (match_query, max((top_k + 1) * 4, 64)),
             ).fetchall()
-            top_k_limited = len(rows) > top_k
-            rows = rows[:top_k]
+            min_matched_terms = min(2, len(terms))
+            meaningful_rows = []
+            for row in candidate_rows:
+                searchable = (
+                    f"{row['folder']} {row['title']} {row['document_id']} {row['body']}"
+                ).casefold()
+                chunk_tokens = set(_QUERY_TOKEN_RE.findall(searchable))
+                matched_count = sum(1 for term in terms if term in chunk_tokens)
+                if matched_count >= min_matched_terms:
+                    meaningful_rows.append(row)
+
+            top_k_limited = len(meaningful_rows) > top_k
+            rows = meaningful_rows[:top_k]
             evidence_ids = [row["evidence_id"] for row in rows]
             if len(evidence_ids) != len(set(evidence_ids)):
                 raise StaleKnowledgeIndexError(
@@ -1228,3 +1339,73 @@ class KnowledgeStore:
         _assert_receipt_has_closed_shape(parsed)
         _assert_receipt_is_metadata_only(parsed)
         return parsed
+
+    def list_documents(self, folder: str | None = None) -> list[DocumentRecord]:
+        """List active documents in the knowledge store, optionally filtered by folder."""
+        conn = self._connect(create=False)
+        if conn is None:
+            return []
+        try:
+            corpus_rev = self._corpus_revision(conn)
+            query = """
+                SELECT d.document_id, d.active_revision_id, d.source_sha256,
+                       d.folder, d.title, d.relative_path, d.chunk_count,
+                       v.supersedes_revision_id, v.revision_reason
+                FROM documents d
+                LEFT JOIN document_versions v ON d.active_revision_id = v.revision_id
+            """
+            params: list = []
+            if folder:
+                query += " WHERE d.folder = ?"
+                params.append(folder)
+            query += " ORDER BY d.folder, d.title, d.document_id"
+            rows = conn.execute(query, params).fetchall()
+            records = []
+            for r in rows:
+                records.append(DocumentRecord(
+                    document_id=r["document_id"],
+                    revision_id=r["active_revision_id"] or "",
+                    supersedes_revision_id=r["supersedes_revision_id"],
+                    revision_reason=r["revision_reason"] or "initial_create",
+                    folder=r["folder"],
+                    title=r["title"],
+                    source_sha256=r["source_sha256"],
+                    relative_path=r["relative_path"],
+                    chunk_count=int(r["chunk_count"]),
+                    corpus_revision=corpus_rev,
+                ))
+            return records
+        finally:
+            conn.close()
+
+    def sync_folder(self, folder_path: str | Path, target_folder: str = "general") -> list[DocumentRecord]:
+        """Ingest all readable text and markdown documents from a filesystem directory."""
+        path = Path(folder_path).resolve()
+        if not path.is_dir():
+            raise KnowledgeStoreError(f"Directory not found: {folder_path}")
+
+        supported_exts = {".txt", ".md", ".markdown", ".json", ".csv", ".py", ".html"}
+        records = []
+        for file in sorted(path.rglob("*")):
+            if file.is_file() and file.suffix.lower() in supported_exts and not file.name.startswith("."):
+                try:
+                    content = file.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if not content.strip():
+                    continue
+                rel = file.relative_to(path).as_posix()
+                doc_id = re.sub(r"[^A-Za-z0-9_-]", "_", rel)
+                title = file.stem.replace("_", " ").title()
+                subfolder = target_folder
+                if file.parent != path:
+                    subfolder = f"{target_folder}/{file.parent.relative_to(path).as_posix()}"
+                rec = self.upsert_document(
+                    document_id=doc_id,
+                    folder=subfolder,
+                    title=title,
+                    content=content,
+                    revision_reason=None,
+                )
+                records.append(rec)
+        return records

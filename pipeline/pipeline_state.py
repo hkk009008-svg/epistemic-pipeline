@@ -90,6 +90,7 @@ class PipelineState(TypedDict, total=False):
     rewrite_reasoning: list
     findings_history: list
     max_rewrite_loops: int
+    negative_constraints: list[str]
 
     # -- Final --
     final_verdict: str

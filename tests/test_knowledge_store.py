@@ -748,3 +748,108 @@ def test_duplicate_evidence_ids_in_retrieved_packet_fail_closed(tmp_path):
 
     with pytest.raises(StaleKnowledgeIndexError):
         store.retrieve("Alice likes", top_k=12)
+
+
+def test_chunk_text_propagates_markdown_table_headers():
+    header = "| Service Name | Tier Level | Max Downtime (hrs) | Response Time (mins) |"
+    delimiter = "| :--- | :---: | ---: | ---: |"
+    rows = [f"| Microservice-{i} | Tier-{i % 3} | {0.5 * (i + 1):.1f} | {5 * (i + 1)} |" for i in range(40)]
+    content = f"# SLA Catalog\n\n{header}\n{delimiter}\n" + "\n".join(rows) + "\n\n## Appendices\nPlain text appendix note."
+
+    chunks = chunk_text(content, max_words=30, overlap_words=5)
+    assert len(chunks) > 1
+
+    # Chunk 0 contains table header and initial rows
+    assert header in chunks[0]["text"]
+    assert delimiter in chunks[0]["text"]
+
+    # Continuation chunks (chunk 1+) must have the table header prepended
+    header_block = f"{header}\n{delimiter}"
+    for chunk in chunks[1:]:
+        if "Microservice-" in chunk["text"]:
+            assert chunk["text"].startswith(header_block)
+            raw_span = content[chunk["start_char"]:chunk["end_char"]]
+            if not raw_span.startswith(header_block):
+                assert header in chunk["text"]
+                assert delimiter in chunk["text"]
+        elif "Appendices" in chunk["text"]:
+            assert not chunk["text"].startswith(header_block)
+
+
+def test_verify_sources_accepts_table_continuation_chunks(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    header = "| Parameter | Specification | Tolerance |"
+    delimiter = "| --- | --- | --- |"
+    rows = [f"| Param-{i:03d} | SpecVal-{i * 10} | +/- {i * 0.1:.2f} |" for i in range(50)]
+    table_content = f"{header}\n{delimiter}\n" + "\n".join(rows)
+    record = store.upsert_document("specs", "hardware", "Specifications", table_content)
+    assert record.chunk_count > 1
+
+    # Retrieve later rows that fall in chunk #2+
+    packet = store.retrieve("Param-045 SpecVal-450", top_k=5)
+    assert packet.items
+    item = packet.items[0]
+    assert item.text.startswith(f"{header}\n{delimiter}")
+    assert "Param-045" in item.text
+
+    # Verify that tampered body text fails closed with StaleKnowledgeIndexError
+    with sqlite3.connect(store.index_path) as conn:
+        conn.execute(
+            "UPDATE chunks SET body = 'Tampered Param-045 SpecVal-450' WHERE evidence_id = ?",
+            (item.evidence_id,),
+        )
+        conn.commit()
+
+    with pytest.raises(StaleKnowledgeIndexError):
+        store.retrieve("Param-045 SpecVal-450", top_k=5)
+
+
+def test_retrieval_specificity_cutoff_abstains_on_generic_single_word_matches(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document(
+        "profile",
+        "personal",
+        "Alice Profile",
+        "Alice's favorite color is teal. Alice works on distributed database systems.",
+    )
+    store.upsert_document(
+        "support",
+        "helpdesk",
+        "Support Hotline",
+        "The customer service phone number for technical inquiries is 555-0199.",
+    )
+
+    # Multi-term query matching only 'alice' in doc1 and 'number' in doc2 (0 meaningful full matches)
+    packet = store.retrieve("What is Alice's passport number?", top_k=4)
+    assert len(packet.items) == 0
+    assert packet.truncated is False
+
+    # Multi-term query matching >= 2 terms in doc1
+    profile_packet = store.retrieve("Alice favorite color", top_k=4)
+    assert len(profile_packet.items) == 1
+    assert profile_packet.items[0].document_id == "profile"
+
+    # Multi-term query matching >= 2 terms in doc2
+    support_packet = store.retrieve("phone number support", top_k=4)
+    assert len(support_packet.items) == 1
+    assert support_packet.items[0].document_id == "support"
+
+
+def test_retrieval_specificity_preserves_single_term_and_stopword_queries(tmp_path):
+    store = KnowledgeStore(tmp_path / "knowledge")
+    store.upsert_document(
+        "doc1",
+        "general",
+        "Alpha",
+        "Project X launches on Friday at 7. To be or not to be.",
+    )
+
+    # Single-term queries (N=1) must match 1 term
+    assert len(store.retrieve("X").items) == 1
+    assert len(store.retrieve("7").items) == 1
+    assert len(store.retrieve("Friday").items) == 1
+
+    # Stopword queries must work cleanly
+    to_be_packet = store.retrieve("to be")
+    assert len(to_be_packet.items) == 1
+    assert to_be_packet.items[0].document_id == "doc1"

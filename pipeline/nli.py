@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 _nli_pipeline = None
 _nli_available: Optional[bool] = None
 
-# Model choice: cross-encoder/nli-deberta-v3-xsmall is 22M params, fast inference
-NLI_MODEL = "cross-encoder/nli-deberta-v3-xsmall"
+# Model choice: defaults to cross-encoder/nli-deberta-v3-xsmall (22M params), configurable via NLI_MODEL
+NLI_MODEL = os.getenv("NLI_MODEL", "cross-encoder/nli-deberta-v3-xsmall")
 LABEL_MAP = ["contradiction", "entailment", "neutral"]
 
 # Optional remote NLI service URL

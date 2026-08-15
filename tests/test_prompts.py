@@ -4,8 +4,7 @@ All functions under test are fully deterministic (no LLM calls).
 """
 from __future__ import annotations
 
-from pipeline.prompts import build_augmentation
-
+from pipeline.prompts import DEFAULT_GPT1_SYSTEM, build_augmentation
 
 _ALL_FALSE_FLAGS = {
     "advice_requested": False,
@@ -16,6 +15,29 @@ _ALL_FALSE_FLAGS = {
     "current_events": False,
     "comparative": False,
 }
+
+
+# ---------------------------------------------------------------------------
+# Clause-Isolated Generation Schema
+# ---------------------------------------------------------------------------
+
+
+class TestClauseIsolatedSchema:
+    """Verify DEFAULT_GPT1_SYSTEM includes explicit clause-isolation instructions."""
+
+    def test_default_gpt1_system_contains_clause_isolation_rules(self):
+        assert "Clause-Isolated Generation Rules" in DEFAULT_GPT1_SYSTEM
+        assert "Atomic Propositions" in DEFAULT_GPT1_SYSTEM
+        assert "Prohibit Compound Conjunction Chaining" in DEFAULT_GPT1_SYSTEM
+        assert "whereas" in DEFAULT_GPT1_SYSTEM.lower()
+        assert "while" in DEFAULT_GPT1_SYSTEM.lower()
+        assert "and" in DEFAULT_GPT1_SYSTEM.lower()
+        assert "but" in DEFAULT_GPT1_SYSTEM.lower()
+
+    def test_default_gpt1_system_preserves_priority_stack(self):
+        assert "Priority Stack" in DEFAULT_GPT1_SYSTEM
+        assert "V1 Abstention" in DEFAULT_GPT1_SYSTEM
+        assert "V2 Evidence-Boundedness" in DEFAULT_GPT1_SYSTEM
 
 
 # ---------------------------------------------------------------------------

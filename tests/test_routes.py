@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+import config
 from app import app
 
 client = TestClient(app, raise_server_exceptions=False)
@@ -67,6 +68,12 @@ class TestRateLimit:
         r = client.get("/api/rate-limit")
         data = r.json()
         assert 0 <= data["remaining"] <= data["limit"]
+
+    def test_x_forwarded_for_extraction(self):
+        r = client.get("/api/rate-limit", headers={"x-forwarded-for": "10.0.0.1, 10.0.0.2"})
+        assert r.status_code == 200
+        data = r.json()
+        assert "limit" in data
 
 
 # ===================================================================
@@ -433,3 +440,85 @@ class TestIPExtraction:
             headers={"X-Forwarded-For": "1.2.3.4"},
         )
         assert r.status_code == 200
+
+
+# ===================================================================
+# Grounded Knowledge Corpus Endpoints
+# ===================================================================
+
+class TestGroundedEndpoints:
+    """Verify grounded RAG endpoints with auth, document ops, and receipts."""
+
+    def test_grounded_disabled_when_token_unset(self, monkeypatch):
+        monkeypatch.setattr(config, "KNOWLEDGE_API_TOKEN", "")
+        r = client.get("/api/grounded/documents", headers={"X-Forwarded-For": "10.100.1.1"})
+        assert r.status_code == 503
+        assert "disabled until KNOWLEDGE_API_TOKEN is set" in r.json()["detail"]
+
+    def test_grounded_unauthorized_with_wrong_token(self, monkeypatch):
+        monkeypatch.setattr(config, "KNOWLEDGE_API_TOKEN", "valid-secret")
+        r = client.get("/api/grounded/documents", headers={"Authorization": "Bearer wrong-secret", "X-Forwarded-For": "10.100.1.2"})
+        assert r.status_code == 401
+
+    def test_grounded_document_crud_and_list(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "KNOWLEDGE_API_TOKEN", "valid-secret")
+        monkeypatch.setattr(config, "KNOWLEDGE_ROOT", tmp_path / "knowledge")
+        headers = {"Authorization": "Bearer valid-secret", "X-Forwarded-For": "10.100.1.3"}
+
+        # 1. Upsert document
+        r = client.post(
+            "/api/grounded/documents/doc1",
+            json={
+                "folder": "test_folder",
+                "title": "Test Title",
+                "content": "This is sample content for testing grounded knowledge.",
+            },
+            headers=headers,
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["document_id"] == "doc1"
+        assert data["title"] == "Test Title"
+
+        # 2. List documents
+        r_list = client.get("/api/grounded/documents", headers={"Authorization": "Bearer valid-secret", "X-Forwarded-For": "10.100.1.4"})
+        assert r_list.status_code == 200
+        docs = r_list.json()
+        assert len(docs) == 1
+        assert docs[0]["document_id"] == "doc1"
+
+        # 3. List with folder filter
+        r_filtered = client.get("/api/grounded/documents?folder=other_folder", headers={"Authorization": "Bearer valid-secret", "X-Forwarded-For": "10.100.1.5"})
+        assert r_filtered.status_code == 200
+        assert len(r_filtered.json()) == 0
+
+    def test_grounded_sync_folder(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "KNOWLEDGE_API_TOKEN", "valid-secret")
+        monkeypatch.setattr(config, "KNOWLEDGE_ROOT", tmp_path / "knowledge")
+        headers = {"Authorization": "Bearer valid-secret", "X-Forwarded-For": "10.100.1.6"}
+
+        # Create sample folder with markdown files
+        source_dir = tmp_path / "source_docs"
+        source_dir.mkdir()
+        (source_dir / "guide.md").write_text("Markdown user guide content for sync.", encoding="utf-8")
+        (source_dir / "faq.txt").write_text("Frequently asked questions content.", encoding="utf-8")
+
+        r = client.post(
+            "/api/grounded/sync-folder",
+            json={"folder_path": str(source_dir), "target_folder": "guides"},
+            headers=headers,
+        )
+        assert r.status_code == 200
+        synced = r.json()
+        assert len(synced) == 2
+        titles = {s["title"] for s in synced}
+        assert "Guide" in titles
+        assert "Faq" in titles
+
+    def test_grounded_receipt_404_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "KNOWLEDGE_API_TOKEN", "valid-secret")
+        monkeypatch.setattr(config, "KNOWLEDGE_ROOT", tmp_path / "knowledge")
+        headers = {"Authorization": "Bearer valid-secret", "X-Forwarded-For": "10.100.1.7"}
+
+        r = client.get("/api/grounded/receipts/nonexistent_run_id", headers=headers)
+        assert r.status_code == 404

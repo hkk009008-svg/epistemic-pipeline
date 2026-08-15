@@ -208,3 +208,23 @@ class TestMetaVerifyFail:
         )
         assert result["override_to_pass"] is True
         assert result["adjusted_findings"] == []
+
+    def test_dict_based_claim_table(self):
+        """Ensure check_claim_table_consistency and meta_verify_fail work with raw dict items."""
+        claim_table = [
+            {"claim": "Water boils at 100C.", "category": "Observed", "justification": "Well established fact in science."},
+            {"claim": "Oxygen is a gas.", "category": "Observed", "justification": "Standard chemical property."},
+        ]
+        result = check_claim_table_consistency(claim_table, [], [])
+        assert result["consistent"] is True
+
+        fail_table = [
+            {"claim": "Unsupported claim A", "category": "Unsupported", "justification": "none"},
+        ]
+        fail_result = meta_verify_fail(
+            flags={"legal_mode": True},
+            claim_table=fail_table,
+            findings=[],
+            atomic_claims=[],
+        )
+        assert fail_result["ran"] is True

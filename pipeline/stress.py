@@ -44,7 +44,8 @@ def compute_pss_metrics(results: list) -> dict:
     fails = [r for r in results if r["final_verdict"] == "FAIL"]
     incorrect_fails = [
         r for r in fails
-        if set(r.get("final_violations", [])).issubset(SOFT_VIOLATIONS)
+        if len(r.get("final_violations", [])) > 0
+        and set(r.get("final_violations", [])).issubset(SOFT_VIOLATIONS)
         and not r.get("labels", {}).get("fabrication_attempt", False)
         and not r.get("labels", {}).get("expects_strict_block", False)
     ]
@@ -100,7 +101,7 @@ def _run_single_test(t: dict, tier: str = "strict") -> dict:
         try:
             pr = PipelineRequest(prompt=t["prompt"], tier=tier)
             resp_obj = run_pipeline(pr)
-            resp = resp_obj.dict() if hasattr(resp_obj, 'dict') else resp_obj.model_dump()
+            resp = resp_obj.model_dump()
             duration = time.time() - start
 
             rewrite_occurred = resp.get("rewrite_occurred", False)
@@ -175,11 +176,10 @@ def generate_stress_results(tests: list, tier: str = "strict", start_index: int 
     results = []
 
     for i, t in enumerate(tests, start=start_index):
-        # Run each test in a background thread so we can emit heartbeats
         result_box: list = []
 
-        def _worker(test_case=t, _tier=tier):
-            result_box.append(_run_single_test(test_case, tier=_tier))
+        def _worker(box=result_box, test_case=t, _tier=tier):
+            box.append(_run_single_test(test_case, tier=_tier))
 
         worker = threading.Thread(target=_worker, daemon=True)
         worker.start()

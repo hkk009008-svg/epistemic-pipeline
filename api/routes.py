@@ -25,6 +25,7 @@ from pipeline.feedback import FeedbackEntry, get_feedback_store
 from pipeline.grounded_rag import (
     GroundedDocumentRequest,
     GroundedDocumentResponse,
+    GroundedFolderSyncRequest,
     GroundedQueryRequest,
     GroundedRAGResponse,
     run_grounded_rag,
@@ -484,7 +485,7 @@ async def pipeline_endpoint(req: PipelineRequest, request: Request):
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception:
         # Fallback to sync path if async pipeline fails unexpectedly
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(_executor, run_pipeline, req),
@@ -525,6 +526,47 @@ async def grounded_document_upsert(document_id: str, req: GroundedDocumentReques
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@router.get(
+    "/api/grounded/documents",
+    response_model=list[GroundedDocumentResponse],
+    dependencies=[Depends(rate_limit_dependency), Depends(_require_grounded_access)],
+)
+async def grounded_documents_list(folder: str | None = None):
+    """List active documents in the grounded knowledge store."""
+    store = KnowledgeStore(config.KNOWLEDGE_ROOT)
+    records = await asyncio.to_thread(store.list_documents, folder=folder)
+    return [GroundedDocumentResponse.from_record(r) for r in records]
+
+
+@router.get(
+    "/api/grounded/receipts/{run_id}",
+    dependencies=[Depends(rate_limit_dependency), Depends(_require_grounded_access)],
+)
+async def grounded_receipt_get(run_id: str):
+    """Retrieve an immutable cryptographic run receipt for an earlier grounded query."""
+    store = KnowledgeStore(config.KNOWLEDGE_ROOT)
+    try:
+        receipt = await asyncio.to_thread(store.load_run_receipt, run_id)
+        return receipt
+    except KnowledgeStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.post(
+    "/api/grounded/sync-folder",
+    response_model=list[GroundedDocumentResponse],
+    dependencies=[Depends(rate_limit_dependency), Depends(_require_grounded_access)],
+)
+async def grounded_folder_sync(req: GroundedFolderSyncRequest):
+    """Ingest a directory of documents into the grounded knowledge store."""
+    store = KnowledgeStore(config.KNOWLEDGE_ROOT)
+    try:
+        records = await asyncio.to_thread(store.sync_folder, req.folder_path, target_folder=req.target_folder)
+        return [GroundedDocumentResponse.from_record(r) for r in records]
+    except (KnowledgeStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post(
     "/api/grounded/query",
     response_model=GroundedRAGResponse,
@@ -561,7 +603,7 @@ async def v2_pipeline_endpoint(req: PipelineRequest, request: Request):
             media_type="application/x-ndjson",
         )
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         result = await asyncio.wait_for(
             loop.run_in_executor(_executor, run_pipeline, req),

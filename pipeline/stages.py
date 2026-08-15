@@ -14,36 +14,80 @@ import json
 import uuid
 
 import config
-from pipeline.pipeline_state import PipelineState
-from pipeline.models import (
-    PipelineResponse, ConfidenceBreakdown,
-    GPT2ResponseSchema, GPT3ResponseSchema,
+from pipeline.arbiter import (
+    apply_edits,
+    apply_edits_by_id,
+    extract_negative_constraints,
+    format_negative_constraints_block,
+    guard_arbiter_decision,
+    parse_gpt3,
+    parse_gpt3_structured,
 )
-from pipeline.prompts import (
-    DEFAULT_GPT1_SYSTEM, DEFAULT_GPT2_SYSTEM, DEFAULT_GPT3_SYSTEM,
-    PROMPT_VERSION, build_augmentation,
-)
-from pipeline.sanitizer import route_prompt, sanitize_output
-from pipeline.helpers import PipelineError, call_llm_async, call_llm_structured, is_activation_phrase
-from pipeline.verifier import (
-    parse_gpt2, parse_gpt2_structured, _all_soft, recompute_verdict, build_gpt2_user_content,
-)
-from pipeline.arbiter import parse_gpt3, parse_gpt3_structured, apply_edits, apply_edits_by_id
 from pipeline.convergence import should_continue_rewrite
-from pipeline.search import should_search, perform_web_search, refine_search_query, fetch_claim_evidence
-from pipeline.source_match import recategorize_with_sources, filter_findings_with_sources, build_source_keyword_sets
 from pipeline.decomposer import decompose_claims
-from pipeline.nli import verify_claims_with_nli, is_nli_available, compute_grounding_rate, detect_unsupported_spans
-from pipeline.meta_verify import meta_verify_pass, meta_verify_fail, is_high_stakes
+from pipeline.helpers import (
+    PipelineError,
+    call_llm_async,
+    call_llm_structured,
+    is_activation_phrase,
+)
+from pipeline.meta_verify import is_high_stakes, meta_verify_fail, meta_verify_pass
 from pipeline.metrics import PipelineMetrics, record_run
-from pipeline.best_of_n import generate_best_of_n_async
+from pipeline.models import (
+    ClaimEntry,
+    ConfidenceBreakdown,
+    GPT2ResponseSchema,
+    GPT3ResponseSchema,
+    PipelineResponse,
+)
+from pipeline.nli import (
+    compute_grounding_rate,
+    detect_unsupported_spans,
+    is_nli_available,
+    verify_claims_concurrently,
+)
 
 # Re-import orchestrator utilities (these stay in orchestrator.py)
 from pipeline.orchestrator import (
-    compute_confidence, clean_for_display, _fail_message,
-    _date_context, _resolve_output_format, _emit_stage_start, _emit_stage_complete,
+    _date_context,
+    _emit_stage_complete,
+    _emit_stage_start,
+    _fail_message,
+    _resolve_output_format,
+    clean_for_display,
+    compute_confidence,
 )
-
+from pipeline.pipeline_state import PipelineState
+from pipeline.prompts import (
+    DEFAULT_GPT1_SYSTEM,
+    DEFAULT_GPT2_SYSTEM,
+    DEFAULT_GPT3_SYSTEM,
+    GPT2_TRIPWIRE_REFERENCE,
+    PROMPT_VERSION,
+    build_augmentation,
+)
+from pipeline.sanitizer import route_prompt, sanitize_output
+from pipeline.search import (
+    fetch_claim_evidence,
+    perform_web_search,
+    refine_search_query,
+    should_search,
+)
+from pipeline.source_match import (
+    build_source_keyword_sets,
+    build_source_number_sets,
+    filter_findings_with_sources,
+    recategorize_with_sources,
+    run_preflight_scan,
+    verify_citation_grounding,
+)
+from pipeline.verifier import (
+    _all_soft,
+    build_gpt2_user_content,
+    parse_gpt2,
+    parse_gpt2_structured,
+    recompute_verdict,
+)
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -61,6 +105,37 @@ async def _verify_text(state: PipelineState, text_to_verify: str) -> dict:
 
     Returns dict: {gpt2_raw, claim_table, violations, verdict, findings, reasoning}.
     """
+    search_sources = state.get("search_sources", [])
+    src_kw = state.get("src_kw_sets")
+    src_nums = state.get("src_num_sets")
+
+    # Fast deterministic pre-flight check (<10ms)
+    has_hard_preflight, preflight_findings = run_preflight_scan(
+        text_to_verify, search_sources, src_kw, src_nums
+    )
+    if has_hard_preflight:
+        viol = [f["type"] for f in preflight_findings]
+        verdict = "FAIL"
+        reasoning = ["Pre-flight citation/bounds check failed with hard findings"]
+        ct = [
+            ClaimEntry(claim=f.get("detail", ""), category="Unsupported", justification="Pre-flight violation")
+            for f in preflight_findings
+        ]
+        gpt2_raw = json.dumps({
+            "reasoning_trace": reasoning,
+            "claim_table": [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in ct],
+            "findings": preflight_findings,
+            "verdict": "FAIL",
+        })
+        return {
+            "gpt2_raw": gpt2_raw,
+            "claim_table": ct,
+            "violations": viol,
+            "verdict": verdict,
+            "findings": preflight_findings,
+            "reasoning": reasoning,
+        }
+
     include_claims = text_to_verify == state.get("sanitized_output")
     gpt2_user = build_gpt2_user_content(
         state["prompt"],
@@ -84,12 +159,13 @@ async def _verify_text(state: PipelineState, text_to_verify: str) -> dict:
         ct, viol, verdict, findings, reasoning = parse_gpt2(gpt2_raw, flags=flags, tier=tier)
 
     # Source-match correction
-    search_sources = state.get("search_sources", [])
     if search_sources:
-        src_kw = state.get("src_kw_sets")
         nli_claims = state.get("atomic_claims") or None
         ct = recategorize_with_sources(ct, search_sources, src_kw, nli_claims=nli_claims)
         findings = filter_findings_with_sources(findings, search_sources, src_kw, nli_claims=nli_claims)
+        citation_findings = verify_citation_grounding(text_to_verify, search_sources, src_kw, src_nums)
+        if citation_findings:
+            findings.extend(citation_findings)
         viol = [f["type"] for f in findings]
         verdict = recompute_verdict(findings, tier=tier)
 
@@ -103,6 +179,25 @@ async def _verify_text(state: PipelineState, text_to_verify: str) -> dict:
     }
 
 
+_DEFAULT_EMPTY_ARBITER = dict(
+    arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
+    arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
+    rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
+    rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
+)
+_DEFAULT_SEARCH_KWARGS = dict(
+    search_performed=False,
+    search_attempted=False,
+    search_note="",
+    search_query="",
+    search_sources=[],
+)
+_DEFAULT_DECOMP_KWARGS = dict(
+    atomic_claims=[],
+    decomposition_ran=False,
+)
+
+
 def _base_response(state: PipelineState, **overrides) -> PipelineResponse:
     """Build a PipelineResponse from state with sensible defaults.
 
@@ -112,19 +207,22 @@ def _base_response(state: PipelineState, **overrides) -> PipelineResponse:
     """
     base = dict(
         prompt_version=PROMPT_VERSION,
-        tier=state["tier"],
-        output_format=state["output_format"],
-        gpt1_input=state["prompt"],
+        tier=state.get("tier", "strict"),
+        output_format=state.get("output_format", "structured"),
+        gpt1_input=state.get("prompt", ""),
         gpt1_output=state.get("gpt1_output", ""),
         prompt_flags=state.get("flags", {}),
     )
+    base.update(_DEFAULT_EMPTY_ARBITER)
+    base.update(_DEFAULT_SEARCH_KWARGS)
+    base.update(_DEFAULT_DECOMP_KWARGS)
     base.update(state.get("empty_arbiter", {}))
     base.update(state.get("search_kwargs", {}))
     base.update(state.get("decomp_kwargs", {}))
     base.update(overrides)
 
     # Strip internal sanitizer/epistemic markers before returning to users
-    if "final_result" in base and base["final_result"]:
+    if base.get("final_result"):
         base["final_result"] = clean_for_display(base["final_result"])
 
     return PipelineResponse(**base)
@@ -254,7 +352,10 @@ async def stage_build_prompts(state: PipelineState) -> dict:
             f"--- END SEARCH RESULTS ---"
         )
         source_detail = "\n".join(
-            f'[{i}] "{s.title}" ({s.url})\n    Snippet: {s.snippet[:300]}'
+            f'<untrusted_evidence id="{i}" url="{s.url}">\n'
+            f'Title: "{s.title}"\n'
+            f'Snippet: {s.snippet[:300]}\n'
+            f'</untrusted_evidence>'
             for i, s in enumerate(search_sources, 1)
         )
         gpt2_system += (
@@ -299,6 +400,7 @@ async def stage_build_prompts(state: PipelineState) -> dict:
         search_sources=search_sources,
     )
     src_kw_sets = build_source_keyword_sets(search_sources) if search_sources else None
+    src_num_sets = build_source_number_sets(search_sources) if search_sources else None
     empty_arbiter = dict(
         arbiter_invoked=False, arbiter_decision="", arbiter_rationale=[],
         arbiter_edits=[], arbiter_policy_notes=[], arbiter_raw="",
@@ -312,6 +414,7 @@ async def stage_build_prompts(state: PipelineState) -> dict:
         "gpt3_system": gpt3_system,
         "gpt1_user_content": gpt1_user_content,
         "src_kw_sets": src_kw_sets,
+        "src_num_sets": src_num_sets,
         "search_kwargs": search_kwargs,
         "empty_arbiter": empty_arbiter,
     }
@@ -463,7 +566,7 @@ async def stage_nli(state: PipelineState) -> dict:
     _emit_stage_start(emit, "nli")
     sm = metrics.start_stage("nli")
 
-    enriched_claims = await asyncio.to_thread(verify_claims_with_nli, atomic_claims, evidence)
+    enriched_claims = await verify_claims_concurrently(atomic_claims, evidence)
 
     metrics.end_stage(sm)
     metrics.nli_ran = True
@@ -508,6 +611,76 @@ async def stage_verify(state: PipelineState) -> dict:
     flags = state["flags"]
     tier = state["tier"]
 
+    # --- CONTROL 2: Fast Deterministic Pre-Flight Citation & Bounds Scanner ---
+    search_sources = state.get("search_sources", [])
+    src_kw = state.get("src_kw_sets")
+    src_nums = state.get("src_num_sets")
+    draft_text = state.get("sanitized_output", "") or state.get("gpt1_output", "")
+
+    has_hard_preflight, preflight_findings = run_preflight_scan(
+        draft_text, search_sources, src_kw, src_nums
+    )
+
+    if has_hard_preflight:
+        # Deterministic short-circuit: skip LLM 2 Verifier call completely (0 LLM tokens, <10ms)
+        violations = [f["type"] for f in preflight_findings]
+        gpt2_verdict = "FAIL"
+        gpt2_reasoning = ["Pre-flight citation/bounds check failed with hard findings"]
+
+        if atomic_claims:
+            claim_table = [
+                ClaimEntry(
+                    claim=c.get("text", "") if isinstance(c, dict) else getattr(c, "text", str(c)),
+                    category="Unsupported",
+                    justification="Pre-flight citation/bounds check failed with hard findings",
+                )
+                for c in atomic_claims
+            ]
+        else:
+            claim_table = [
+                ClaimEntry(
+                    claim=f.get("detail", ""),
+                    category="Unsupported",
+                    justification="Pre-flight violation",
+                )
+                for f in preflight_findings
+            ]
+
+        gpt2_raw = json.dumps({
+            "reasoning_trace": gpt2_reasoning,
+            "claim_table": [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in claim_table],
+            "findings": preflight_findings,
+            "verdict": "FAIL",
+        })
+
+        metrics.gpt2_verdict = "FAIL"
+        metrics.hard_findings = sum(1 for f in preflight_findings if f.get("severity") == "hard")
+        metrics.soft_findings = sum(1 for f in preflight_findings if f.get("severity") == "soft")
+        metrics.total_claims = len(claim_table)
+
+        _emit_stage_start(emit, "gpt2", data={
+            "provider": "preflight", "model": "deterministic_bounds_scanner",
+        })
+        _emit_stage_complete(emit, "gpt2", data={
+            "verdict": "FAIL", "claim_count": len(claim_table), "violations": violations,
+            "preflight_short_circuit": True,
+        })
+
+        if "decomp_kwargs" not in state:
+            state["decomp_kwargs"] = dict(atomic_claims=atomic_claims, decomposition_ran=len(atomic_claims) > 0)
+
+        return {
+            "gpt2_raw": gpt2_raw,
+            "claim_table": claim_table,
+            "violations": violations,
+            "gpt2_verdict": "FAIL",
+            "findings": preflight_findings,
+            "verification_findings": preflight_findings,
+            "gpt2_reasoning": gpt2_reasoning,
+            "max_rewrite_loops": getattr(config, "MAX_REWRITE_LOOPS", 1),
+        }
+
+    # Build GPT-2 user content (with NLI signals if available)
     gpt2_user = build_gpt2_user_content(
         state["prompt"],
         state["sanitized_output"],
@@ -539,12 +712,13 @@ async def stage_verify(state: PipelineState) -> dict:
         "verdict": gpt2_verdict, "claim_count": len(claim_table), "violations": violations,
     })
 
-    # Source-match correction
-    search_sources = state.get("search_sources", [])
+    # Source-match correction & citation verification
     if search_sources:
-        src_kw = state.get("src_kw_sets")
         claim_table = recategorize_with_sources(claim_table, search_sources, src_kw, nli_claims=atomic_claims or None)
         findings = filter_findings_with_sources(findings, search_sources, src_kw, nli_claims=atomic_claims or None)
+        citation_findings = verify_citation_grounding(state.get("sanitized_output", ""), search_sources, src_kw, src_nums)
+        if citation_findings:
+            findings.extend(citation_findings)
         violations = [f["type"] for f in findings]
         gpt2_verdict = recompute_verdict(findings, tier=tier)
 
@@ -741,19 +915,13 @@ async def stage_arbiter(state: PipelineState) -> dict:
     metrics.end_stage(gpt3_sm)
     _emit_stage_complete(emit, "gpt3", data={"decision": arbiter_decision})
 
-    # Safety net: override BLOCK to ALLOW_WITH_EDITS when truthful content exists
+    # Adaptive Poisoning Guard
     claim_table = state.get("claim_table", [])
-    if arbiter_decision == "BLOCK" and claim_table:
-        salvageable_cats = {"supported", "observed", "inference", "user-provided"}
-        has_truthful = any(
-            (ct.category if isinstance(ct.category, str) else "").lower().strip() in salvageable_cats
-            for ct in claim_table
-        )
-        if has_truthful:
-            arbiter_decision = "ALLOW_WITH_EDITS"
-            arbiter_rationale = [
-                "Overridden from BLOCK: claim table contains truthful content that can be preserved with edits."
-            ] + arbiter_rationale
+    findings = state.get("findings", [])
+    guarded_decision, guard_notes = guard_arbiter_decision(arbiter_decision, claim_table, findings)
+    if guard_notes:
+        arbiter_rationale = guard_notes + arbiter_rationale
+    arbiter_decision = guarded_decision
 
     metrics.arbiter_decision = arbiter_decision
 
@@ -768,31 +936,35 @@ async def stage_arbiter(state: PipelineState) -> dict:
 
     # ---- BLOCK ----
     if arbiter_decision == "BLOCK":
-        nli_grounding = state.get("nli_grounding", {})
-        nli_unsupported_spans = state.get("nli_unsupported_spans", [])
-        search_sources = state.get("search_sources", [])
-        block_conf = compute_confidence(
-            claim_table, state.get("findings", []),
-            nli_grounding or None, nli_unsupported_spans or None, search_sources or None,
-        )
-        metrics.final_verdict = "FAIL"
-        metrics.confidence_label = block_conf.confidence_label
-        metrics.finish()
-        record_run(metrics)
-        updates["early_return"] = _base_response(
-            state, bypassed=False,
-            gpt2_raw=state["gpt2_raw"], claim_table=claim_table,
-            violations=state["violations"],
-            gpt2_verdict=state["gpt2_verdict"], gpt2_reasoning=state["gpt2_reasoning"],
-            arbiter_invoked=True, arbiter_decision="BLOCK",
-            arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
-            arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
-            rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
-            rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
-            final_verdict="FAIL", final_result=_fail_message(flags, state.get("search_performed", False)),
-            sanitizer_applied=state.get("sanitizer_applied", False),
-            confidence=block_conf,
-        )
+        enable_repair = state.get("enable_repair", True) and (state.get("max_rewrite_loops", 3) > 0)
+        if not enable_repair:
+            nli_grounding = state.get("nli_grounding", {})
+            nli_unsupported_spans = state.get("nli_unsupported_spans", [])
+            search_sources = state.get("search_sources", [])
+            block_conf = compute_confidence(
+                claim_table, findings,
+                nli_grounding or None, nli_unsupported_spans or None, search_sources or None,
+            )
+            metrics.final_verdict = "FAIL"
+            metrics.confidence_label = block_conf.confidence_label
+            metrics.finish()
+            record_run(metrics)
+            updates["early_return"] = _base_response(
+                state, bypassed=False,
+                gpt2_raw=state["gpt2_raw"], claim_table=claim_table,
+                violations=state["violations"],
+                gpt2_verdict=state["gpt2_verdict"], gpt2_reasoning=state["gpt2_reasoning"],
+                arbiter_invoked=True, arbiter_decision="BLOCK",
+                arbiter_rationale=arbiter_rationale, arbiter_edits=arbiter_edits,
+                arbiter_policy_notes=arbiter_policy_notes, arbiter_raw=gpt3_raw,
+                rewrite_occurred=False, rewrite_output="", rewrite_gpt2_raw="",
+                rewrite_claim_table=[], rewrite_violations=[], rewrite_verdict="",
+                final_verdict="FAIL", final_result=_fail_message(flags, state.get("search_performed", False)),
+                sanitizer_applied=state.get("sanitizer_applied", False),
+                confidence=block_conf,
+            )
+            return updates
+        # Heavily poisoned drafts (BLOCK) are flagged for repair rather than fail-closed early returns
         return updates
 
     # ---- ALLOW_AS_UNKNOWN_ONLY ----
@@ -851,11 +1023,11 @@ async def stage_arbiter(state: PipelineState) -> dict:
 # ---------------------------------------------------------------------------
 
 async def stage_rewrite_loop(state: PipelineState) -> dict:
-    """Convergence-aware rewrite loop with AST edit support.
+    """Multi-turn repair loop with Closed-Loop Negative-Constraint Feedback.
 
-    When atomic claims have claim_id fields and arbiter edits have target_id,
-    uses apply_edits_by_id for deterministic JSON edits alongside the
-    text-based GPT-1 rewrite. Otherwise falls back to text-only rewrite.
+    Maintains a monotonically accumulating negative constraints ledger across repair
+    turns to prevent re-hallucination. Enforces a hard cap of at most 2 repair turns,
+    backed by deterministic fail-closed Unknown fallback.
     """
     gpt1_cfg = state["gpt1_cfg"]
     gpt1_system = state["gpt1_system"]
@@ -864,21 +1036,52 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
     metrics = state["metrics"]
     findings = state.get("findings", [])
     arbiter_edits = state.get("arbiter_edits", [])
-    sanitized = state["sanitized_output"]
+    arbiter_decision = state.get("arbiter_decision", "ALLOW_WITH_EDITS")
+    sanitized = state.get("sanitized_output", "") or state.get("gpt1_output", "")
     atomic_claims = state.get("atomic_claims", [])
-    max_loops = state.get("max_rewrite_loops", 3)
+    claim_table = state.get("claim_table", [])
+    search_sources = state.get("search_sources", [])
+    max_loops = min(state.get("max_rewrite_loops", 2), 2)
 
-    # --- Build rewrite prompt (with optional AST edit info) ---
-    rewrite_prompt = apply_edits(sanitized, arbiter_edits)
-    if findings:
-        finding_lines = "\n".join(
-            f"- {f['type']}: {f.get('detail', 'no detail')} (severity: {f.get('severity', '?')})"
-            for f in findings
+    # 1. Initialize and monotonically accumulate negative constraints ledger
+    cumulative_constraints: List[str] = list(state.get("negative_constraints", []))
+    initial_constraints = extract_negative_constraints(
+        findings=findings,
+        arbiter_edits=arbiter_edits,
+        claim_table=claim_table,
+        max_source_count=len(search_sources) if search_sources else None,
+    )
+    for c in initial_constraints:
+        if c not in cumulative_constraints:
+            cumulative_constraints.append(c)
+
+    state["negative_constraints"] = cumulative_constraints
+    nc_block = format_negative_constraints_block(cumulative_constraints)
+
+    # 2. Build Turn 1 Prompt (Handling both BLOCK/REGENERATE and ALLOW_WITH_EDITS)
+    if arbiter_decision in ("BLOCK", "REGENERATE"):
+        prompt_text = state.get("prompt", "")
+        rewrite_prompt = (
+            f"Your previous response was rejected due to heavy poisoning or multiple critical violations.\n\n"
+            f"Original Question:\n{prompt_text}\n\n"
+            f"{nc_block}\n\n"
+            f"Please generate a completely fresh response that strictly satisfies all epistemic rules "
+            f"and contains ZERO claims or patterns listed in the Negative Constraints above.\n"
+            f"Output your fresh response in full."
         )
-        rewrite_prompt += (
-            f"\n\nPrevious verification found these specific issues:\n{finding_lines}\n"
-            f"Please address each finding in your rewrite."
-        )
+    else:
+        rewrite_prompt = apply_edits(sanitized, arbiter_edits)
+        if findings:
+            finding_lines = "\n".join(
+                f"- {f.get('type', '?')}: {f.get('detail', 'no detail')} (severity: {f.get('severity', '?')})"
+                for f in findings
+            )
+            rewrite_prompt += (
+                f"\n\nPrevious verification found these specific issues:\n{finding_lines}\n"
+                f"Please address each finding in your rewrite."
+            )
+        if nc_block:
+            rewrite_prompt += f"\n\n{nc_block}\n\nYou MUST strictly adhere to all negative constraints above."
 
     # Wire in apply_edits_by_id for ID-based deterministic edits
     has_id_edits = any(getattr(e, "target_id", "") for e in arbiter_edits)
@@ -888,46 +1091,71 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
         # Update atomic claims for downstream confidence scoring
         atomic_claims = modified_claims
 
+    # 3. Generate Turn 1 Rewrite
+    rw_sm = metrics.start_stage("rewrite_turn_1")
     rewrite_output = await call_llm_async(gpt1_cfg, gpt1_system, rewrite_prompt)
+    metrics.end_stage(rw_sm)
     rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
 
-    # Re-verify
+    # 4. Re-verify Turn 1
     re = await _verify_text(state, rewrite_output)
     findings_history = [findings, re["findings"]]
+    iteration_count = 1
 
-    # Convergence-aware loop
-    while re["verdict"] == "FAIL" and should_continue_rewrite(findings_history, max_loops=max_loops):
+    # 5. Multi-turn repair loop (Turn 2 if Turn 1 FAILS)
+    while re["verdict"] == "FAIL" and iteration_count < max_loops:
+        iteration_count += 1
+
+        # Monotonically accumulate new constraints from Turn 1 re-verification
+        turn_new_constraints = extract_negative_constraints(
+            findings=re.get("findings", []),
+            claim_table=re.get("claim_table", []),
+            max_source_count=len(search_sources) if search_sources else None,
+        )
+        for c in turn_new_constraints:
+            if c not in cumulative_constraints:
+                cumulative_constraints.append(c)
+
+        state["negative_constraints"] = cumulative_constraints
+        nc_block_turn = format_negative_constraints_block(cumulative_constraints)
+
         if _all_soft(re["findings"]):
             instruction = (
                 f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
+                f"{nc_block_turn}\n\n"
                 f"Remaining soft violations could not be resolved. "
                 f"Rewrite your response so that ALL claims are framed as Unknown(Actionable) or Unknown(Structural).\n"
                 f"Do NOT make conclusions. Do NOT add new facts. Output the corrected response in full."
             )
         else:
             hard_details = "; ".join(
-                f'{f["type"]}: {f["detail"]}'
+                f'{f.get("type", "?")}: {f.get("detail", "no detail")}'
                 for f in re["findings"] if f.get("severity") == "hard"
             )
             instruction = (
                 f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
-                f"The following HARD violations were detected and must be fixed:\n{hard_details}\n\n"
-                f"For each violation: either DELETE the problematic claim entirely, "
+                f"{nc_block_turn}\n\n"
+                f"The following critical violations persist and MUST be resolved immediately:\n{hard_details}\n\n"
+                f"STRICT REQUIREMENT: For each violation, either DELETE the problematic claim entirely, "
                 f"or MOVE it to Unknown(Actionable) with a note that verification is needed.\n"
                 f"Do NOT fabricate citations. Do NOT invent statistics.\n"
                 f"Set Confidence to Low if you remove core claims.\n"
                 f"Output the corrected response in full."
             )
+
+        rw_sm = metrics.start_stage(f"rewrite_turn_{iteration_count}")
         rewrite_output = await call_llm_async(gpt1_cfg, gpt1_system, instruction)
+        metrics.end_stage(rw_sm)
         rewrite_output = sanitize_output(rewrite_output, flags, tier=tier)
         re = await _verify_text(state, rewrite_output)
         findings_history.append(re["findings"])
 
-    metrics.rewrite_loops = len(findings_history) - 1
+    metrics.rewrite_loops = iteration_count
 
     # Build common arbiter fields for response
     arbiter_fields = dict(
-        arbiter_invoked=True, arbiter_decision="ALLOW_WITH_EDITS",
+        arbiter_invoked=True,
+        arbiter_decision=arbiter_decision,
         arbiter_rationale=state.get("arbiter_rationale", []),
         arbiter_edits=state.get("arbiter_edits", []),
         arbiter_policy_notes=state.get("arbiter_policy_notes", []),
@@ -936,7 +1164,6 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
 
     nli_grounding = state.get("nli_grounding", {})
     nli_unsupported_spans = state.get("nli_unsupported_spans", [])
-    search_sources = state.get("search_sources", [])
 
     if re["verdict"] == "PASS":
         conf = compute_confidence(
@@ -950,22 +1177,22 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
         record_run(metrics)
         return {"early_return": _base_response(
             state, bypassed=False,
-            gpt2_raw=state["gpt2_raw"], claim_table=state["claim_table"],
-            violations=state["violations"],
-            gpt2_verdict=state["gpt2_verdict"], gpt2_reasoning=state["gpt2_reasoning"],
+            gpt2_raw=state.get("gpt2_raw", "{}"), claim_table=state.get("claim_table", []),
+            violations=state.get("violations", []),
+            gpt2_verdict=state.get("gpt2_verdict", "FAIL"), gpt2_reasoning=state.get("gpt2_reasoning", []),
             rewrite_occurred=True, rewrite_output=rewrite_output,
-            rewrite_gpt2_raw=re["gpt2_raw"], rewrite_claim_table=re["claim_table"],
-            rewrite_violations=re["violations"], rewrite_verdict=re["verdict"],
-            rewrite_reasoning=re["reasoning"],
+            rewrite_gpt2_raw=re.get("gpt2_raw", "{}"), rewrite_claim_table=re.get("claim_table", []),
+            rewrite_violations=re.get("violations", []), rewrite_verdict=re.get("verdict", "PASS"),
+            rewrite_reasoning=re.get("reasoning", []),
             final_verdict="PASS", final_result=rewrite_output,
             sanitizer_applied=True, confidence=conf,
             **arbiter_fields,
         )}
 
-    # ---- Fallback: rewrite failed, frame as Unknown ----
+    # ---- Fallback: rewrite failed after <=2 turns, frame as Unknown ----
     fallback_prompt = (
         f"You previously produced this response:\n\n---\n{rewrite_output}\n---\n\n"
-        f"The verification system could not clear all violations after multiple attempts.\n"
+        f"The verification system could not clear all violations after {iteration_count} attempts.\n"
         f"Rewrite your response so that ALL factual claims are framed as "
         f"Unknown(Actionable) or Unknown(Structural).\n"
         f"Preserve the structure and topic coverage, but present everything as unverified.\n"
@@ -973,7 +1200,9 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
         f"Set Confidence to Low.\n"
         f"Output the corrected response in full."
     )
+    fallback_sm = metrics.start_stage("rewrite_fallback")
     fallback_output = await call_llm_async(gpt1_cfg, gpt1_system, fallback_prompt)
+    metrics.end_stage(fallback_sm)
     fallback_output = sanitize_output(fallback_output, flags, tier=tier)
 
     metrics.final_verdict = "PASS"
@@ -983,13 +1212,13 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
     record_run(metrics)
     return {"early_return": _base_response(
         state, bypassed=False,
-        gpt2_raw=state["gpt2_raw"], claim_table=state["claim_table"],
-        violations=state["violations"],
-        gpt2_verdict=state["gpt2_verdict"], gpt2_reasoning=state["gpt2_reasoning"],
+        gpt2_raw=state.get("gpt2_raw", "{}"), claim_table=state.get("claim_table", []),
+        violations=state.get("violations", []),
+        gpt2_verdict=state.get("gpt2_verdict", "FAIL"), gpt2_reasoning=state.get("gpt2_reasoning", []),
         rewrite_occurred=True, rewrite_output=fallback_output,
-        rewrite_gpt2_raw=re["gpt2_raw"], rewrite_claim_table=re["claim_table"],
-        rewrite_violations=re["violations"], rewrite_verdict=re["verdict"],
-        rewrite_reasoning=re["reasoning"],
+        rewrite_gpt2_raw=re.get("gpt2_raw", "{}"), rewrite_claim_table=re.get("claim_table", []),
+        rewrite_violations=re.get("violations", []), rewrite_verdict=re.get("verdict", "FAIL"),
+        rewrite_reasoning=re.get("reasoning", []),
         final_verdict="PASS", final_result=fallback_output,
         sanitizer_applied=True,
         confidence=ConfidenceBreakdown(
@@ -998,3 +1227,4 @@ async def stage_rewrite_loop(state: PipelineState) -> dict:
         ),
         **arbiter_fields,
     )}
+

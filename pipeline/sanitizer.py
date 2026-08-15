@@ -133,11 +133,31 @@ def _replace_bare_percents(text: str) -> str:
                       result[match.end():])
     return result
 
+# Outcome-promise replacement mapping for natural sentence flow (G4)
+_OUTCOME_PROMISE_PATTERNS = [
+    (re.compile(r"(?i)\b(?:could help with|may help with)\b"), "addresses"),
+    (re.compile(r"(?i)\b(?:could assist with|could assist in|may assist with|may assist in)\b"), "addresses"),
+    (re.compile(r"(?i)\b(?:could help to|may help to|could assist to)\b"), "is intended to"),
+    (re.compile(r"(?i)\b(?:will improve|may improve)\b"), "addresses"),
+    (re.compile(r"(?i)\b(?:will reduce|will increase)\b"), "addresses"),
+    (re.compile(r"(?i)\b(?:could help|could assist|may help|may assist)\b"), "addresses"),
+    (re.compile(r"(?i)\bcould potentially\b"), "may"),
+]
+
 # Outcome-promise phrases (G4 violation markers)
 _OUTCOME_PROMISE_RE = re.compile(
     r"(?i)\b(?:will improve|will reduce|will increase"
     r"|could help|could assist|may improve|may help|could potentially)\b"
 )
+
+
+def _replace_outcome_promises(text: str) -> str:
+    """Replace outcome promises with neutral phrasing preserving grammar."""
+    result = text
+    for pattern, replacement in _OUTCOME_PROMISE_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
 
 # Stale date qualifier — "as of [Month] [Year]" where year is before current year
 # Used when current_events flag is set to catch stale time-sensitive claims.
@@ -150,6 +170,79 @@ _STALE_DATE_BASE_RE = re.compile(
 # Pre-compiled whitespace cleanup patterns (avoid re.sub recompilation per call)
 _MULTI_SPACE_RE = re.compile(r"  +")
 _TRAILING_SPACE_RE = re.compile(r" +\n")
+
+# Punctuation & grammar cleanup regexes
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,;.:!?])")
+_MULTI_DOT_RE = re.compile(r"\.\s*\.+")
+_COMMA_DOT_RE = re.compile(r",\s*\.")
+_DOT_COMMA_RE = re.compile(r"\.\s*,")
+_MULTI_COMMA_RE = re.compile(r",\s*,+")
+_MULTI_SEMICOLON_RE = re.compile(r";\s*;+")
+_DANGLING_CONNECTOR_RE = re.compile(
+    r"\b(?:with|in|to|for|on|by|at|from|about|of|and|or|nor|but|whereas|while)\s*([,;.:!?])",
+    re.IGNORECASE,
+)
+_LEADING_PUNCT_RE = re.compile(r"(?m)^[ \t]*[,;:.]+\s*")
+_LEADING_COORDINATOR_RE = re.compile(
+    r"(?m)^[ \t]*(?:and|but|or|nor|whereas|while)[,\s]+",
+    re.IGNORECASE,
+)
+_SENTENCE_START_COORDINATOR_RE = re.compile(
+    r"(?<=[.!?]\s)(?:whereas|while)[,\s]+",
+    re.IGNORECASE,
+)
+
+
+def _clean_grammar_and_punctuation(text: str) -> str:
+    """Normalize punctuation, remove dangling prepositions and clean whitespace."""
+    if not text:
+        return ""
+
+    # If text contains only punctuation and whitespace, return empty string
+    if re.fullmatch(r"[\s,;:.]*", text):
+        return ""
+
+    # Collapse whitespace first
+    text = _MULTI_SPACE_RE.sub(" ", text)
+    # Clean space before punctuation
+    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+    # Clean duplicate / colliding punctuation
+    text = _COMMA_DOT_RE.sub(".", text)
+    text = _DOT_COMMA_RE.sub(".", text)
+    text = _MULTI_DOT_RE.sub(".", text)
+    text = _MULTI_COMMA_RE.sub(",", text)
+    text = _MULTI_SEMICOLON_RE.sub(";", text)
+    # Remove dangling prepositions and trailing coordinators before sentence/clause terminators
+    text = _DANGLING_CONNECTOR_RE.sub(r"\1", text)
+    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+    text = _COMMA_DOT_RE.sub(".", text)
+    text = _MULTI_COMMA_RE.sub(",", text)
+    text = _DANGLING_CONNECTOR_RE.sub(r"\1", text)
+    text = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", text)
+    # Clean leading punctuation per line
+    text = _LEADING_PUNCT_RE.sub("", text)
+    # Clean leading orphaned coordinators per line
+    text = _LEADING_COORDINATOR_RE.sub("", text)
+    # Clean sentence-start contrastive coordinators
+    text = _SENTENCE_START_COORDINATOR_RE.sub("", text)
+    text = _LEADING_PUNCT_RE.sub("", text)
+
+    # Line-by-line whitespace and capitalization cleanup
+    lines = text.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        line_s = line.strip()
+        line_s = re.sub(r"^[ \t]*[,;:.]+\s*", "", line_s)
+        line_s = re.sub(r"^[ \t]*(?:and|but|or|nor|whereas|while)[,\s]+", "", line_s, flags=re.IGNORECASE)
+        if line_s and line_s[0].islower() and not line_s.startswith(("http", "www")):
+            line_s = line_s[0].upper() + line_s[1:]
+        cleaned_lines.append(line_s)
+    text = "\n".join(cleaned_lines)
+
+    # Final whitespace cleanup
+    text = _MULTI_SPACE_RE.sub(" ", text)
+    text = _TRAILING_SPACE_RE.sub("\n", text)
+    return text.strip()
 
 # G1: Vague legal claims without statute/regulation citation (pre-compiled)
 _VAGUE_LEGAL_RE = re.compile(
@@ -179,9 +272,7 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
     # strict: always strip bare stats without nearby citations
     # standard: strip only when percent_requested
     # light: skip entirely
-    if tier == "strict":
-        result = _replace_bare_percents(result)
-    elif tier == "standard" and flags.get("percent_requested"):
+    if tier == "strict" or tier == "standard" and flags.get("percent_requested"):
         result = _replace_bare_percents(result)
 
     # ---- G1 + G2: Banned evidence & typicality (strict and standard only) ----
@@ -192,7 +283,7 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
     # ---- G4: Outcome promises (strict and standard, skipped in light) ----
     if tier in ("strict", "standard"):
         if not flags.get("advice_requested"):
-            result = _OUTCOME_PROMISE_RE.sub("", result)
+            result = _replace_outcome_promises(result)
 
     # ---- G6: Stale dates (strict and standard only) ----
     if tier in ("strict", "standard"):
@@ -211,7 +302,5 @@ def sanitize_output(text: str, flags: dict, tier: str = "strict") -> str:
         if flags.get("legal_mode"):
             result = _VAGUE_LEGAL_RE.sub("[Legal claim requires citation]", result)
 
-    # Clean up residual double-spaces / trailing whitespace per line (always)
-    result = _MULTI_SPACE_RE.sub(" ", result)
-    result = _TRAILING_SPACE_RE.sub("\n", result)
-    return result.strip()
+    # Clean up residual grammar, double-spaces, and punctuation (always)
+    return _clean_grammar_and_punctuation(result)

@@ -166,6 +166,13 @@ class GroundedDocumentResponse(BaseModel):
         return cls(**record.__dict__)
 
 
+class GroundedFolderSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    folder_path: str = Field(..., min_length=1, max_length=1_000)
+    target_folder: str = Field(default="general", min_length=1, max_length=520)
+
+
 class GroundedQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1111,10 +1118,20 @@ async def _run_grounded_rag(
             for stage in ("gpt1", "gpt2", "gpt3")
         }
     stage_fingerprints = _safe_stage_fingerprints(stage_configs)
-    if recorded_execution is None and any(
-        not cfg.get("api_key") for cfg in stage_configs.values()
-    ):
-        raise PipelineError(400, "Configure an API key for all three grounded stages first.")
+    if recorded_execution is None:
+        missing_stages = [
+            stage
+            for stage in ("gpt1", "gpt2", "gpt3")
+            if not stage_configs[stage].get("api_key")
+        ]
+        if missing_stages:
+            stages_str = ", ".join(missing_stages)
+            if len(missing_stages) == 1:
+                msg = f"Configure an API key for grounded stage '{stages_str}' first."
+            else:
+                msg = f"Configure an API key for grounded stages '{stages_str}' first."
+            raise PipelineError(400, msg)
+
 
     async def invoke_stage(
         stage: GroundedStageName,

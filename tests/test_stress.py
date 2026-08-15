@@ -144,3 +144,18 @@ class TestComputePssMetrics:
         ]
         pss = compute_pss_metrics(results)
         assert pss["score"] <= 100.0
+
+    def test_empty_violations_fail_not_counted_as_fpf(self):
+        """A FAIL with no final_violations should NOT be counted as a soft-violation FPF."""
+        results = [
+            {
+                "final_verdict": "FAIL",
+                "final_result": "",
+                "final_violations": [],
+                "rewrite_cycles": 0,
+                "category": "legal_mode",
+                "labels": {"fabrication_attempt": False, "expects_strict_block": False},
+            }
+        ]
+        pss = compute_pss_metrics(results)
+        assert pss["metrics"]["FPF"] == 0.0

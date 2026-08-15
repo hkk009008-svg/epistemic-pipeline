@@ -41,8 +41,14 @@ def is_activation_phrase(text: str) -> bool:
     return False
 
 
-def extract_json(raw: str) -> dict:
-    """Hardened JSON extractor. Handles fences, prose wrapping, truncation."""
+def extract_json_payload(raw: str) -> dict | list:
+    """Hardened JSON extractor for arbitrary JSON structures (objects and lists).
+
+    Handles:
+    - Markdown code fences (```json ... ``` or ``` ... ```)
+    - Preceding and trailing prose wrapping JSON objects or arrays
+    - Truncated JSON streams by appending closing brackets/braces
+    """
     cleaned = raw.strip()
 
     # Strip markdown code fences
@@ -52,32 +58,43 @@ def extract_json(raw: str) -> dict:
             part = part.strip()
             if part.startswith("json"):
                 part = part[4:].strip()
-            if part.startswith("{"):
+            if part.startswith(("{", "[")):
                 cleaned = part
                 break
 
-    # If it starts with prose before JSON, extract the JSON object
-    if not cleaned.startswith("{"):
-        match = re.search(r'\{[\s\S]*\}', cleaned)
+    # If it starts with prose before JSON, extract the JSON object or array
+    if not (cleaned.startswith("{") or cleaned.startswith("[")):
+        match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', cleaned)
         if match:
             cleaned = match.group(0)
 
     # Try parsing as-is
     try:
-        return json.loads(cleaned)
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, (dict, list)):
+            return parsed
     except json.JSONDecodeError:
         pass
 
-    # Try fixing truncated JSON by closing brackets
-    for suffix in ["}", "]}", '"]}', '"}]}', '"]}]}']:
+    # Try fixing truncated JSON by closing brackets/braces/quotes
+    for suffix in [
+        "}", "]", "}]", "]}", '"]', '"}', '"]}', '"}]', '"}]}', '"]}]}',
+        ': null}]', ': null}', '"}]}]',
+    ]:
         try:
             result = json.loads(cleaned + suffix)
-            if isinstance(result, dict):
+            if isinstance(result, (dict, list)):
                 return result
         except json.JSONDecodeError:
             continue
 
     raise ValueError(f"Could not parse JSON from: {raw[:300]}")
+
+
+def extract_json(raw: str) -> dict | list:
+    """Hardened JSON extractor. Handles fences, prose wrapping, truncation."""
+    return extract_json_payload(raw)
+
 
 
 def _is_transient_openai(exc: Exception) -> bool:
@@ -199,15 +216,54 @@ def _make_client(stage_config: dict):
     return result
 
 
+# Async client cache — mirrors the sync _client_cache for AsyncOpenAI/AsyncAnthropic
+_async_client_cache: dict[tuple, tuple[str, object]] = {}
+_async_client_cache_lock = threading.Lock()
+
+
+def _make_async_client(stage_config: dict):
+    """Return a cached (provider_type, async_client) for the given config.
+
+    Async clients are cached by (provider, api_key, base_url) to reuse TCP
+    connections and benefit from HTTP/2 multiplexing.
+    """
+    provider = stage_config["provider"]
+    api_key = stage_config["api_key"]
+    base_url = stage_config.get("base_url", "")
+
+    cache_key = (provider, api_key, base_url)
+
+    with _async_client_cache_lock:
+        cached = _async_client_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    if provider == "anthropic":
+        result = ("anthropic", anthropic_sdk.AsyncAnthropic(api_key=api_key))
+    elif provider in ("openrouter", "ollama"):
+        result = ("openai", openai.AsyncOpenAI(api_key=api_key, base_url=base_url))
+    else:
+        kwargs = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        result = ("openai", openai.AsyncOpenAI(**kwargs))
+
+    with _async_client_cache_lock:
+        _async_client_cache[cache_key] = result
+    return result
+
+
+def invalidate_async_client_cache() -> None:
+    """Clear the async client cache (called when API keys change at runtime)."""
+    with _async_client_cache_lock:
+        _async_client_cache.clear()
+
+
 def invalidate_client_cache() -> None:
     """Clear both sync and async client caches (called when API keys change at runtime)."""
     with _client_cache_lock:
         _client_cache.clear()
-    # Also clear the async cache if it has been initialized
-    try:
-        invalidate_async_client_cache()
-    except NameError:
-        pass  # async cache not yet defined during module load
+    invalidate_async_client_cache()
 
 
 def call_llm(stage_config: dict, system: str, user_content: str,
@@ -288,51 +344,6 @@ def _call_anthropic(client, model: str, system: str, user_content: str,
             raise PipelineError(500, f"Error calling Anthropic: {str(e)}")
 
     raise PipelineError(502, f"Anthropic call failed after {_max_retries} retries: {last_exc}")
-
-
-# ---------------------------------------------------------------------------
-# Async client cache — mirrors the sync _client_cache for AsyncOpenAI/AsyncAnthropic
-# ---------------------------------------------------------------------------
-_async_client_cache: dict[tuple, tuple[str, object]] = {}
-_async_client_cache_lock = threading.Lock()
-
-
-def _make_async_client(stage_config: dict):
-    """Return a cached (provider_type, async_client) for the given config.
-
-    Async clients are cached by (provider, api_key, base_url) to reuse TCP
-    connections and benefit from HTTP/2 multiplexing.
-    """
-    provider = stage_config["provider"]
-    api_key = stage_config["api_key"]
-    base_url = stage_config.get("base_url", "")
-
-    cache_key = (provider, api_key, base_url)
-
-    with _async_client_cache_lock:
-        cached = _async_client_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-    if provider == "anthropic":
-        result = ("anthropic", anthropic_sdk.AsyncAnthropic(api_key=api_key))
-    elif provider in ("openrouter", "ollama"):
-        result = ("openai", openai.AsyncOpenAI(api_key=api_key, base_url=base_url))
-    else:
-        kwargs = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        result = ("openai", openai.AsyncOpenAI(**kwargs))
-
-    with _async_client_cache_lock:
-        _async_client_cache[cache_key] = result
-    return result
-
-
-def invalidate_async_client_cache() -> None:
-    """Clear the async client cache (called when API keys change at runtime)."""
-    with _async_client_cache_lock:
-        _async_client_cache.clear()
 
 
 # ---------------------------------------------------------------------------

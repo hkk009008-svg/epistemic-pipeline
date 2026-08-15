@@ -8,7 +8,12 @@ import json
 
 import pytest
 
-from pipeline.helpers import extract_json, is_activation_phrase, supports_structured_outputs
+from pipeline.helpers import (
+    extract_json,
+    extract_json_payload,
+    is_activation_phrase,
+    supports_structured_outputs,
+)
 
 
 # ===================================================================
@@ -325,3 +330,42 @@ class TestSupportsStructuredOutputs:
 
     def test_anthropic(self):
         assert supports_structured_outputs({"provider": "anthropic", "base_url": ""}) is False
+
+
+# ===================================================================
+# extract_json_payload() -- objects and lists
+# ===================================================================
+
+
+class TestExtractJsonPayload:
+    """extract_json_payload() handles both JSON objects and arrays."""
+
+    def test_json_list_simple(self):
+        raw = '["claim 1", "claim 2", "claim 3"]'
+        assert extract_json_payload(raw) == ["claim 1", "claim 2", "claim 3"]
+
+    def test_json_list_with_objects(self):
+        raw = '[{"id": 1, "text": "fact A"}, {"id": 2, "text": "fact B"}]'
+        result = extract_json_payload(raw)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["id"] == 1
+
+    def test_json_list_in_markdown_fence(self):
+        raw = "```json\n[\"alpha\", \"beta\"]\n```"
+        assert extract_json_payload(raw) == ["alpha", "beta"]
+
+    def test_json_list_with_prose(self):
+        raw = "Here is the list of extracted claims:\n[{\"claim\": \"A\"}]\nHope this helps!"
+        assert extract_json_payload(raw) == [{"claim": "A"}]
+
+    def test_json_list_truncated(self):
+        raw = '[{"id": 1}, {"id": 2'
+        result = extract_json_payload(raw)
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+    def test_extract_json_payload_raises_on_garbage(self):
+        raw = "This is total garbage with no brackets"
+        with pytest.raises(ValueError, match="Could not parse JSON"):
+            extract_json_payload(raw)

@@ -15,6 +15,7 @@ from pipeline.grounded_rag import (
     VerifierOutput,
     run_grounded_rag,
 )
+from pipeline.helpers import PipelineError
 from pipeline.knowledge_store import (
     EvidenceItem,
     EvidencePacket,
@@ -408,3 +409,82 @@ async def test_supported_subset_is_rendered_as_partial(monkeypatch):
     assert "2023" not in response.answer
     assert response.contradicted_claim_count == 0
     assert response.conflict_claim_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("missing_stage", "configured_stages"),
+    [
+        ("gpt1", {"gpt2": "key2", "gpt3": "key3"}),
+        ("gpt2", {"gpt1": "key1", "gpt3": "key3"}),
+        ("gpt3", {"gpt1": "key1", "gpt2": "key2"}),
+    ],
+)
+async def test_grounded_rag_missing_single_stage_api_key(
+    monkeypatch, missing_stage: str, configured_stages: dict[str, str]
+):
+    """R5: Test granular stage error message when a single stage API key is missing."""
+    packet = _packet(with_items=True)
+    store = StubStore(packet)
+
+    configs = {
+        "gpt1": {"provider": "openai", "api_key": configured_stages.get("gpt1", ""), "model": "gpt1", "base_url": ""},
+        "gpt2": {"provider": "openai", "api_key": configured_stages.get("gpt2", ""), "model": "gpt2", "base_url": ""},
+        "gpt3": {"provider": "openai", "api_key": configured_stages.get("gpt3", ""), "model": "gpt3", "base_url": ""},
+    }
+    monkeypatch.setattr(grounded.config, "get_stage_config", lambda stage: configs[stage])
+
+    with pytest.raises(PipelineError) as exc_info:
+        await run_grounded_rag(
+            GroundedQueryRequest(prompt="What is Alice's favorite color?"),
+            store=store,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert str(exc_info.value) == f"Configure an API key for grounded stage '{missing_stage}' first."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("missing_stages", "expected_msg"),
+    [
+        (
+            ["gpt1", "gpt3"],
+            "Configure an API key for grounded stages 'gpt1, gpt3' first.",
+        ),
+        (
+            ["gpt2", "gpt3"],
+            "Configure an API key for grounded stages 'gpt2, gpt3' first.",
+        ),
+        (
+            ["gpt1", "gpt2", "gpt3"],
+            "Configure an API key for grounded stages 'gpt1, gpt2, gpt3' first.",
+        ),
+    ],
+)
+async def test_grounded_rag_missing_multiple_stages_api_key(
+    monkeypatch, missing_stages: list[str], expected_msg: str
+):
+    """R5: Test granular stage error message when multiple stage API keys are missing."""
+    packet = _packet(with_items=True)
+    store = StubStore(packet)
+
+    configs = {
+        stage: {
+            "provider": "openai",
+            "api_key": "" if stage in missing_stages else "valid_key",
+            "model": stage,
+            "base_url": "",
+        }
+        for stage in ("gpt1", "gpt2", "gpt3")
+    }
+    monkeypatch.setattr(grounded.config, "get_stage_config", lambda stage: configs[stage])
+
+    with pytest.raises(PipelineError) as exc_info:
+        await run_grounded_rag(
+            GroundedQueryRequest(prompt="What is Alice's favorite color?"),
+            store=store,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert str(exc_info.value) == expected_msg

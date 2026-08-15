@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import pytest
 
-from pipeline.sanitizer import route_prompt, sanitize_output
-
+from pipeline.sanitizer import (
+    _clean_grammar_and_punctuation,
+    route_prompt,
+    sanitize_output,
+)
 
 # ===================================================================
 # route_prompt()
@@ -636,3 +639,103 @@ class TestSanitizeTypicalityDoesNotShieldPercents:
         result = sanitize_output(text, flags_all_false)
         assert "73%" not in result
         assert "Unknown(Actionable)" in result
+
+
+class TestSanitizeNaturalSentenceStructure:
+    """R4: Verify natural sentence structure, grammar, and clean punctuation."""
+
+    @pytest.mark.parametrize(
+        ("input_text", "expected_fragment"),
+        [
+            ("This action could help with your symptoms.", "This action addresses your symptoms."),
+            ("This action may help with recovery.", "This action addresses recovery."),
+            ("An attorney could assist in filing the motion.", "An attorney addresses filing the motion."),
+            ("An expert could assist with documentation.", "An expert addresses documentation."),
+            ("This strategy could help to reduce costs.", "This strategy is intended to reduce costs."),
+            ("This strategy may help to resolve issues.", "This strategy is intended to resolve issues."),
+            ("This intervention will improve your situation.", "This intervention addresses your situation."),
+            ("This change will reduce risk.", "This change addresses risk."),
+            ("This measure will increase throughput.", "This measure addresses throughput."),
+            ("This change could potentially cause delay.", "This change may cause delay."),
+        ],
+    )
+    def test_outcome_promise_natural_replacement(
+        self, input_text: str, expected_fragment: str, flags_all_false: dict
+    ):
+        result = sanitize_output(input_text, flags_all_false)
+        assert result == expected_fragment
+
+    def test_no_dangling_preposition_at_sentence_boundary(self, flags_all_false: dict):
+        text = "The proposal was agreed to ."
+        result = sanitize_output(text, flags_all_false)
+        assert result == "The proposal was agreed."
+
+    def test_space_before_punctuation_cleaned(self, flags_all_false: dict):
+        text = "First point . Second point , third point ; fourth point : end !"
+        result = sanitize_output(text, flags_all_false)
+        assert result == "First point. Second point, third point; fourth point: end!"
+
+    def test_duplicate_and_colliding_punctuation_cleaned(self, flags_all_false: dict):
+        text = "Statement one.. Statement two ,. Statement three ,,"
+        result = sanitize_output(text, flags_all_false)
+        assert result == "Statement one. Statement two. Statement three,"
+
+    def test_bare_percent_punctuation_normalized(self, flags_all_false: dict):
+        text = "The success rate was 50% ."
+        result = sanitize_output(text, flags_all_false)
+        assert "Unknown(Actionable): No authoritative dataset available for this figure." in result
+        assert " ." not in result
+        assert ".." not in result
+
+    def test_markdown_bullet_lists_preserved(self, flags_all_false: dict):
+        text = "- First item.\n- Second item.\n- Third item."
+        result = sanitize_output(text, flags_all_false)
+        assert result == "- First item.\n- Second item.\n- Third item."
+
+
+# ===================================================================
+# _clean_grammar_and_punctuation()
+# ===================================================================
+
+
+class TestCleanGrammarAndPunctuation:
+    """Unit tests for _clean_grammar_and_punctuation post-processor."""
+
+    def test_clean_empty_and_whitespace(self):
+        assert _clean_grammar_and_punctuation("") == ""
+        assert _clean_grammar_and_punctuation("   ") == ""
+        assert _clean_grammar_and_punctuation("... ,,, ...") == ""
+
+    def test_clean_single_word(self):
+        assert _clean_grammar_and_punctuation("Word") == "Word"
+
+    def test_clean_orphaned_leading_coordinators(self):
+        raw = ",, whereas Plan B provides $100 credits [2]."
+        cleaned = _clean_grammar_and_punctuation(raw)
+        assert cleaned == "Plan B provides $100 credits [2]."
+
+    def test_clean_leading_and_but(self):
+        assert _clean_grammar_and_punctuation("And secondary endpoints were met.") == "Secondary endpoints were met."
+        assert _clean_grammar_and_punctuation("But the second test passed.") == "The second test passed."
+        assert _clean_grammar_and_punctuation("While the second test passed.") == "The second test passed."
+
+    def test_clean_dangling_prepositions(self):
+        raw = "The application was submitted for, and approved with."
+        cleaned = _clean_grammar_and_punctuation(raw)
+        assert cleaned == "The application was submitted, and approved."
+
+    def test_clean_colliding_punctuation(self):
+        raw = "First clause,, second clause,. Third clause.. Fourth clause."
+        cleaned = _clean_grammar_and_punctuation(raw)
+        assert ",," not in cleaned
+        assert ",." not in cleaned
+        assert ".." not in cleaned
+        assert cleaned == "First clause, second clause. Third clause. Fourth clause."
+
+    def test_clean_multiline_messy_input(self):
+        raw = ",,, ... The report indicates progress.\n ,, The secondary filing was approved with .\n"
+        cleaned = _clean_grammar_and_punctuation(raw)
+        assert not cleaned.startswith(",")
+        assert not cleaned.startswith(".")
+        assert "The report indicates progress." in cleaned
+        assert "The secondary filing was approved." in cleaned

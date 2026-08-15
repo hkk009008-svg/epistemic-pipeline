@@ -137,7 +137,8 @@ def compute_confidence(
     observed = inference = hypothesis = unsupported = user_provided = 0
 
     for entry in claim_table:
-        cat = (entry.category if isinstance(entry.category, str) else str(entry.category)).lower().strip()
+        cat_raw = getattr(entry, "category", None) if not isinstance(entry, dict) else entry.get("category", "")
+        cat = (cat_raw if isinstance(cat_raw, str) else str(cat_raw or "")).lower().strip()
         if cat in ("supported", "observed"):
             observed += 1
         elif cat == "inference":

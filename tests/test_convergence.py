@@ -170,3 +170,35 @@ class TestShouldContinueRewriteMaxLoops:
             [{"type": "T4", "severity": "soft"}],  # Converged — would stop anyway
         ]
         assert should_continue_rewrite(history) is False
+
+
+class TestClosedLoopConvergence:
+    """Tests for closed-loop repair convergence in <= 2 turns."""
+
+    def test_two_turn_hard_limit_stops_further_rewrites(self):
+        """When max_loops=2, loop stops after 2 rewrite attempts even if improving."""
+        history = [
+            [{"type": "T1", "severity": "hard"}, {"type": "T3", "severity": "hard"}],  # Turn 0
+            [{"type": "T1", "severity": "hard"}],                                       # Turn 1 (improved)
+            [{"type": "T5", "severity": "soft"}],                                       # Turn 2 (improved)
+        ]
+        # At Turn 2 (3 history entries), should_continue_rewrite must return False
+        assert should_continue_rewrite(history, max_loops=2) is False
+
+    def test_one_turn_pass_does_not_call_should_continue(self):
+        """Turn 0 to Turn 1 single repair step."""
+        history = [
+            [{"type": "T1", "severity": "hard"}],
+            [{"type": "T5", "severity": "soft"}],
+        ]
+        assert should_continue_rewrite(history, max_loops=2) is True
+
+    def test_oscillation_with_negative_constraints_stops_early(self):
+        """If Turn 1 replaces Turn 0 error with a different error without improvement, stops immediately."""
+        turn0 = [{"type": "T1", "severity": "hard", "detail": "Fabricated citation [5]"}]
+        turn1 = [{"type": "T3", "severity": "hard", "detail": "Causal claim without citation"}]
+        history = [turn0, turn1]
+        delta = compute_finding_delta(turn0, turn1)
+        assert delta["oscillating"] is True
+        assert should_continue_rewrite(history, max_loops=2) is False
+

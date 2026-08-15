@@ -6,6 +6,7 @@ from pipeline.search import (
     rank_sources,
     compute_search_quality,
     should_search,
+    deduplicate_sources,
 )
 from pipeline.models import SearchSource
 
@@ -164,3 +165,61 @@ class TestShouldSearch:
         result = should_search(flags)
         # Either False (no tavily) or False (no flags)
         assert result is False or cfg.is_tavily_enabled()
+
+
+# ---------------------------------------------------------------------------
+# perform_web_search formatting & boundary tags
+# ---------------------------------------------------------------------------
+
+class TestPerformWebSearchFormatting:
+    def test_untrusted_evidence_encapsulation(self, monkeypatch):
+        from unittest.mock import MagicMock
+        from pipeline.search import perform_web_search
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [
+                {
+                    "title": "CDC Guidance",
+                    "url": "https://www.cdc.gov/flu",
+                    "content": "Flu vaccines prevent illness.",
+                    "score": 0.9,
+                }
+            ],
+            "answer": "Vaccines prevent disease.",
+        }
+        monkeypatch.setattr("pipeline.search._get_tavily_client", lambda: mock_client)
+
+        sources, raw_context = perform_web_search("flu vaccine")
+        assert len(sources) == 1
+        assert '<untrusted_evidence id="1" url="https://www.cdc.gov/flu" authority="high-gov-edu">' in raw_context
+        assert "</untrusted_evidence>" in raw_context
+        assert "Flu vaccines prevent illness." in raw_context
+
+
+# ---------------------------------------------------------------------------
+# deduplicate_sources
+# ---------------------------------------------------------------------------
+
+class TestDeduplicateSources:
+    def test_empty_sources(self):
+        assert deduplicate_sources([]) == []
+
+    def test_deduplicate_identical_urls(self):
+        s1 = SearchSource(title="Title 1", url="https://example.com/page", snippet="Snippet 1", score=0.8)
+        s2 = SearchSource(title="Title 2", url="https://example.com/page", snippet="Snippet 2", score=0.6)
+        deduped = deduplicate_sources([s1, s2])
+        assert len(deduped) == 1
+        assert deduped[0].title == "Title 1"
+
+    def test_deduplicate_tracking_parameters_and_trailing_slashes(self):
+        s1 = SearchSource(title="Page A", url="https://example.com/page/", snippet="Text A", score=0.9)
+        s2 = SearchSource(title="Page A variant", url="https://example.com/page", snippet="Text A", score=0.7)
+        deduped = deduplicate_sources([s1, s2])
+        assert len(deduped) == 1
+
+    def test_retains_distinct_urls(self):
+        s1 = SearchSource(title="Page 1", url="https://example.com/one", snippet="Text 1", score=0.9)
+        s2 = SearchSource(title="Page 2", url="https://example.com/two", snippet="Text 2", score=0.8)
+        deduped = deduplicate_sources([s1, s2])
+        assert len(deduped) == 2

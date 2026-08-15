@@ -19,6 +19,15 @@ def is_high_stakes(flags: dict) -> bool:
     )
 
 
+def _get_claim_attr(ct: object, attr: str, default: str = "") -> str:
+    """Safely extract string attribute from either a ClaimEntry instance or a dict."""
+    if isinstance(ct, dict):
+        val = ct.get(attr, default)
+    else:
+        val = getattr(ct, attr, default)
+    return str(val or default)
+
+
 def check_claim_table_consistency(
     claim_table: list,
     findings: list,
@@ -50,8 +59,9 @@ def check_claim_table_consistency(
         if nli.get("confidence_tier") == "strong_contradiction":
             # Check if this claim was in the claim table as Observed
             for ct in claim_table:
-                cat = ct.category.lower().strip() if hasattr(ct, 'category') else ""
-                if cat in ("supported", "observed") and _text_overlap(claim_text, ct.claim):
+                cat = _get_claim_attr(ct, "category").lower().strip()
+                ct_claim = _get_claim_attr(ct, "claim") or _get_claim_attr(ct, "text")
+                if cat in ("supported", "observed") and _text_overlap(claim_text, ct_claim):
                     issues.append({
                         "type": "nli_gpt2_mismatch",
                         "detail": f'NLI contradicts claim GPT-2 marked Observed: "{claim_text[:80]}"',
@@ -62,7 +72,7 @@ def check_claim_table_consistency(
     # Check 2: High proportion of claims without justification
     unjustified = sum(
         1 for ct in claim_table
-        if not getattr(ct, 'justification', '') or len(getattr(ct, 'justification', '')) < 10
+        if len(_get_claim_attr(ct, "justification")) < 10
     )
     if len(claim_table) > 0 and unjustified / len(claim_table) > 0.5:
         issues.append({
@@ -76,7 +86,7 @@ def check_claim_table_consistency(
         # Count how many claims are factual (not user-provided or unknown)
         factual = sum(
             1 for ct in claim_table
-            if getattr(ct, 'category', '').lower().strip() not in ('user-provided', 'unknown', 'hypothesis')
+            if _get_claim_attr(ct, "category").lower().strip() not in ('user-provided', 'unknown', 'hypothesis')
         )
         if factual >= 4:
             issues.append({
@@ -207,7 +217,7 @@ def meta_verify_fail(
     # Check if >50% of unsupported claims are likely common knowledge
     unsupported_claims = [
         ct for ct in claim_table
-        if (ct.category if isinstance(ct.category, str) else "").lower().strip() == "unsupported"
+        if _get_claim_attr(ct, "category").lower().strip() == "unsupported"
     ]
     if unsupported_claims and len(claim_table) > 0:
         unsupported_ratio = len(unsupported_claims) / len(claim_table)

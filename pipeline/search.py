@@ -137,6 +137,35 @@ def rank_sources(sources: list[SearchSource]) -> list[SearchSource]:
     return sorted(sources, key=lambda s: -s.score)
 
 
+def deduplicate_sources(sources: list[SearchSource]) -> list[SearchSource]:
+    """Deduplicate search sources by normalized URL and content snippet uniqueness.
+
+    - Normalizes URLs (strips fragments, trailing slashes, tracking query params).
+    - Retains the first (or highest-scoring) occurrence for each canonical URL.
+    """
+    if not sources:
+        return []
+
+    seen_urls: set[str] = set()
+    unique_sources: list[SearchSource] = []
+
+    for s in sources:
+        try:
+            parsed = urlparse(s.url)
+            clean_host = (parsed.hostname or "").lower()
+            clean_path = parsed.path.rstrip("/")
+            canonical_url = f"{parsed.scheme.lower()}://{clean_host}{clean_path}" if clean_host else s.url.strip()
+        except Exception:
+            canonical_url = s.url.strip()
+
+        if canonical_url in seen_urls:
+            continue
+        seen_urls.add(canonical_url)
+        unique_sources.append(s)
+
+    return unique_sources
+
+
 def compute_search_quality(sources: list[SearchSource]) -> dict:
     """Compute search quality metrics for the result set."""
     if not sources:
@@ -274,21 +303,22 @@ def perform_web_search(query: str, max_results: int = 5) -> tuple[list[SearchSou
             score=r.get("score", 0.0),
         ))
 
-    # Rank by authority
-    sources = rank_sources(sources)
+    # Deduplicate and rank by authority
+    sources = rank_sources(deduplicate_sources(sources))
 
     context_lines = []
     for i, s in enumerate(sources, 1):
         authority = compute_source_authority(s.url)
         authority_label = ""
         if authority >= 1.0:
-            authority_label = " [HIGH AUTHORITY - gov/edu]"
+            authority_label = " authority=\"high-gov-edu\""
         elif authority >= 0.9:
-            authority_label = " [TRUSTED SOURCE]"
+            authority_label = " authority=\"trusted\""
         context_lines.append(
-            f"[{i}] {s.title}{authority_label}\n"
-            f"    URL: {s.url}\n"
-            f"    Excerpt: {s.snippet}"
+            f'<untrusted_evidence id="{i}" url="{s.url}"{authority_label}>\n'
+            f"Title: {s.title}\n"
+            f"Excerpt: {s.snippet}\n"
+            f"</untrusted_evidence>"
         )
 
     raw_context = "\n\n".join(context_lines)
